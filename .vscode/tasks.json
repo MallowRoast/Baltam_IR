@@ -1,0 +1,93 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "CMake: configure",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "-S",
+        "${workspaceFolder}",
+        "-B",
+        "${workspaceFolder}/build",
+        "-DCMAKE_PREFIX_PATH=${workspaceFolder}/deps/core",
+        "-DCMAKE_BUILD_TYPE=Debug",
+        "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "LD_LIBRARY_PATH": "/opt/Baltamatica/lib"
+        }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "CMake: build",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--build",
+        "${workspaceFolder}/build"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "LD_LIBRARY_PATH": "/opt/Baltamatica/lib"
+        }
+      },
+      "dependsOn": [
+        "CMake: configure"
+      ],
+      "dependsOrder": "sequence",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": [
+        "$gcc"
+      ]
+    },
+    {
+      "label": "CMake: clean",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--build",
+        "${workspaceFolder}/build",
+        "--target",
+        "clean"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "LD_LIBRARY_PATH": "/opt/Baltamatica/lib"
+        }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "CMake: rebuild",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--build",
+        "${workspaceFolder}/build",
+        "--clean-first"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "LD_LIBRARY_PATH": "/opt/Baltamatica/lib"
+        }
+      },
+      "dependsOn": [
+        "CMake: configure"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": [
+        "$gcc"
+      ]
+    }
+  ]
+}

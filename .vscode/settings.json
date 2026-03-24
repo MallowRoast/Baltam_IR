@@ -1,0 +1,30 @@
+{
+  "cmake.sourceDirectory": "${workspaceFolder}",
+  "cmake.buildDirectory": "${workspaceFolder}/build",
+  "cmake.generator": "Ninja",
+  "cmake.configureOnOpen": true,
+  "cmake.configureArgs": [
+    "-DCMAKE_PREFIX_PATH=${workspaceFolder}/deps/core",
+    "-DCMAKE_BUILD_TYPE=Debug",
+    "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
+  ],
+  "cmake.configureSettings": {
+    "baltam_core_DIR": "${workspaceFolder}/deps/core/lib/cmake/baltam_core",
+    "baltam_kernel_DIR": "${workspaceFolder}/deps/core/lib/cmake/baltam_kernel"
+  },
+  "cmake.configureEnvironment": {
+    "LD_LIBRARY_PATH": "/opt/Baltamatica/lib"
+  },
+  "cmake.buildEnvironment": {
+    "LD_LIBRARY_PATH": "/opt/Baltamatica/lib"
+  },
+  "terminal.integrated.env.linux": {
+    "LD_LIBRARY_PATH": "/opt/Baltamatica/lib"
+  },
+  "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+  "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json",
+  "C_Cpp.default.includePath": [
+    "${workspaceFolder}/deps/core/include",
+    "${workspaceFolder}/deps/core/include/bt_ast_interface"
+  ]
+}

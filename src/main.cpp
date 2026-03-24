@@ -2,6 +2,8 @@
 // Created by zj on 25-7-3.
 //
 
+#include <cstdlib>
+
 #include "bt_ast_interface.h"
 
 using namespace baltam;
@@ -114,6 +116,8 @@ CFG parse_cfg(ast_ptr ast) {
     switch (ast->nodetype) {
         // case
     }
+
+    return cfg;
 }
 
 int main() {
@@ -142,7 +146,7 @@ int main() {
         auto ast = ret->ast;
     // }
 
-    auto symptr = BALTAM_DYNAMIC_CAST(symref, ast->branch[0]);
+    auto symptr = std::static_pointer_cast<symref>(ast->branch[0]);
 
     // 对 ret 进行处理
     // ...
@@ -151,6 +155,11 @@ int main() {
     // 结束，进行整个库的析构
     // 后续无法进行 API 调用
     bt_ast_interface::finalize();
+
+    // The Baltam runtime leaves a joinable background thread behind.
+    // Exit immediately after finalize to avoid hitting std::terminate()
+    // during global thread-vector destruction.
+    std::_Exit(0);
 }
 
 

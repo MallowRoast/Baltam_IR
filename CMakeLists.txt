@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.11)
 
 project(TEST_KERNEL)
 
-cmake_policy(SET CMP0167 OLD)
+# cmake_policy(SET CMP0167 OLD)
 
 add_executable(main src/main.cpp)
 
