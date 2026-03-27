@@ -5,6 +5,7 @@ project(TEST_KERNEL)
 # cmake_policy(SET CMP0167 OLD)
 
 add_executable(main src/main.cpp)
+target_compile_definitions(main PRIVATE BALTAM_IR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 # boost
 find_package(Boost REQUIRED)

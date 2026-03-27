@@ -3,164 +3,79 @@
 //
 
 #include <cstdlib>
+#include <iostream>
+#include <memory>
+#include <string>
+#include <vector>
 
 #include "bt_ast_interface.h"
 
 using namespace baltam;
 
-struct Instruction {};
+namespace {
 
-struct node_num : Instruction {
-    std::string data;
+constexpr const char* kScriptRelativePath = "/test/simple_demo.m";
 
-    template <typename T>
-    T as_num() {
-        return std::stod(data);
-    }
-};
-
-struct node_str : Instruction {
-    std::string data;
-};
-
-struct node_char : Instruction {
-    std::string data;
-};
-
-struct node_call : Instruction {
-    std::string fun;
-    std::vector<std::shared_ptr<Instruction>> args;
-
-    node_call() = default;
-    explicit node_call(const std::string_view fun) {
-        this->fun = fun;
-    }
-    explicit node_call(const std::string_view fun,
-        std::vector<std::shared_ptr<Instruction>> args) {
-        this->fun = fun;
-        this->args = args;
-    }
-};
-
-struct node_name : Instruction {
-    std::string name;
-};
-
-struct node_goto {
-    int label;
-};
-
-struct node_goto_if : Instruction {
-    Instruction* val;
-    int label_true;
-    int label_false;
-};
-
-struct BasicBlock {
-    int label;
-    std::vector<Instruction*> data;
-    std::vector<BasicBlock*> preds;
-    std::vector<BasicBlock*> succs;
-};
-
-struct CFG {
-    BasicBlock* entry = nullptr;
-};
-
-std::shared_ptr<Instruction> parse_node(ast_ptr ast) {
-    if (ast == nullptr) { return nullptr; }
-
-    std::shared_ptr<Instruction> node = nullptr;
-    switch (ast->nodetype) {
-    case node_empty:
-        break;
-    case node_exit:
-        node = std::make_shared<node_call>("exit");
-        break;
-    case node_nop:
-        break;
-    case node_andy_end_of_string:
-        break;
-    case node_greater_than:
-        {
-            std::shared_ptr<Instruction> lhs = parse_node(ast->branch[0]);
-            std::shared_ptr<Instruction> rhs = parse_node(ast->branch[1]);
-            std::vector<std::shared_ptr<Instruction>> args{lhs, rhs};
-            node = std::make_shared<node_call>("gt", args);
-            break;
-        }
-    case node_less_than:
-        {
-            std::shared_ptr<Instruction> lhs = parse_node(ast->branch[0]);
-            std::shared_ptr<Instruction> rhs = parse_node(ast->branch[1]);
-            std::vector<std::shared_ptr<Instruction>> args{lhs, rhs};
-            node = std::make_shared<node_call>("lt", args);
-            break;
-        }
-
-    default:
-        break;
+void print_parsed_ast(const std::shared_ptr<pcdata>& parsed_unit, std::size_t index) {
+    if (parsed_unit == nullptr) {
+        std::cout << "pcdata[" << index << "] is null" << std::endl;
+        return;
     }
 
-    return node;
+    std::cout << "pcdata[" << index << "]" << std::endl;
+    std::cout << "  filename: " << parsed_unit->filename << std::endl;
+    std::cout << "  is_mscript: " << std::boolalpha << parsed_unit->is_mscript() << std::endl;
+    std::cout << "  is_mfun: " << std::boolalpha << parsed_unit->is_mfun() << std::endl;
+
+    if (parsed_unit->ast == nullptr) {
+        std::cout << "  ast: null" << std::endl;
+        return;
+    }
+
+    std::cout << "  ast2str:" << std::endl;
+    std::cout << ast2str(parsed_unit->ast) << std::endl;
+
+    std::cout << "  ast tree:" << std::endl;
+    printAst(parsed_unit->ast, nullptr, false);
+    std::cout << std::endl;
 }
 
-CFG parse_cfg(ast_ptr ast) {
-    CFG cfg;
-
-    if (ast == nullptr) {
-        return cfg;
-    }
-
-    int label = 0;
-    switch (ast->nodetype) {
-        // case
-    }
-
-    return cfg;
-}
+}  // namespace
 
 int main() {
-    // 初始化
-    bt_ast_interface::initialize();
+    const std::string script_path = std::string(BALTAM_IR_SOURCE_DIR) + kScriptRelativePath;
 
-    // 添加搜索路径
-    auto flag = bt_ast_interface::append_path("~/Desktop", true);
+    int exit_code = 0;
+    const int init_ret = bt_ast_interface::initialize();
+    if (init_ret != 0) {
+        std::cerr << "bt_ast_interface::initialize failed, code = " << init_ret << std::endl;
+        return 1;
+    }
 
-    // std::string filename = "~/Desktop/test.m";
-    //
-    // // auto pth = std::filesystem::canonical(std::filesystem::u8path(filename));
-    //
-    // std::ifstream ifs(pth);
-    // std::string msg;
-    // if (!ifs.is_open()) {
-    //     msg = str_format("文件 '%s' 打开失败。", filename.c_str());
-    //     // return pdptr_vec{};
-    // }
+    std::string msg;
+    const auto parsed_units = bt_ast_interface::parse_mfile(script_path, msg);
 
-    // 解析文件
+    if (!msg.empty()) {
+        std::cout << "parser message: " << msg << std::endl;
+    }
 
-    // {
-        std::string msg;
-        auto ret = bt_ast_interface::parse_stdin("sin", msg);
-        auto ast = ret->ast;
-    // }
+    if (parsed_units.empty()) {
+        std::cerr << "No AST generated for file: " << script_path << std::endl;
+        exit_code = 1;
+    } else {
+        std::cout << "Parsed file: " << script_path << std::endl;
+        for (std::size_t i = 0; i < parsed_units.size(); ++i) {
+            print_parsed_ast(parsed_units[i], i);
+        }
+    }
 
-    auto symptr = std::static_pointer_cast<symref>(ast->branch[0]);
+    std::cout << std::flush;
+    std::cerr << std::flush;
 
-    // 对 ret 进行处理
-    // ...
-
-
-    // 结束，进行整个库的析构
-    // 后续无法进行 API 调用
     bt_ast_interface::finalize();
 
     // The Baltam runtime leaves a joinable background thread behind.
     // Exit immediately after finalize to avoid hitting std::terminate()
     // during global thread-vector destruction.
-    std::_Exit(0);
+    std::_Exit(exit_code);
 }
-
-
-
