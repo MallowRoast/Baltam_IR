@@ -145,3 +145,33 @@ std::vector<std::shared_ptr<ba_obj>> eval_call(
 4. 实现 `exec_terminal`
 5. 跑通 `test/simple_demo.m`
 
+## TODO
+
+### 近期重点
+
+1. 设计最小 `SymbolTable`
+   - 第一版先按名字管理变量和函数符号
+   - 先支持局部变量查找，再逐步接入 builtin/函数名查找
+2. 设计最小 `Frame`
+   - 绑定当前 `Function`
+   - 保存局部变量、输入参数、返回值和执行上下文
+   - 作为一次函数调用的运行时栈帧
+3. 实现最小 IR 解释器骨架
+   - 顺序执行 `BasicBlock` 内的普通指令
+   - 调度 `terminal`
+   - 能跑通当前 `simple_demo.m`
+4. 逐步补齐 IR 节点的执行支持
+   - `NameInstruction`
+   - `NumberInstruction`
+   - `BinOpInstruction`
+   - `AssignInstruction`
+   - `CallInstruction`
+   - `IfInstruction`
+   - `JumpInstruction`
+   - `ReturnInstruction`
+
+### 运行时对接
+
+1. 复用 `ba_obj` 作为统一运行时值类型
+2. 对接 `/opt/Baltamatica/lib` 下的运行时库
+3. 建立二元运算和函数调用的桥接层
