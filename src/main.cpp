@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "bt_ast_interface.h"
+#include "ir/ir.h"
 
 using namespace baltam;
 
@@ -44,6 +45,11 @@ void print_parsed_ast(const std::shared_ptr<pcdata>& parsed_unit, std::size_t in
 
 int main() {
     const std::string script_path = std::string(BALTAM_IR_SOURCE_DIR) + kScriptRelativePath;
+    const Module module = build_demo(script_path);
+
+    std::cout << "Minimal IR for " << script_path << ":" << std::endl;
+    print_ir(std::cout, module);
+    std::cout << std::endl;
 
     int exit_code = 0;
     const int init_ret = bt_ast_interface::initialize();
