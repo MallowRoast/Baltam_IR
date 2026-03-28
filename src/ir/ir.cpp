@@ -61,30 +61,54 @@ std::string binop_symbol(BinOpInstruction::Type op) {
     return "?";
 }
 
+const char* function_type_name(Function::Type type) {
+    switch (type) {
+        case Function::Script:
+            return "script";
+        case Function::PrimaryFunction:
+            return "primary_function";
+        case Function::LocalFunction:
+            return "local_function";
+    }
+
+    return "unknown_function_type";
+}
+
+const char* module_type_name(Module::Type type) {
+    switch (type) {
+        case Module::Script:
+            return "script";
+        case Module::Function:
+            return "function";
+    }
+
+    return "unknown_module_type";
+}
+
 std::string expr_text(const Instruction* instruction) {
     if (instruction == nullptr) {
         return "<null>";
     }
 
     switch (instruction->type()) {
-        case InstructionType::Text:
+        case Instruction::Text:
             return static_cast<const TextInstruction*>(instruction)->text();
-        case InstructionType::Name:
+        case Instruction::Name:
             return static_cast<const NameInstruction*>(instruction)->name();
-        case InstructionType::Number: {
+        case Instruction::Number: {
             const auto* number = static_cast<const NumberInstruction*>(instruction);
             return format_number(number->value());
         }
-        case InstructionType::BinOp: {
+        case Instruction::BinOp: {
             const auto* binop = static_cast<const BinOpInstruction*>(instruction);
             return "(" + expr_text(binop->lhs()) + " " + binop_symbol(binop->op()) + " " +
                    expr_text(binop->rhs()) + ")";
         }
-        case InstructionType::Asgn: {
+        case Instruction::Asgn: {
             const auto* asgn = static_cast<const AssignInstruction*>(instruction);
             return asgn->name() + " = " + expr_text(asgn->value());
         }
-        case InstructionType::Call: {
+        case Instruction::Call: {
             const auto* call = static_cast<const CallInstruction*>(instruction);
             std::string text;
             if (!call->out_args().empty()) {
@@ -108,28 +132,17 @@ std::string expr_text(const Instruction* instruction) {
             text += ")";
             return text;
         }
-        case InstructionType::If: {
-            const auto* if_inst = static_cast<const IfInstruction*>(instruction);
-            return "if " + expr_text(if_inst->cond()) + " then " + if_inst->true_block()->name() +
-                   " else " + if_inst->false_block()->name();
+        case Instruction::CondJump: {
+            const auto* cond_jump = static_cast<const CondJumpInstruction*>(instruction);
+            return "cond_jump " + expr_text(cond_jump->cond()) + " ? " +
+                   cond_jump->true_block()->name() + " : " + cond_jump->false_block()->name();
         }
-        case InstructionType::Jump: {
+        case Instruction::Jump: {
             const auto* jump = static_cast<const JumpInstruction*>(instruction);
             return "jump " + jump->target()->name();
         }
-        case InstructionType::Return: {
-            const auto* ret = static_cast<const ReturnInstruction*>(instruction);
-            std::string text = "return";
-            if (!ret->values().empty()) {
-                text += " ";
-                for (std::size_t i = 0; i < ret->values().size(); ++i) {
-                    if (i != 0) {
-                        text += ", ";
-                    }
-                    text += expr_text(ret->values()[i]);
-                }
-            }
-            return text;
+        case Instruction::Return: {
+            return "return";
         }
     }
 
@@ -149,10 +162,10 @@ void print_instruction(std::ostream& os, const Instruction& instruction) {
 
 }  // namespace
 
-Instruction::Instruction(InstructionType type, std::optional<SourceSpan> span)
+Instruction::Instruction(Type type, std::optional<SourceSpan> span)
     : type_(type), source_span_(std::move(span)) {}
 
-InstructionType Instruction::type() const {
+Instruction::Type Instruction::type() const {
     return type_;
 }
 
@@ -169,30 +182,30 @@ void Instruction::set_parent(BasicBlock* block) {
 }
 
 TextInstruction::TextInstruction(std::string text, std::optional<SourceSpan> span)
-    : Instruction(InstructionType::Text, std::move(span)), text_(std::move(text)) {}
+    : Instruction(Text, std::move(span)), text_(std::move(text)) {}
 
 const std::string& TextInstruction::text() const {
     return text_;
 }
 
 NameInstruction::NameInstruction(std::string name, std::optional<SourceSpan> span)
-    : Instruction(InstructionType::Name, std::move(span)), name_(std::move(name)) {}
+    : Instruction(Name, std::move(span)), name_(std::move(name)) {}
 
 const std::string& NameInstruction::name() const {
     return name_;
 }
 
 NumberInstruction::NumberInstruction(bool value, std::optional<SourceSpan> span)
-    : Instruction(InstructionType::Number, std::move(span)), value_(value) {}
+    : Instruction(Number, std::move(span)), value_(value) {}
 
 NumberInstruction::NumberInstruction(std::int64_t value, std::optional<SourceSpan> span)
-    : Instruction(InstructionType::Number, std::move(span)), value_(value) {}
+    : Instruction(Number, std::move(span)), value_(value) {}
 
 NumberInstruction::NumberInstruction(double value, std::optional<SourceSpan> span)
-    : Instruction(InstructionType::Number, std::move(span)), value_(value) {}
+    : Instruction(Number, std::move(span)), value_(value) {}
 
 NumberInstruction::NumberInstruction(std::complex<double> value, std::optional<SourceSpan> span)
-    : Instruction(InstructionType::Number, std::move(span)), value_(std::move(value)) {}
+    : Instruction(Number, std::move(span)), value_(std::move(value)) {}
 
 const NumberInstruction::NumberValue& NumberInstruction::value() const {
     return value_;
@@ -200,7 +213,7 @@ const NumberInstruction::NumberValue& NumberInstruction::value() const {
 
 BinOpInstruction::BinOpInstruction(Type op, Instruction* lhs, Instruction* rhs,
                                    std::optional<SourceSpan> span)
-    : Instruction(InstructionType::BinOp, std::move(span)), op_(op), lhs_(lhs), rhs_(rhs) {}
+    : Instruction(Instruction::BinOp, std::move(span)), op_(op), lhs_(lhs), rhs_(rhs) {}
 
 BinOpInstruction::Type BinOpInstruction::op() const {
     return op_;
@@ -215,7 +228,7 @@ Instruction* BinOpInstruction::rhs() const {
 }
 
 AssignInstruction::AssignInstruction(std::string name, Instruction* value, std::optional<SourceSpan> span)
-    : Instruction(InstructionType::Asgn, std::move(span)), name_(std::move(name)), value_(value) {}
+    : Instruction(Asgn, std::move(span)), name_(std::move(name)), value_(value) {}
 
 const std::string& AssignInstruction::name() const {
     return name_;
@@ -227,7 +240,7 @@ Instruction* AssignInstruction::value() const {
 
 CallInstruction::CallInstruction(std::string name, std::vector<Instruction*> out_args,
                                  std::vector<Instruction*> in_args, std::optional<SourceSpan> span)
-    : Instruction(InstructionType::Call, std::move(span)),
+    : Instruction(Call, std::move(span)),
       name_(std::move(name)),
       out_args_(std::move(out_args)),
       in_args_(std::move(in_args)) {}
@@ -244,38 +257,34 @@ const std::vector<Instruction*>& CallInstruction::in_args() const {
     return in_args_;
 }
 
-IfInstruction::IfInstruction(Instruction* cond, BasicBlock* true_block, BasicBlock* false_block,
-                             std::optional<SourceSpan> span)
-    : Instruction(InstructionType::If, std::move(span)),
+CondJumpInstruction::CondJumpInstruction(Instruction* cond, BasicBlock* true_block,
+                                         BasicBlock* false_block, std::optional<SourceSpan> span)
+    : Instruction(Instruction::CondJump, std::move(span)),
       cond_(cond),
       true_block_(true_block),
       false_block_(false_block) {}
 
-Instruction* IfInstruction::cond() const {
+Instruction* CondJumpInstruction::cond() const {
     return cond_;
 }
 
-BasicBlock* IfInstruction::true_block() const {
+BasicBlock* CondJumpInstruction::true_block() const {
     return true_block_;
 }
 
-BasicBlock* IfInstruction::false_block() const {
+BasicBlock* CondJumpInstruction::false_block() const {
     return false_block_;
 }
 
 JumpInstruction::JumpInstruction(BasicBlock* target, std::optional<SourceSpan> span)
-    : Instruction(InstructionType::Jump, std::move(span)), target_(target) {}
+    : Instruction(Jump, std::move(span)), target_(target) {}
 
 BasicBlock* JumpInstruction::target() const {
     return target_;
 }
 
-ReturnInstruction::ReturnInstruction(std::vector<Instruction*> values, std::optional<SourceSpan> span)
-    : Instruction(InstructionType::Return, std::move(span)), values_(std::move(values)) {}
-
-const std::vector<Instruction*>& ReturnInstruction::values() const {
-    return values_;
-}
+ReturnInstruction::ReturnInstruction(std::optional<SourceSpan> span)
+    : Instruction(Return, std::move(span)) {}
 
 BasicBlock::BasicBlock(std::string name): name_(std::move(name)) {}
 
@@ -340,10 +349,15 @@ void BasicBlock::set_parent(Function* function) {
     parent_ = function;
 }
 
-Function::Function(std::string name): name_(std::move(name)) {}
+Function::Function(std::string name, Type type)
+    : name_(std::move(name)), type_(type) {}
 
 const std::string& Function::name() const {
     return name_;
+}
+
+Function::Type Function::type() const {
+    return type_;
 }
 
 BasicBlock* Function::entry_block() const {
@@ -366,31 +380,44 @@ void Function::set_entry_block(BasicBlock* block) {
     entry_block_ = block;
 }
 
-Module::Module(std::string name, std::string source_path)
-    : name_(std::move(name)), source_path_(std::move(source_path)) {}
+Module::Module(std::string name, std::string source_path, Type type)
+    : name_(std::move(name)), source_path_(std::move(source_path)), type_(type) {}
 
 const std::string& Module::name() const {
     return name_;
+}
+
+Module::Type Module::type() const {
+    return type_;
 }
 
 const std::string& Module::source_path() const {
     return source_path_;
 }
 
+Function* Module::entry_function() const {
+    return entry_function_;
+}
+
 const std::vector<std::unique_ptr<Function>>& Module::functions() const {
     return function_storage_;
 }
 
-Function* Module::create_function(std::string name) {
-    auto function = std::make_unique<Function>(std::move(name));
-    Function* raw = function.get();
+Function* Module::create_function(std::string name, Function::Type type) {
+    auto function = std::make_unique<::baltam::Function>(std::move(name), type);
+    ::baltam::Function* raw = function.get();
     function_storage_.push_back(std::move(function));
     return raw;
 }
 
+void Module::set_entry_function(::baltam::Function* function) {
+    entry_function_ = function;
+}
+
 Module build_demo(const std::string& source_path) {
-    Module module("simple_demo", source_path);
-    Function* function = module.create_function("__script_main__");
+    Module module("simple_demo", source_path, Module::Script);
+    Function* function = module.create_function("__script_main__", Function::Script);
+    module.set_entry_function(function);
 
     BasicBlock* entry = function->create_block("entry");
     BasicBlock* if_true = function->create_block("if_true");
@@ -435,7 +462,7 @@ Module build_demo(const std::string& source_path) {
     entry->append_instruction(b_ref_for_if);
     entry->append_instruction(zero);
     entry->append_instruction(gt);
-    entry->set_terminal(function->create_instruction<IfInstruction>(
+    entry->set_terminal(function->create_instruction<CondJumpInstruction>(
         gt, if_true, if_false, SourceSpan{source_path, 4, 1, 8, 4}));
 
     Instruction* b_ref_for_mul = function->create_instruction<NameInstruction>(
@@ -468,10 +495,19 @@ Module build_demo(const std::string& source_path) {
 
 void print_ir(std::ostream& os, const Module& module) {
     os << "module " << module.name() << "\n";
+    os << "  type: " << module_type_name(module.type()) << "\n";
     os << "  source: " << module.source_path() << "\n";
+    os << "  entry_function: ";
+    if (module.entry_function() != nullptr) {
+        os << module.entry_function()->name();
+    } else {
+        os << "<null>";
+    }
+    os << "\n";
 
     for (const auto& function : module.functions()) {
         os << "\nfunction @" << function->name() << " {\n";
+        os << "  type: " << function_type_name(function->type()) << "\n";
         os << "  entry: ";
         if (function->entry_block() != nullptr) {
             os << function->entry_block()->name();

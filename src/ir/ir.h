@@ -24,21 +24,6 @@ struct SourceSpan {
     int end_column = 0;
 };
 
-/**
- * @brief 所有 IR 指令的动态类型标签。
- */
-enum class InstructionType {
-    Text,
-    Name,
-    Number,
-    BinOp,
-    Asgn,
-    Call,
-    If,
-    Jump,
-    Return,
-};
-
 class BasicBlock;
 class Function;
 
@@ -50,12 +35,27 @@ class Function;
  */
 class Instruction {
 public:
+    /**
+     * @brief 所有 IR 指令的动态类型标签。
+     */
+    enum Type {
+        Text,
+        Name,
+        Number,
+        BinOp,
+        Asgn,
+        Call,
+        CondJump,
+        Jump,
+        Return,
+    };
+
     virtual ~Instruction() = default;
 
     /**
      * @brief 返回当前指令的具体类型。
      */
-    InstructionType type() const;
+    Type type() const;
 
     /**
      * @brief 返回所属 BasicBlock；若尚未挂接则返回 nullptr。
@@ -71,7 +71,7 @@ protected:
     /**
      * @brief 用动态类型标签构造一条指令。
      */
-    explicit Instruction(InstructionType type, std::optional<SourceSpan> span = std::nullopt);
+    explicit Instruction(Type type, std::optional<SourceSpan> span = std::nullopt);
 
 private:
     friend class BasicBlock;
@@ -81,7 +81,7 @@ private:
      */
     void set_parent(BasicBlock* block);
 
-    InstructionType type_;
+    Type type_;
     BasicBlock* parent_ = nullptr;
     std::optional<SourceSpan> source_span_;
 };
@@ -153,7 +153,7 @@ public:
     /**
      * @brief 具体的二元运算种类。
      */
-    enum class Type {
+    enum Type {
         Add,
         Gt,
         Multiply,
@@ -238,10 +238,10 @@ private:
 /**
  * @brief 条件分支终结指令。
  */
-class IfInstruction final : public Instruction {
+class CondJumpInstruction final : public Instruction {
 public:
-    IfInstruction(Instruction* cond, BasicBlock* true_block, BasicBlock* false_block,
-                  std::optional<SourceSpan> span = std::nullopt);
+    CondJumpInstruction(Instruction* cond, BasicBlock* true_block, BasicBlock* false_block,
+                        std::optional<SourceSpan> span = std::nullopt);
 
     /**
      * @brief 返回分支条件指令。
@@ -285,16 +285,7 @@ private:
  */
 class ReturnInstruction final : public Instruction {
 public:
-    explicit ReturnInstruction(std::vector<Instruction*> values = {},
-                               std::optional<SourceSpan> span = std::nullopt);
-
-    /**
-     * @brief 返回返回值列表。
-     */
-    const std::vector<Instruction*>& values() const;
-
-private:
-    std::vector<Instruction*> values_;
+    explicit ReturnInstruction(std::optional<SourceSpan> span = std::nullopt);
 };
 
 /**
@@ -376,12 +367,23 @@ private:
  */
 class Function {
 public:
-    explicit Function(std::string name);
+    enum Type {
+        Script,
+        PrimaryFunction,
+        LocalFunction,
+    };
+
+    Function(std::string name, Type type);
 
     /**
      * @brief 返回函数名。
      */
     const std::string& name() const;
+
+    /**
+     * @brief 返回函数类型。
+     */
+    Type type() const;
 
     /**
      * @brief 返回函数入口基本块。
@@ -416,6 +418,7 @@ public:
 
 private:
     std::string name_;
+    Type type_ = PrimaryFunction;
     std::vector<std::unique_ptr<BasicBlock>> block_storage_;
     std::vector<std::unique_ptr<Instruction>> instruction_storage_;
     BasicBlock* entry_block_ = nullptr;
@@ -426,7 +429,12 @@ private:
  */
 class Module {
 public:
-    Module(std::string name, std::string source_path);
+    enum Type {
+        Script,
+        Function,
+    };
+
+    Module(std::string name, std::string source_path, Type type);
 
     /**
      * @brief 返回模块名。
@@ -434,24 +442,41 @@ public:
     const std::string& name() const;
 
     /**
+     * @brief 返回模块类型。
+     */
+    Type type() const;
+
+    /**
      * @brief 返回构建该模块所对应的源文件路径。
      */
     const std::string& source_path() const;
 
     /**
+     * @brief 返回该模块的入口函数。
+     */
+    ::baltam::Function* entry_function() const;
+
+    /**
      * @brief 按插入顺序返回本模块拥有的函数。
      */
-    const std::vector<std::unique_ptr<Function>>& functions() const;
+    const std::vector<std::unique_ptr<::baltam::Function>>& functions() const;
 
     /**
      * @brief 创建并接管一个新的 Function。
      */
-    Function* create_function(std::string name);
+    ::baltam::Function* create_function(std::string name, ::baltam::Function::Type type);
+
+    /**
+     * @brief 设置该模块的入口函数。
+     */
+    void set_entry_function(::baltam::Function* function);
 
 private:
     std::string name_;
     std::string source_path_;
-    std::vector<std::unique_ptr<Function>> function_storage_;
+    Type type_ = Function;
+    std::vector<std::unique_ptr<::baltam::Function>> function_storage_;
+    ::baltam::Function* entry_function_ = nullptr;
 };
 
 /**

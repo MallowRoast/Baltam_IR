@@ -123,20 +123,20 @@ BasicBlock* exec_terminal(Instruction* term, Frame& frame);
 
 第一版处理：
 
-- `IfInstruction`
+- `CondJumpInstruction`
 - `JumpInstruction`
 - `ReturnInstruction`
 
 语义建议如下：
 
-- `IfInstruction`
+- `CondJumpInstruction`
   - 计算条件表达式
   - 根据结果跳转到 `true_block` 或 `false_block`
 - `JumpInstruction`
   - 直接返回目标 block
 - `ReturnInstruction`
   - 结束函数执行
-  - 返回函数结果或记录返回值
+  - 返回到调用方
 
 ## 运行时桥接层
 
@@ -178,7 +178,7 @@ std::vector<std::shared_ptr<ba_obj>> eval_call(const std::string& name,
 
 ### 6. 条件值转换
 
-`IfInstruction` 的条件最终会落到一个 `std::shared_ptr<ba_obj>` 上，因此还需要统一条件判断入口：
+`CondJumpInstruction` 的条件最终会落到一个 `std::shared_ptr<ba_obj>` 上，因此还需要统一条件判断入口：
 
 ```cpp
 bool to_cond(const std::shared_ptr<ba_obj>& value);
@@ -236,4 +236,3 @@ bool to_cond(const std::shared_ptr<ba_obj>& value);
 - `std::shared_ptr<ba_obj>`
 
 这是当前最直接、风险最低、最容易从 demo 走向可执行原型的路径。
-
