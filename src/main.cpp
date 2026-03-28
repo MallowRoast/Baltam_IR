@@ -3,6 +3,7 @@
 //
 
 #include <cstdlib>
+#include <algorithm>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -57,18 +58,8 @@ void print_frame_symbols(const Frame& frame) {
     }
 }
 
-}  // namespace
-
-int main() {
-    const std::string script_path = std::string(BALTAM_IR_SOURCE_DIR) + kScriptRelativePath;
-
+int run_m_file(const std::string& script_path) {
     int exit_code = 0;
-    const int init_ret = bt_ast_interface::initialize();
-    if (init_ret != 0) {
-        std::cerr << "bt_ast_interface::initialize failed, code = " << init_ret << std::endl;
-        return 1;
-    }
-
     std::string msg;
     const auto parsed_units = bt_ast_interface::parse_mfile(script_path, msg);
 
@@ -78,28 +69,59 @@ int main() {
 
     if (parsed_units.empty()) {
         std::cerr << "No AST generated for file: " << script_path << std::endl;
-        exit_code = 1;
-    } else {
-        std::cout << "Parsed file: " << script_path << std::endl;
-        for (std::size_t i = 0; i < parsed_units.size(); ++i) {
-            print_parsed_ast(parsed_units[i], i);
-        }
+        return 1;
+    }
 
-        try {
-            const Module module = lower_parsed_units_to_ir(parsed_units);
-            std::cout << "Lowered IR for " << script_path << ":" << std::endl;
-            print_ir(std::cout, module);
+    std::cout << "Parsed file: " << script_path << std::endl;
+    for (std::size_t i = 0; i < parsed_units.size(); ++i) {
+        print_parsed_ast(parsed_units[i], i);
+    }
+
+    try {
+        const Module module = lower_parsed_units_to_ir(parsed_units);
+        std::cout << "Lowered IR for " << script_path << ":" << std::endl;
+        print_ir(std::cout, module);
+        std::cout << std::endl;
+
+        if (module.entry_function() != nullptr) {
+            const Frame frame = execute_function(*module.entry_function());
+            print_frame_symbols(frame);
             std::cout << std::endl;
-
-            if (module.entry_function() != nullptr) {
-                const Frame frame = execute_function(*module.entry_function());
-                print_frame_symbols(frame);
-                std::cout << std::endl;
-            }
-        } catch (const std::exception& ex) {
-            std::cerr << "IR lowering/interpreter failed: " << ex.what() << std::endl;
-            exit_code = 1;
         }
+    } catch (const std::exception& ex) {
+        std::cerr << "IR lowering/interpreter failed for " << script_path << ": " << ex.what()
+                  << std::endl;
+        exit_code = 1;
+    }
+
+    return exit_code;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    int exit_code = 0;
+    const int init_ret = bt_ast_interface::initialize();
+    if (init_ret != 0) {
+        std::cerr << "bt_ast_interface::initialize failed, code = " << init_ret << std::endl;
+        return 1;
+    }
+
+    std::vector<std::string> script_paths;
+    if (argc <= 1) {
+        script_paths.push_back(std::string(BALTAM_IR_SOURCE_DIR) + kScriptRelativePath);
+    } else {
+        script_paths.reserve(static_cast<std::size_t>(argc - 1));
+        for (int i = 1; i < argc; ++i) {
+            script_paths.emplace_back(argv[i]);
+        }
+    }
+
+    for (std::size_t i = 0; i < script_paths.size(); ++i) {
+        if (i != 0) {
+            std::cout << std::string(72, '=') << std::endl;
+        }
+        exit_code = std::max(exit_code, run_m_file(script_paths[i]));
     }
 
     std::cout << std::flush;
