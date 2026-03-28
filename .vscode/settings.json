@@ -24,7 +24,9 @@
   "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
   "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json",
   "C_Cpp.default.includePath": [
+    "${workspaceFolder}/src",
     "${workspaceFolder}/deps/core/include",
-    "${workspaceFolder}/deps/core/include/bt_ast_interface"
+    "${workspaceFolder}/deps/core/include/bt_ast_interface",
+    "${workspaceFolder}/deps/core/include/baltam_worker"
   ]
 }
