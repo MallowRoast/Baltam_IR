@@ -5,11 +5,14 @@
 #include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "bt_ast_interface.h"
+#include "interpreter/interpreter.h"
 #include "ir/ir.h"
+#include "lowering/lowering.h"
 
 using namespace baltam;
 
@@ -41,15 +44,23 @@ void print_parsed_ast(const std::shared_ptr<pcdata>& parsed_unit, std::size_t in
     std::cout << std::endl;
 }
 
+void print_frame_symbols(const Frame& frame) {
+    std::cout << "Interpreter frame:" << std::endl;
+    for (const auto& [name, binding] : frame.symbols()) {
+        std::cout << "  " << name << " = ";
+        if (!binding.initialized) {
+            std::cout << "<uninitialized>";
+        } else {
+            std::cout << value_text(binding.value);
+        }
+        std::cout << std::endl;
+    }
+}
+
 }  // namespace
 
 int main() {
     const std::string script_path = std::string(BALTAM_IR_SOURCE_DIR) + kScriptRelativePath;
-    const Module module = build_demo(script_path);
-
-    std::cout << "Minimal IR for " << script_path << ":" << std::endl;
-    print_ir(std::cout, module);
-    std::cout << std::endl;
 
     int exit_code = 0;
     const int init_ret = bt_ast_interface::initialize();
@@ -72,6 +83,22 @@ int main() {
         std::cout << "Parsed file: " << script_path << std::endl;
         for (std::size_t i = 0; i < parsed_units.size(); ++i) {
             print_parsed_ast(parsed_units[i], i);
+        }
+
+        try {
+            const Module module = lower_parsed_units_to_ir(parsed_units);
+            std::cout << "Lowered IR for " << script_path << ":" << std::endl;
+            print_ir(std::cout, module);
+            std::cout << std::endl;
+
+            if (module.entry_function() != nullptr) {
+                const Frame frame = execute_function(*module.entry_function());
+                print_frame_symbols(frame);
+                std::cout << std::endl;
+            }
+        } catch (const std::exception& ex) {
+            std::cerr << "IR lowering/interpreter failed: " << ex.what() << std::endl;
+            exit_code = 1;
         }
     }
 

@@ -76,9 +76,9 @@ const char* function_type_name(Function::Type type) {
 
 const char* module_type_name(Module::Type type) {
     switch (type) {
-        case Module::Script:
+        case Module::M_Script:
             return "script";
-        case Module::Function:
+        case Module::M_Function:
             return "function";
     }
 
@@ -356,8 +356,20 @@ const std::string& Function::name() const {
     return name_;
 }
 
+Module* Function::parent() const {
+    return parent_;
+}
+
 Function::Type Function::type() const {
     return type_;
+}
+
+const std::vector<std::string>& Function::input_names() const {
+    return input_names_;
+}
+
+const std::vector<std::string>& Function::output_names() const {
+    return output_names_;
 }
 
 BasicBlock* Function::entry_block() const {
@@ -378,6 +390,18 @@ BasicBlock* Function::create_block(std::string name) {
 
 void Function::set_entry_block(BasicBlock* block) {
     entry_block_ = block;
+}
+
+void Function::set_input_names(std::vector<std::string> names) {
+    input_names_ = std::move(names);
+}
+
+void Function::set_output_names(std::vector<std::string> names) {
+    output_names_ = std::move(names);
+}
+
+void Function::set_parent(Module* module) {
+    parent_ = module;
 }
 
 Module::Module(std::string name, std::string source_path, Type type)
@@ -406,91 +430,13 @@ const std::vector<std::unique_ptr<Function>>& Module::functions() const {
 Function* Module::create_function(std::string name, Function::Type type) {
     auto function = std::make_unique<::baltam::Function>(std::move(name), type);
     ::baltam::Function* raw = function.get();
+    raw->set_parent(this);
     function_storage_.push_back(std::move(function));
     return raw;
 }
 
 void Module::set_entry_function(::baltam::Function* function) {
     entry_function_ = function;
-}
-
-Module build_demo(const std::string& source_path) {
-    Module module("simple_demo", source_path, Module::Script);
-    Function* function = module.create_function("__script_main__", Function::Script);
-    module.set_entry_function(function);
-
-    BasicBlock* entry = function->create_block("entry");
-    BasicBlock* if_true = function->create_block("if_true");
-    BasicBlock* if_false = function->create_block("if_false");
-    BasicBlock* exit = function->create_block("exit");
-    function->set_entry_block(entry);
-
-    entry->add_successor(if_true);
-    entry->add_successor(if_false);
-    if_true->add_successor(exit);
-    if_false->add_successor(exit);
-
-    Instruction* one = function->create_instruction<NumberInstruction>(
-        std::int64_t{1}, SourceSpan{source_path, 1, 5, 1, 5});
-    Instruction* two = function->create_instruction<NumberInstruction>(
-        std::int64_t{2}, SourceSpan{source_path, 1, 9, 1, 9});
-    Instruction* add = function->create_instruction<BinOpInstruction>(
-        BinOpInstruction::Type::Add, one, two, SourceSpan{source_path, 1, 5, 1, 9});
-    entry->append_instruction(one);
-    entry->append_instruction(two);
-    entry->append_instruction(add);
-    entry->append_instruction(function->create_instruction<AssignInstruction>(
-        "a", add, SourceSpan{source_path, 1, 1, 1, 10}));
-
-    Instruction* a_ref = function->create_instruction<NameInstruction>(
-        "a", SourceSpan{source_path, 2, 9, 2, 9});
-    Instruction* b_out = function->create_instruction<NameInstruction>(
-        "b", SourceSpan{source_path, 2, 1, 2, 1});
-    Instruction* sin_call = function->create_instruction<CallInstruction>(
-        "sin", std::vector<Instruction*>{b_out}, std::vector<Instruction*>{a_ref},
-        SourceSpan{source_path, 2, 1, 2, 10});
-    entry->append_instruction(a_ref);
-    entry->append_instruction(b_out);
-    entry->append_instruction(sin_call);
-
-    Instruction* b_ref_for_if = function->create_instruction<NameInstruction>(
-        "b", SourceSpan{source_path, 4, 4, 4, 4});
-    Instruction* zero = function->create_instruction<NumberInstruction>(
-        std::int64_t{0}, SourceSpan{source_path, 4, 8, 4, 8});
-    Instruction* gt = function->create_instruction<BinOpInstruction>(
-        BinOpInstruction::Type::Gt, b_ref_for_if, zero, SourceSpan{source_path, 4, 4, 4, 8});
-    entry->append_instruction(b_ref_for_if);
-    entry->append_instruction(zero);
-    entry->append_instruction(gt);
-    entry->set_terminal(function->create_instruction<CondJumpInstruction>(
-        gt, if_true, if_false, SourceSpan{source_path, 4, 1, 8, 4}));
-
-    Instruction* b_ref_for_mul = function->create_instruction<NameInstruction>(
-        "b", SourceSpan{source_path, 5, 9, 5, 9});
-    Instruction* two_again = function->create_instruction<NumberInstruction>(
-        std::int64_t{2}, SourceSpan{source_path, 5, 13, 5, 13});
-    Instruction* mul = function->create_instruction<BinOpInstruction>(
-        BinOpInstruction::Type::Multiply, b_ref_for_mul, two_again,
-        SourceSpan{source_path, 5, 9, 5, 13});
-    if_true->append_instruction(b_ref_for_mul);
-    if_true->append_instruction(two_again);
-    if_true->append_instruction(mul);
-    if_true->append_instruction(function->create_instruction<AssignInstruction>(
-        "c", mul, SourceSpan{source_path, 5, 5, 5, 14}));
-    if_true->set_terminal(function->create_instruction<JumpInstruction>(
-        exit, SourceSpan{source_path, 5, 5, 5, 14}));
-
-    Instruction* zero_else = function->create_instruction<NumberInstruction>(
-        std::int64_t{0}, SourceSpan{source_path, 7, 9, 7, 9});
-    if_false->append_instruction(zero_else);
-    if_false->append_instruction(function->create_instruction<AssignInstruction>(
-        "c", zero_else, SourceSpan{source_path, 7, 5, 7, 10}));
-    if_false->set_terminal(function->create_instruction<JumpInstruction>(
-        exit, SourceSpan{source_path, 7, 5, 7, 10}));
-
-    exit->set_terminal(function->create_instruction<ReturnInstruction>());
-
-    return module;
 }
 
 void print_ir(std::ostream& os, const Module& module) {

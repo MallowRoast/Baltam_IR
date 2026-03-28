@@ -25,16 +25,52 @@
 
 每次执行一个 `Function`，都需要一个运行时执行帧。
 
-第一版最简单的形式可以是：
+第一版建议使用：
 
-- `std::unordered_map<std::string, std::shared_ptr<ba_obj>> locals`
+```cpp
+using Value = std::shared_ptr<ba_obj>;
+
+struct Binding {
+    Value value;
+    bool initialized = false;
+};
+
+class Frame {
+public:
+    using SymbolTable = std::unordered_map<std::string, Binding>;
+
+    Function* function = nullptr;
+    Frame* caller = nullptr;
+    int nargin = 0;
+    int nargout = 0;
+    bool returned = false;
+    SymbolTable symbols;
+    std::vector<Value> outputs;
+};
+```
 
 原因是当前 IR 中：
 
 - `NameInstruction` 通过名字引用变量
 - `AssignInstruction` 通过名字写变量
+- `Function` 会持有输入输出参数名列表
 
-所以第一版直接按名字管理变量最省事。
+因此第一版按名字管理运行时变量最省事，也最贴近 MATLAB-like 工作区语义。
+
+建议 `Frame` 提供最小接口：
+
+- `declare(name)`
+- `store(name, value)`
+- `load(name)`
+- `contains(name)`
+- `is_initialized(name)`
+
+其中：
+
+- `load(name)` 对“名字不存在”或“已声明但未初始化”都应报错
+- 输入参数在建帧时按 `Function::input_names()` 写入 `symbols`
+- 输出参数在建帧时按 `Function::output_names()` 预声明
+- `ReturnInstruction` 只负责结束执行，函数返回值由 `Function::output_names()` 从 `symbols` 中顺序收集
 
 后续如果要优化，可以再逐步替换成 slot 表。
 
@@ -56,7 +92,7 @@ std::shared_ptr<ba_obj> eval_expr(Instruction* inst, Frame& frame);
 语义建议如下：
 
 - `NameInstruction`
-  - 从 `frame.locals` 读取变量值
+  - 从 `frame.symbols` 读取变量值
 - `NumberInstruction`
   - 将字面量包装成对应的 `ba_obj`
 - `BinOpInstruction`
@@ -83,7 +119,7 @@ void exec_inst(Instruction* inst, Frame& frame);
 
 - `AssignInstruction`
   - 计算右值
-  - 写入 `frame.locals[name]`
+  - 写入 `frame.symbols[name]`
 - `CallInstruction`
   - 计算输入参数
   - 调用 runtime 中已有的函数实现
@@ -219,6 +255,55 @@ bool to_cond(const std::shared_ptr<ba_obj>& value);
 - deopt / fallback
 
 因此，这版解释器的意义主要不是“立刻比 AST 解释器更强”，而是“为后续执行体系提供正确的载体”。
+
+## 当前主线
+
+在 `simple_demo.m` 跑通以后，当前阶段的主线不再是重新设计执行架构，
+而是持续扩大：
+
+- `AST -> IR lowering` 的语法覆盖面
+- `IR -> runtime` 的解释执行语义覆盖面
+
+也就是说，接下来的重点是让更多 MATLAB-like 语法能够：
+
+1. 被稳定 lower 成 IR
+2. 被当前 IR 解释器正确执行
+
+## 接下来的重点
+
+### 1. 扩大 lowering 覆盖
+
+优先支持投入产出比较高的 AST 节点，例如：
+
+- `return`
+- 单目运算
+- 更多比较/逻辑运算
+- `elseif`
+- `while`
+- `for`
+- 多返回值函数调用
+- 普通 `m` 函数定义和调用
+- 局部函数
+- `break/continue`
+
+### 2. 补齐解释器语义
+
+随着 lowering 覆盖面扩大，解释器侧也需要同步补齐：
+
+- 函数输入输出参数绑定
+- `nargin/nargout`
+- `ans`
+- 更清晰的未定义变量/未初始化变量报错
+- builtin 调用错误透传
+- script workspace 和 function workspace 的差异
+- 后续的 `persistent/global`
+
+## 当前阶段的判断
+
+因此，当前最重要的工作可以概括为两句话：
+
+1. 不急着再换执行架构，而是先把现有 `IR + Interpreter` 主链做厚。
+2. 让更多 `m` 语法能够被 lower 并执行，是这段时间最核心的演进方向。
 
 ## 总结
 

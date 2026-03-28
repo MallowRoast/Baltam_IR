@@ -26,6 +26,7 @@ struct SourceSpan {
 
 class BasicBlock;
 class Function;
+class Module;
 
 /**
  * @brief 所有 IR 指令的基类。
@@ -381,9 +382,24 @@ public:
     const std::string& name() const;
 
     /**
+     * @brief 返回所属 Module；若尚未挂接则返回 nullptr。
+     */
+    Module* parent() const;
+
+    /**
      * @brief 返回函数类型。
      */
     Type type() const;
+
+    /**
+     * @brief 返回输入参数名列表。
+     */
+    const std::vector<std::string>& input_names() const;
+
+    /**
+     * @brief 返回输出参数名列表。
+     */
+    const std::vector<std::string>& output_names() const;
 
     /**
      * @brief 返回函数入口基本块。
@@ -406,6 +422,16 @@ public:
     void set_entry_block(BasicBlock* block);
 
     /**
+     * @brief 设置输入参数名列表。
+     */
+    void set_input_names(std::vector<std::string> names);
+
+    /**
+     * @brief 设置输出参数名列表。
+     */
+    void set_output_names(std::vector<std::string> names);
+
+    /**
      * @brief 创建并接管一个新的指令对象。
      */
     template <typename T, typename... Args>
@@ -417,8 +443,18 @@ public:
     }
 
 private:
+    friend class Module;
+
+    /**
+     * @brief 将该函数挂接到某个 Module。
+     */
+    void set_parent(Module* module);
+
+    Module* parent_ = nullptr;
     std::string name_;
     Type type_ = PrimaryFunction;
+    std::vector<std::string> input_names_;
+    std::vector<std::string> output_names_;
     std::vector<std::unique_ptr<BasicBlock>> block_storage_;
     std::vector<std::unique_ptr<Instruction>> instruction_storage_;
     BasicBlock* entry_block_ = nullptr;
@@ -430,8 +466,8 @@ private:
 class Module {
 public:
     enum Type {
-        Script,
-        Function,
+        M_Script,
+        M_Function,
     };
 
     Module(std::string name, std::string source_path, Type type);
@@ -474,15 +510,10 @@ public:
 private:
     std::string name_;
     std::string source_path_;
-    Type type_ = Function;
+    Type type_ = M_Function;
     std::vector<std::unique_ptr<::baltam::Function>> function_storage_;
     ::baltam::Function* entry_function_ = nullptr;
 };
-
-/**
- * @brief 为 `test/simple_demo.m` 构造一份手写的示例 IR。
- */
-Module build_demo(const std::string& source_path);
 
 /**
  * @brief 输出当前 IR 的文本表示。
