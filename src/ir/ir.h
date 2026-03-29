@@ -43,6 +43,7 @@ public:
         Text,
         Name,
         Number,
+        UnaryOp,
         BinOp,
         Asgn,
         Call,
@@ -145,6 +146,36 @@ private:
 };
 
 /**
+ * @brief 统一的单目运算指令。
+ */
+class UnaryOpInstruction final : public Instruction {
+public:
+    /**
+     * @brief 具体的单目运算种类。
+     */
+    enum Type {
+        UMinus,
+    };
+
+    UnaryOpInstruction(Type op, Instruction* operand,
+                       std::optional<SourceLocation> location = std::nullopt);
+
+    /**
+     * @brief 返回单目运算种类。
+     */
+    Type op() const;
+
+    /**
+     * @brief 返回操作数。
+     */
+    Instruction* operand() const;
+
+private:
+    Type op_ = Type::UMinus;
+    Instruction* operand_ = nullptr;
+};
+
+/**
  * @brief 统一的二元运算指令。
  *
  * 该节点对应 `node_add`、`node_greater_than`、`node_multiply`
@@ -157,7 +188,12 @@ public:
      */
     enum Type {
         Add,
+        Subtract,
         Gt,
+        Lt,
+        Ne,
+        Or,
+        MPower,
         Multiply,
     };
 

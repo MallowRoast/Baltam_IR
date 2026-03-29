@@ -101,6 +101,22 @@ MLIR 可以考虑引入，但更适合作为热点优化/JIT 后端，而不是�
 - 多返回值函数调用
 - 局部函数调用
 
+这里有一个重要约束：
+
+- `for` 不应长期保留成 `ForRangeInstruction`
+- `for i = 2:4` 不应被视为特殊循环种类
+- `node_colon` 应先 lower 成 `colon(...)`
+- `for` 本身应统一 lower 成 `foreach_init / foreach_iterate` 的普通 CFG
+
+也就是说：
+
+```matlab
+for i = a
+for i = 2:4
+```
+
+这两种形式在 IR/JIT 入口层都应统一成 `for i = expr`。
+
 ### 2. Profile 层
 
 职责：
@@ -258,6 +274,58 @@ end
 例如识别：
 
 `plus(A, times(B, sin(C)))`
+
+## `for` 相关优化
+
+`for` 的优化不应建立在语法特判上，而应建立在统一的 `for i = expr` 模型上。对当前项目，先记两类明确的优化方向。
+
+### 1. `colon` 不直接求值，而是返回 `Range` 对象
+
+当前更直接的做法是：
+
+```text
+node_colon -> call "colon"(args...)
+```
+
+后续可进一步优化为：
+
+- `colon` 不立即物化完整数组
+- 而是返回一个轻量 `Range` 运行时对象
+- `foreach_init` 和 `foreach_iterate` 直接消费这个 `Range`
+
+这样做的好处：
+
+- 避免 `2:1000000` 先构造整段临时数组
+- 更贴近 MATLAB-like 里的范围语义
+- 后续更容易做 loop trip-count 分析
+- 对解释器和 JIT 都有帮助
+
+这也是把 `node_colon` 视为普通表达式，但不急着把它完全物化的关键优化点。
+
+### 2. 对简单范围循环退化成普通 C++ `for`
+
+当满足下面条件时：
+
+- `for` 的右侧是 `2:4` 或 `1:2:9` 这类稳定的 `colon`
+- lowering / profile 能确认 trip count 稳定
+- 循环变量在循环体中没有被重新赋值
+- 循环体里没有破坏该假设的动态行为
+
+就可以在热点 JIT 中把它专门化成更接近原生代码的形式：
+
+```cpp
+for (auto i = begin; i <= end; i += step) {
+    ...
+}
+```
+
+这类专门化的价值在于：
+
+- 避免 `foreach_iterate` 的通用调度开销
+- 便于 LLVM/MLIR 做常规循环优化
+- 更容易获得 trip-count、回边、归纳变量等信息
+
+但这个优化需要保守触发。只要循环变量可能被循环体改写，或者右侧 `expr` 不是稳定的 `colon/Range`，就应退回通用的 `foreach_init / foreach_iterate` 路径。
 
 如果：
 

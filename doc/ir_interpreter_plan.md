@@ -228,6 +228,96 @@ bool to_cond(const std::shared_ptr<ba_obj>& value);
 
 它是控制流执行中的关键桥接点。
 
+## `for` 循环设计
+
+### 7. `for` 的源码语义
+
+MATLAB-like 语言里的 `for` 应统一理解成：
+
+```matlab
+for i = expr
+    ...
+end
+```
+
+这里：
+
+- `for i = 2:4` 只是 `expr` 恰好是一个 `node_colon`
+- `for i = a` 和 `for i = 2:4` 在 IR 层不应被建模成两种不同循环
+- `node_colon` 本身应 lower 成运行时 `colon(...)` 调用，而不是专门的循环节点
+
+因此，当前已经落下去的 `ForRangeInstruction` 只是过渡方案，后续应移除。
+
+### 8. `for` 的 CFG 形状
+
+既然运行时已经存在 `foreach_init` 和 `foreach_iterate`，`for` 更合适的 lower 方式是：
+
+```text
+for.preheader:
+  %iter = eval(expr)
+  %state = foreach_init(%iter)
+  jump for.header
+
+for.header:
+  [%has_value, %current] = foreach_iterate(%state)
+  cond_jump %has_value ? for.body : for.end
+
+for.body:
+  i = %current
+  ... body ...
+  jump for.header
+
+for.end:
+```
+
+这套设计里建议使用 4 个 `BasicBlock`：
+
+- `for.preheader`
+- `for.header`
+- `for.body`
+- `for.end`
+
+如果以后为了 profile / JIT 想把回边点单独规范化，也可以再拆一个 `for.latch`，但当前阶段不是必须。
+
+### 9. `break` 与 `continue`
+
+lowering `for` 时需要维护一个循环上下文栈，例如：
+
+```cpp
+struct LoopContext {
+    BasicBlock* break_target;
+    BasicBlock* continue_target;
+};
+```
+
+进入 `for` 时压栈：
+
+- `break_target = for.end`
+- `continue_target = for.header`
+
+这样：
+
+- `break` 直接 lower 成 `jump for.end`
+- `continue` 直接 lower 成 `jump for.header`
+
+嵌套循环时，只需要读取栈顶的循环上下文即可。
+
+### 10. `node_colon` 的 lowering
+
+`node_colon` 应作为普通表达式处理：
+
+```text
+2:4      -> call "colon"(2, 4)
+1:2:9    -> call "colon"(1, 2, 9)
+```
+
+这样 `for i = 2:4` 会自然变成：
+
+- 先把 `2:4` lower 成 `colon(2, 4)`
+- 再按统一的 `for i = expr` 方案进入 `foreach_init / foreach_iterate`
+
+这能把 `for i = a` 和 `for i = 2:4` 彻底统一到同一条 IR 执行链上。
+
 ## 建议的最小实现顺序
 
 建议按下面顺序推进：
@@ -238,7 +328,10 @@ bool to_cond(const std::shared_ptr<ba_obj>& value);
 4. 实现 `exec_terminal`
 5. 建立 `eval_binop`
 6. 建立 `eval_call`
-7. 用 `simple_demo.m` 跑通整条链路
+7. 把 `node_colon` lower 成运行时 `colon(...)`
+8. 把 `for` lower 成 `foreach_init / foreach_iterate` 的 CFG
+9. 支持 `break/continue`
+10. 用 `simple_demo.m` 和简单 `for` 用例跑通整条链路
 
 ## 为什么这版解释器值得做
 

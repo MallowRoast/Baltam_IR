@@ -1,6 +1,7 @@
 #include "interpreter/interpreter.h"
 
 #include <stdexcept>
+#include <unordered_map>
 #include <utility>
 
 #include "ba_obj/ba_obj.h"
@@ -14,25 +15,100 @@ BasicBlock* exec_terminal(Instruction* instruction, Frame& frame);
 
 namespace {
 
-std::vector<Value> invoke_builtin(const std::string& name, const std::vector<Value>& in_args,
-                                  std::size_t out_count) {
-    baFunPtr function_ptr = nullptr;
+enum class CallableType {
+    Builtin,
+    Internal,
+};
+
+const char* callable_type_text(CallableType type) {
+    switch (type) {
+        case CallableType::Builtin:
+            return "内置函数";
+        case CallableType::Internal:
+            return "内部函数";
+    }
+    return "函数";
+}
+
+std::unordered_map<std::string, baFunPtr>& builtin_function_cache() {
+    static std::unordered_map<std::string, baFunPtr> cache;
+    return cache;
+}
+
+std::unordered_map<std::string, baFunPtr>& internal_function_cache() {
+    static std::unordered_map<std::string, baFunPtr> cache;
+    return cache;
+}
+
+bool try_lookup_builtin_function_cached(const std::string& name, baFunPtr& function_ptr) {
+    auto& cache = builtin_function_cache();
+    auto it = cache.find(name);
+    if (it != cache.end()) {
+        function_ptr = it->second;
+        return function_ptr != nullptr;
+    }
+
+    function_ptr = nullptr;
     if (!lookup_builtin_function(name, function_ptr) || function_ptr == nullptr) {
-        throw std::runtime_error("找不到内建函数：" + name);
+        function_ptr = nullptr;
+        return false;
     }
 
-    std::vector<__const_ba_obj_p> builtin_in_args;
-    builtin_in_args.reserve(in_args.size());
+    cache.emplace(name, function_ptr);
+    return true;
+}
+
+bool try_lookup_internal_function_cached(const std::string& name, baFunPtr& function_ptr) {
+    auto& cache = internal_function_cache();
+    auto it = cache.find(name);
+    if (it != cache.end()) {
+        function_ptr = it->second;
+        return function_ptr != nullptr;
+    }
+
+    function_ptr = lookup_internal_function(name.c_str());
+    if (function_ptr == nullptr) {
+        return false;
+    }
+
+    cache.emplace(name, function_ptr);
+    return true;
+}
+
+std::size_t required_builtin_out_count(const std::string& name) {
+    const auto [declared_nargin, declared_nargout] = lookup_builtin_function_narg(name);
+    (void)declared_nargin;
+    if (declared_nargout < 0) {
+        return 0;
+    }
+    return static_cast<std::size_t>(declared_nargout);
+}
+
+std::vector<Value> invoke_function_ptr(const std::string& name, baFunPtr function_ptr,
+                                       const std::vector<Value>& in_args,
+                                       std::size_t out_count, CallableType type) {
+    std::vector<__const_ba_obj_p> runtime_in_args;
+    runtime_in_args.reserve(in_args.size());
     for (const Value& arg : in_args) {
-        builtin_in_args.push_back(arg);
+        runtime_in_args.push_back(arg);
     }
 
-    std::vector<Value> out_args(out_count);
-    for (Value& out_arg : out_args) {
-        out_arg = std::make_shared<ba_obj>();
+    // 语句位置调用仍然为运行时构造一个 ans 占位槽位，避免 out_args 为空。
+    const bool use_ans_placeholder = out_count == 0;
+    std::vector<Value> out_args(use_ans_placeholder ? 1 : out_count);
+    for (std::size_t i = 0; i < out_args.size(); ++i) {
+        out_args[i] = use_ans_placeholder && i == 0 ? ba_obj::make_void(V_ANS)
+                                                    : std::make_shared<ba_obj>();
     }
 
-    function_ptr(builtin_in_args, out_args);
+    try {
+        function_ptr(runtime_in_args, out_args);
+    } catch (const std::exception& ex) {
+        throw std::runtime_error(std::string("调用") + callable_type_text(type) + "失败: " + name +
+                                 "，输入个数 = " + std::to_string(in_args.size()) +
+                                 "，输出个数 = " + std::to_string(out_count) +
+                                 "，原因: " + ex.what());
+    }
     return out_args;
 }
 
@@ -42,21 +118,93 @@ Value eval_binop(BinOpInstruction::Type op, Value lhs, Value rhs) {
         case BinOpInstruction::Add:
             name = "plus";
             break;
+        case BinOpInstruction::Subtract:
+            name = "minus";
+            break;
         case BinOpInstruction::Gt:
             name = "gt";
+            break;
+        case BinOpInstruction::Lt:
+            name = "lt";
+            break;
+        case BinOpInstruction::Ne:
+            name = "ne";
+            break;
+        case BinOpInstruction::Or:
+            name = "or";
+            break;
+        case BinOpInstruction::MPower:
+            name = "mpower";
             break;
         case BinOpInstruction::Multiply:
             name = "times";
             break;
     }
 
-    std::vector<Value> results = invoke_builtin(name, {std::move(lhs), std::move(rhs)}, 1);
+    baFunPtr function_ptr = nullptr;
+    if (!try_lookup_builtin_function_cached(name, function_ptr)) {
+        throw std::runtime_error("找不到内置函数：" + name);
+    }
+    std::vector<Value> results =
+        invoke_function_ptr(name, function_ptr, {std::move(lhs), std::move(rhs)}, 1,
+                            CallableType::Builtin);
+    return results.front();
+}
+
+Value eval_unaryop(UnaryOpInstruction::Type op, Value operand) {
+    std::string name;
+    switch (op) {
+        case UnaryOpInstruction::UMinus:
+            name = "uminus";
+            break;
+    }
+
+    baFunPtr function_ptr = nullptr;
+    if (!try_lookup_builtin_function_cached(name, function_ptr)) {
+        throw std::runtime_error("找不到内置函数：" + name);
+    }
+    std::vector<Value> results =
+        invoke_function_ptr(name, function_ptr, {std::move(operand)}, 1, CallableType::Builtin);
     return results.front();
 }
 
 std::vector<Value> eval_call(const std::string& name, const std::vector<Value>& in_args,
-                             std::size_t out_count) {
-    return invoke_builtin(name, in_args, out_count);
+                             std::size_t out_count, Frame& frame) {
+    baFunPtr function_ptr = nullptr;
+
+    if (try_lookup_builtin_function_cached(name, function_ptr)) {
+        const std::size_t actual_out_count =
+            out_count == 0 ? 0 : std::max(out_count, required_builtin_out_count(name));
+        return invoke_function_ptr(name, function_ptr, in_args, actual_out_count,
+                                   CallableType::Builtin);
+    }
+
+    if (try_lookup_internal_function_cached(name, function_ptr)) {
+        return invoke_function_ptr(name, function_ptr, in_args, out_count,
+                                   CallableType::Internal);
+    }
+
+    Module* module = frame.function() != nullptr ? frame.function()->parent() : nullptr;
+    if (module == nullptr) {
+        throw std::runtime_error("找不到可调用的函数：" + name);
+    }
+
+    for (const auto& function : module->functions()) {
+        if (function != nullptr && function->name() == name) {
+            Frame callee = execute_function(*function, in_args, &frame);
+            if (callee.outputs().size() < out_count) {
+                throw std::runtime_error("函数输出个数不匹配：" + name);
+            }
+            if (out_count == 0) {
+                return {};
+            }
+            std::vector<Value> outputs = callee.outputs();
+            outputs.resize(out_count);
+            return outputs;
+        }
+    }
+
+    throw std::runtime_error("找不到可调用的函数：" + name);
 }
 
 void assign_output_operand(Instruction* operand, Value value, Frame& frame) {
@@ -71,15 +219,17 @@ void assign_output_operand(Instruction* operand, Value value, Frame& frame) {
     frame.store(name_instruction->name(), std::move(value));
 }
 
-std::vector<Value> eval_call_instruction(const CallInstruction& instruction, Frame& frame) {
+std::vector<Value> eval_call_instruction(const CallInstruction& instruction, Frame& frame,
+                                         std::size_t default_out_count) {
     std::vector<Value> in_args;
     in_args.reserve(instruction.in_args().size());
     for (Instruction* in_arg : instruction.in_args()) {
         in_args.push_back(eval_expr(in_arg, frame));
     }
 
-    const std::size_t out_count = instruction.out_args().empty() ? 1 : instruction.out_args().size();
-    std::vector<Value> out_args = eval_call(instruction.name(), in_args, out_count);
+    const std::size_t out_count = instruction.out_args().empty() ? default_out_count
+                                                                 : instruction.out_args().size();
+    std::vector<Value> out_args = eval_call(instruction.name(), in_args, out_count, frame);
 
     for (std::size_t i = 0; i < instruction.out_args().size(); ++i) {
         assign_output_operand(instruction.out_args()[i], out_args[i], frame);
@@ -174,6 +324,10 @@ Value eval_expr(Instruction* instruction, Frame& frame) {
     }
 
     switch (instruction->type()) {
+        case Instruction::Text: {
+            const auto* text = static_cast<const TextInstruction*>(instruction);
+            return std::make_shared<ba_obj>(text->text().c_str(), ba_char_mat);
+        }
         case Instruction::Name: {
             const auto* name = static_cast<const NameInstruction*>(instruction);
             return frame.load(name->name());
@@ -184,6 +338,10 @@ Value eval_expr(Instruction* instruction, Frame& frame) {
                 [](const auto& item) -> Value { return std::make_shared<ba_obj>(item); },
                 number->value());
         }
+        case Instruction::UnaryOp: {
+            const auto* unaryop = static_cast<const UnaryOpInstruction*>(instruction);
+            return eval_unaryop(unaryop->op(), eval_expr(unaryop->operand(), frame));
+        }
         case Instruction::BinOp: {
             const auto* binop = static_cast<const BinOpInstruction*>(instruction);
             return eval_binop(binop->op(), eval_expr(binop->lhs(), frame),
@@ -191,13 +349,12 @@ Value eval_expr(Instruction* instruction, Frame& frame) {
         }
         case Instruction::Call: {
             const auto* call = static_cast<const CallInstruction*>(instruction);
-            std::vector<Value> out_args = eval_call_instruction(*call, frame);
+            std::vector<Value> out_args = eval_call_instruction(*call, frame, 1);
             if (out_args.empty()) {
                 return std::make_shared<ba_obj>();
             }
             return out_args.front();
         }
-        case Instruction::Text:
         case Instruction::Asgn:
         case Instruction::CondJump:
         case Instruction::Jump:
@@ -221,12 +378,13 @@ void exec_inst(Instruction* instruction, Frame& frame) {
         }
         case Instruction::Call: {
             const auto* call = static_cast<const CallInstruction*>(instruction);
-            (void)eval_call_instruction(*call, frame);
+            (void)eval_call_instruction(*call, frame, 0);
             return;
         }
         case Instruction::Text:
         case Instruction::Name:
         case Instruction::Number:
+        case Instruction::UnaryOp:
         case Instruction::BinOp:
             return;
         case Instruction::CondJump:
@@ -265,6 +423,7 @@ BasicBlock* exec_terminal(Instruction* instruction, Frame& frame) {
         case Instruction::Text:
         case Instruction::Name:
         case Instruction::Number:
+        case Instruction::UnaryOp:
         case Instruction::BinOp:
         case Instruction::Asgn:
         case Instruction::Call:
@@ -286,7 +445,10 @@ Frame execute_function(Function& function, const std::vector<Value>& args, Frame
                 static_cast<int>(function.output_names().size()));
 
     for (std::size_t i = 0; i < function.input_names().size(); ++i) {
-        frame.store(function.input_names()[i], args[i]);
+        // MATLAB-like 函数参数更接近按值传递；这里复制一份 ba_obj 包装，
+        // 避免后续运行时调用意外共享并改写入口实参对象。
+        frame.store(function.input_names()[i],
+                    args[i] == nullptr ? nullptr : std::make_shared<ba_obj>(*args[i]));
     }
     for (const std::string& output_name : function.output_names()) {
         frame.declare(output_name);

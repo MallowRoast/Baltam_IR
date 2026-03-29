@@ -48,12 +48,31 @@ std::string format_number(const NumberInstruction::NumberValue& value) {
 
 std::string binop_symbol(BinOpInstruction::Type op) {
     switch (op) {
-        case BinOpInstruction::Type::Add:
+        case BinOpInstruction::Add:
             return "+";
-        case BinOpInstruction::Type::Gt:
+        case BinOpInstruction::Subtract:
+            return "-";
+        case BinOpInstruction::Gt:
             return ">";
-        case BinOpInstruction::Type::Multiply:
+        case BinOpInstruction::Lt:
+            return "<";
+        case BinOpInstruction::Ne:
+            return "~=";
+        case BinOpInstruction::Or:
+            return "|";
+        case BinOpInstruction::MPower:
+            return "^";
+        case BinOpInstruction::Multiply:
             return "*";
+    }
+
+    return "?";
+}
+
+std::string unaryop_symbol(UnaryOpInstruction::Type op) {
+    switch (op) {
+        case UnaryOpInstruction::UMinus:
+            return "-";
     }
 
     return "?";
@@ -90,12 +109,16 @@ std::string expr_text(const Instruction* instruction) {
 
     switch (instruction->type()) {
         case Instruction::Text:
-            return static_cast<const TextInstruction*>(instruction)->text();
+            return "'" + static_cast<const TextInstruction*>(instruction)->text() + "'";
         case Instruction::Name:
             return static_cast<const NameInstruction*>(instruction)->name();
         case Instruction::Number: {
             const auto* number = static_cast<const NumberInstruction*>(instruction);
             return format_number(number->value());
+        }
+        case Instruction::UnaryOp: {
+            const auto* unaryop = static_cast<const UnaryOpInstruction*>(instruction);
+            return "(" + unaryop_symbol(unaryop->op()) + expr_text(unaryop->operand()) + ")";
         }
         case Instruction::BinOp: {
             const auto* binop = static_cast<const BinOpInstruction*>(instruction);
@@ -212,6 +235,18 @@ NumberInstruction::NumberInstruction(std::complex<double> value,
 
 const NumberInstruction::NumberValue& NumberInstruction::value() const {
     return value_;
+}
+
+UnaryOpInstruction::UnaryOpInstruction(Type op, Instruction* operand,
+                                       std::optional<SourceLocation> location)
+    : Instruction(Instruction::UnaryOp, std::move(location)), op_(op), operand_(operand) {}
+
+UnaryOpInstruction::Type UnaryOpInstruction::op() const {
+    return op_;
+}
+
+Instruction* UnaryOpInstruction::operand() const {
+    return operand_;
 }
 
 BinOpInstruction::BinOpInstruction(Type op, Instruction* lhs, Instruction* rhs,

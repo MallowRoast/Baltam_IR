@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "ba_obj/ba_obj.h"
 #include "bt_ast_interface.h"
 #include "interpreter/interpreter.h"
 #include "ir/ir.h"
@@ -19,7 +20,7 @@ using namespace baltam;
 
 namespace {
 
-constexpr const char* kScriptRelativePath = "/test/simple_demo.m";
+constexpr const char* kDefaultScriptRelativePath = "/test/test1/test1.m";
 
 void print_parsed_ast(const std::shared_ptr<pcdata>& parsed_unit, std::size_t index) {
     if (parsed_unit == nullptr) {
@@ -84,7 +85,15 @@ int run_m_file(const std::string& script_path) {
         std::cout << std::endl;
 
         if (module.entry_function() != nullptr) {
-            const Frame frame = execute_function(*module.entry_function());
+            std::vector<Value> args;
+            // 直接调试函数文件时，main 没有额外的实参输入渠道。
+            // 这里按函数签名补齐数值 1，便于像 test1 这样的用例直接以 test1(1, 1) 形式运行。
+            args.reserve(module.entry_function()->input_names().size());
+            for (std::size_t i = 0; i < module.entry_function()->input_names().size(); ++i) {
+                args.push_back(std::make_shared<ba_obj>(1.0));
+            }
+
+            const Frame frame = execute_function(*module.entry_function(), args);
             print_frame_symbols(frame);
             std::cout << std::endl;
         }
@@ -109,13 +118,21 @@ int main(int argc, char** argv) {
     }
 
     std::vector<std::string> script_paths;
-    if (argc <= 1) {
-        script_paths.push_back(std::string(BALTAM_IR_SOURCE_DIR) + kScriptRelativePath);
-    } else {
-        script_paths.reserve(static_cast<std::size_t>(argc - 1));
-        for (int i = 1; i < argc; ++i) {
-            script_paths.emplace_back(argv[i]);
+    script_paths.reserve(static_cast<std::size_t>(std::max(argc - 1, 0)));
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+
+        // VSCode 的现有调试配置会传入 -nolauncher，这里直接忽略，
+        // 让 main 仍然能把后续参数当作 m 文件路径处理。
+        if (arg == "-nolauncher") {
+            continue;
         }
+        script_paths.push_back(arg);
+    }
+
+    if (script_paths.empty()) {
+        // 不传 m 文件时默认进入 test1，便于直接在 IDE 中复现解释器问题。
+        script_paths.push_back(std::string(BALTAM_IR_SOURCE_DIR) + kDefaultScriptRelativePath);
     }
 
     for (std::size_t i = 0; i < script_paths.size(); ++i) {
