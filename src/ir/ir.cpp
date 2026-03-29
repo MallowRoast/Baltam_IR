@@ -8,10 +8,6 @@
 namespace baltam {
 namespace {
 
-bool contains_block(const std::vector<BasicBlock*>& blocks, const BasicBlock* target) {
-    return std::find(blocks.begin(), blocks.end(), target) != blocks.end();
-}
-
 std::string format_double(double value) {
     std::ostringstream oss;
     oss << value;
@@ -36,6 +32,8 @@ std::string format_number(const NumberInstruction::NumberValue& value) {
             if constexpr (std::is_same_v<T, bool>) {
                 return item ? "true" : "false";
             } else if constexpr (std::is_same_v<T, std::int64_t>) {
+                return std::to_string(item);
+            } else if constexpr (std::is_same_v<T, std::uint64_t>) {
                 return std::to_string(item);
             } else if constexpr (std::is_same_v<T, double>) {
                 return format_double(item);
@@ -152,9 +150,10 @@ std::string expr_text(const Instruction* instruction) {
 void print_instruction(std::ostream& os, const Instruction& instruction) {
     os << "    " << expr_text(&instruction);
 
-    if (instruction.source_span().has_value()) {
-        const SourceSpan& span = *instruction.source_span();
-        os << "    ; " << span.filename << ":" << span.begin_line << ":" << span.begin_column;
+    if (instruction.source_location().has_value()) {
+        const SourceLocation& location = *instruction.source_location();
+        os << "    ; " << location.filename << ":" << location.begin_line << ":"
+           << location.begin_column;
     }
 
     os << "\n";
@@ -162,8 +161,8 @@ void print_instruction(std::ostream& os, const Instruction& instruction) {
 
 }  // namespace
 
-Instruction::Instruction(Type type, std::optional<SourceSpan> span)
-    : type_(type), source_span_(std::move(span)) {}
+Instruction::Instruction(Type type, std::optional<SourceLocation> location)
+    : type_(type), source_location_(std::move(location)) {}
 
 Instruction::Type Instruction::type() const {
     return type_;
@@ -173,47 +172,51 @@ BasicBlock* Instruction::parent() const {
     return parent_;
 }
 
-const std::optional<SourceSpan>& Instruction::source_span() const {
-    return source_span_;
+const std::optional<SourceLocation>& Instruction::source_location() const {
+    return source_location_;
 }
 
 void Instruction::set_parent(BasicBlock* block) {
     parent_ = block;
 }
 
-TextInstruction::TextInstruction(std::string text, std::optional<SourceSpan> span)
-    : Instruction(Text, std::move(span)), text_(std::move(text)) {}
+TextInstruction::TextInstruction(std::string text, std::optional<SourceLocation> location)
+    : Instruction(Text, std::move(location)), text_(std::move(text)) {}
 
 const std::string& TextInstruction::text() const {
     return text_;
 }
 
-NameInstruction::NameInstruction(std::string name, std::optional<SourceSpan> span)
-    : Instruction(Name, std::move(span)), name_(std::move(name)) {}
+NameInstruction::NameInstruction(std::string name, std::optional<SourceLocation> location)
+    : Instruction(Name, std::move(location)), name_(std::move(name)) {}
 
 const std::string& NameInstruction::name() const {
     return name_;
 }
 
-NumberInstruction::NumberInstruction(bool value, std::optional<SourceSpan> span)
-    : Instruction(Number, std::move(span)), value_(value) {}
+NumberInstruction::NumberInstruction(bool value, std::optional<SourceLocation> location)
+    : Instruction(Number, std::move(location)), value_(value) {}
 
-NumberInstruction::NumberInstruction(std::int64_t value, std::optional<SourceSpan> span)
-    : Instruction(Number, std::move(span)), value_(value) {}
+NumberInstruction::NumberInstruction(std::int64_t value, std::optional<SourceLocation> location)
+    : Instruction(Number, std::move(location)), value_(value) {}
 
-NumberInstruction::NumberInstruction(double value, std::optional<SourceSpan> span)
-    : Instruction(Number, std::move(span)), value_(value) {}
+NumberInstruction::NumberInstruction(std::uint64_t value, std::optional<SourceLocation> location)
+    : Instruction(Number, std::move(location)), value_(value) {}
 
-NumberInstruction::NumberInstruction(std::complex<double> value, std::optional<SourceSpan> span)
-    : Instruction(Number, std::move(span)), value_(std::move(value)) {}
+NumberInstruction::NumberInstruction(double value, std::optional<SourceLocation> location)
+    : Instruction(Number, std::move(location)), value_(value) {}
+
+NumberInstruction::NumberInstruction(std::complex<double> value,
+                                     std::optional<SourceLocation> location)
+    : Instruction(Number, std::move(location)), value_(std::move(value)) {}
 
 const NumberInstruction::NumberValue& NumberInstruction::value() const {
     return value_;
 }
 
 BinOpInstruction::BinOpInstruction(Type op, Instruction* lhs, Instruction* rhs,
-                                   std::optional<SourceSpan> span)
-    : Instruction(Instruction::BinOp, std::move(span)), op_(op), lhs_(lhs), rhs_(rhs) {}
+                                   std::optional<SourceLocation> location)
+    : Instruction(Instruction::BinOp, std::move(location)), op_(op), lhs_(lhs), rhs_(rhs) {}
 
 BinOpInstruction::Type BinOpInstruction::op() const {
     return op_;
@@ -227,8 +230,9 @@ Instruction* BinOpInstruction::rhs() const {
     return rhs_;
 }
 
-AssignInstruction::AssignInstruction(std::string name, Instruction* value, std::optional<SourceSpan> span)
-    : Instruction(Asgn, std::move(span)), name_(std::move(name)), value_(value) {}
+AssignInstruction::AssignInstruction(std::string name, Instruction* value,
+                                     std::optional<SourceLocation> location)
+    : Instruction(Asgn, std::move(location)), name_(std::move(name)), value_(value) {}
 
 const std::string& AssignInstruction::name() const {
     return name_;
@@ -239,8 +243,9 @@ Instruction* AssignInstruction::value() const {
 }
 
 CallInstruction::CallInstruction(std::string name, std::vector<Instruction*> out_args,
-                                 std::vector<Instruction*> in_args, std::optional<SourceSpan> span)
-    : Instruction(Call, std::move(span)),
+                                 std::vector<Instruction*> in_args,
+                                 std::optional<SourceLocation> location)
+    : Instruction(Call, std::move(location)),
       name_(std::move(name)),
       out_args_(std::move(out_args)),
       in_args_(std::move(in_args)) {}
@@ -258,8 +263,9 @@ const std::vector<Instruction*>& CallInstruction::in_args() const {
 }
 
 CondJumpInstruction::CondJumpInstruction(Instruction* cond, BasicBlock* true_block,
-                                         BasicBlock* false_block, std::optional<SourceSpan> span)
-    : Instruction(Instruction::CondJump, std::move(span)),
+                                         BasicBlock* false_block,
+                                         std::optional<SourceLocation> location)
+    : Instruction(Instruction::CondJump, std::move(location)),
       cond_(cond),
       true_block_(true_block),
       false_block_(false_block) {}
@@ -276,17 +282,21 @@ BasicBlock* CondJumpInstruction::false_block() const {
     return false_block_;
 }
 
-JumpInstruction::JumpInstruction(BasicBlock* target, std::optional<SourceSpan> span)
-    : Instruction(Jump, std::move(span)), target_(target) {}
+JumpInstruction::JumpInstruction(BasicBlock* target, std::optional<SourceLocation> location)
+    : Instruction(Jump, std::move(location)), target_(target) {}
 
 BasicBlock* JumpInstruction::target() const {
     return target_;
 }
 
-ReturnInstruction::ReturnInstruction(std::optional<SourceSpan> span)
-    : Instruction(Return, std::move(span)) {}
+ReturnInstruction::ReturnInstruction(std::optional<SourceLocation> location)
+    : Instruction(Return, std::move(location)) {}
 
 BasicBlock::BasicBlock(std::string name): name_(std::move(name)) {}
+
+bool BasicBlock::contains_block(const std::vector<BasicBlock*>& blocks, const BasicBlock* target) {
+    return std::find(blocks.begin(), blocks.end(), target) != blocks.end();
+}
 
 Function* BasicBlock::parent() const {
     return parent_;
@@ -326,11 +336,11 @@ void BasicBlock::add_successor(BasicBlock* successor) {
         return;
     }
 
-    if (!contains_block(successors_, successor)) {
+    if (!BasicBlock::contains_block(successors_, successor)) {
         successors_.push_back(successor);
     }
 
-    if (!contains_block(successor->predecessors_, this)) {
+    if (!BasicBlock::contains_block(successor->predecessors_, this)) {
         successor->predecessors_.push_back(this);
     }
 }
@@ -428,14 +438,14 @@ const std::vector<std::unique_ptr<Function>>& Module::functions() const {
 }
 
 Function* Module::create_function(std::string name, Function::Type type) {
-    auto function = std::make_unique<::baltam::Function>(std::move(name), type);
-    ::baltam::Function* raw = function.get();
+    auto function = std::make_unique<Function>(std::move(name), type);
+    Function* raw = function.get();
     raw->set_parent(this);
     function_storage_.push_back(std::move(function));
     return raw;
 }
 
-void Module::set_entry_function(::baltam::Function* function) {
+void Module::set_entry_function(Function* function) {
     entry_function_ = function;
 }
 

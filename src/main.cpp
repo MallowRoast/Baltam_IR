@@ -64,11 +64,11 @@ int run_m_file(const std::string& script_path) {
     const auto parsed_units = bt_ast_interface::parse_mfile(script_path, msg);
 
     if (!msg.empty()) {
-        std::cout << "parser message: " << msg << std::endl;
+        std::cout << "解析器消息: " << msg << std::endl;
     }
 
     if (parsed_units.empty()) {
-        std::cerr << "No AST generated for file: " << script_path << std::endl;
+        std::cerr << "文件未生成 AST: " << script_path << std::endl;
         return 1;
     }
 
@@ -89,7 +89,8 @@ int run_m_file(const std::string& script_path) {
             std::cout << std::endl;
         }
     } catch (const std::exception& ex) {
-        std::cerr << "IR lowering/interpreter failed for " << script_path << ": " << ex.what()
+        std::cerr << "文件的 IR lower 或解释执行失败: " << script_path << "，原因: "
+                  << ex.what()
                   << std::endl;
         exit_code = 1;
     }
@@ -103,7 +104,7 @@ int main(int argc, char** argv) {
     int exit_code = 0;
     const int init_ret = bt_ast_interface::initialize();
     if (init_ret != 0) {
-        std::cerr << "bt_ast_interface::initialize failed, code = " << init_ret << std::endl;
+        std::cerr << "bt_ast_interface::initialize 失败，返回码 = " << init_ret << std::endl;
         return 1;
     }
 

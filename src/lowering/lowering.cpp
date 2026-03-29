@@ -22,12 +22,12 @@
 namespace baltam {
 namespace {
 
-std::optional<SourceSpan> source_span_from(const ast_ptr& node) {
+std::optional<SourceLocation> source_location_from(const ast_ptr& node) {
     if (!node) {
         return std::nullopt;
     }
 
-    return SourceSpan{
+    return SourceLocation{
         node->loc.begin.filename,
         node->loc.begin.line,
         node->loc.begin.column,
@@ -87,22 +87,27 @@ std::vector<std::string> collect_name_list(const ast_ptr& node) {
 
     const std::string name = get_ast_sym_name(node, 0);
     if (name.empty()) {
-        throw std::runtime_error("Unsupported name list node in IR lowering.");
+        throw std::runtime_error("IR lower 暂不支持该名称列表节点。");
     }
     return {name};
 }
 
 struct LoweringContext {
-    Module* module = nullptr;
-    Function* function = nullptr;
     BasicBlock* current_block = nullptr;
     int next_block_id = 0;
 };
 
+Function& current_function(LoweringContext& ctx) {
+    if (ctx.current_block == nullptr || ctx.current_block->parent() == nullptr) {
+        throw std::runtime_error("IR lower 时找不到当前函数。");
+    }
+    return *ctx.current_block->parent();
+}
+
 BasicBlock* create_block(LoweringContext& ctx, const std::string& prefix) {
     std::ostringstream oss;
     oss << prefix << "_" << ctx.next_block_id++;
-    return ctx.function->create_block(oss.str());
+    return current_function(ctx).create_block(oss.str());
 }
 
 Instruction* lower_expr(const ast_ptr& node, LoweringContext& ctx);
@@ -110,7 +115,7 @@ void lower_stmt(const ast_ptr& node, LoweringContext& ctx);
 
 void append_instruction(LoweringContext& ctx, Instruction* instruction) {
     if (ctx.current_block == nullptr) {
-        throw std::runtime_error("No current basic block while lowering instruction.");
+        throw std::runtime_error("IR lower 指令时找不到当前基本块。");
     }
     ctx.current_block->append_instruction(instruction);
 }
@@ -121,16 +126,16 @@ Instruction* lower_number(const std::shared_ptr<numval>& number_node, LoweringCo
                               [](unsigned char ch) { return std::isspace(ch) != 0; }),
                text.end());
     if (text.empty()) {
-        throw std::runtime_error("Empty numeric literal in IR lowering.");
+        throw std::runtime_error("IR lower 遇到了空的数字字面量。");
     }
 
     if (text.find('i') != std::string::npos || text.find('j') != std::string::npos ||
         text.find('I') != std::string::npos || text.find('J') != std::string::npos) {
-        throw std::runtime_error("Complex numeric literals are not supported yet in IR lowering.");
+        throw std::runtime_error("IR lower 暂不支持复数字面量。");
     }
 
-    Instruction* instruction = ctx.function->create_instruction<NumberInstruction>(
-        std::stod(text), source_span_from(number_node));
+    Instruction* instruction = current_function(ctx).create_instruction<NumberInstruction>(
+        std::stod(text), source_location_from(number_node));
     append_instruction(ctx, instruction);
     return instruction;
 }
@@ -139,7 +144,8 @@ Instruction* lower_call(const std::shared_ptr<multipleFuncCall>& call_node, Lowe
     std::vector<Instruction*> out_args;
     for (const std::string& name : collect_name_list(call_node->out_args())) {
         Instruction* out_arg =
-            ctx.function->create_instruction<NameInstruction>(name, source_span_from(call_node->out_args()));
+            current_function(ctx).create_instruction<NameInstruction>(
+                name, source_location_from(call_node->out_args()));
         append_instruction(ctx, out_arg);
         out_args.push_back(out_arg);
     }
@@ -155,22 +161,23 @@ Instruction* lower_call(const std::shared_ptr<multipleFuncCall>& call_node, Lowe
         }
     }
 
-    Instruction* instruction = ctx.function->create_instruction<CallInstruction>(
-        call_node->name(), std::move(out_args), std::move(in_args), source_span_from(call_node));
+    Instruction* instruction = current_function(ctx).create_instruction<CallInstruction>(
+        call_node->name(), std::move(out_args), std::move(in_args),
+        source_location_from(call_node));
     append_instruction(ctx, instruction);
     return instruction;
 }
 
 Instruction* lower_expr(const ast_ptr& node, LoweringContext& ctx) {
     if (!node) {
-        throw std::runtime_error("Cannot lower a null expression node.");
+        throw std::runtime_error("IR lower 不能处理空表达式节点。");
     }
 
     switch (node->nodetype) {
         case node_name: {
             const auto sym = std::static_pointer_cast<symref>(node);
-            Instruction* instruction = ctx.function->create_instruction<NameInstruction>(
-                sym->name(), source_span_from(node));
+            Instruction* instruction = current_function(ctx).create_instruction<NameInstruction>(
+                sym->name(), source_location_from(node));
             append_instruction(ctx, instruction);
             return instruction;
         }
@@ -188,8 +195,8 @@ Instruction* lower_expr(const ast_ptr& node, LoweringContext& ctx) {
 
             Instruction* lhs = lower_expr(node->branch[0], ctx);
             Instruction* rhs = lower_expr(node->branch[1], ctx);
-            Instruction* instruction = ctx.function->create_instruction<BinOpInstruction>(
-                op, lhs, rhs, source_span_from(node));
+            Instruction* instruction = current_function(ctx).create_instruction<BinOpInstruction>(
+                op, lhs, rhs, source_location_from(node));
             append_instruction(ctx, instruction);
             return instruction;
         }
@@ -199,14 +206,15 @@ Instruction* lower_expr(const ast_ptr& node, LoweringContext& ctx) {
             break;
     }
 
-    throw std::runtime_error("Unsupported expression node in IR lowering.");
+    throw std::runtime_error("IR lower 暂不支持该表达式节点。");
 }
 
 void ensure_fallthrough_to(LoweringContext& ctx, BasicBlock* target, const ast_ptr& node) {
     if (ctx.current_block != nullptr && ctx.current_block->terminal() == nullptr) {
         ctx.current_block->add_successor(target);
         ctx.current_block->set_terminal(
-            ctx.function->create_instruction<JumpInstruction>(target, source_span_from(node)));
+            current_function(ctx).create_instruction<JumpInstruction>(target,
+                                                                      source_location_from(node)));
     }
 }
 
@@ -228,8 +236,8 @@ void lower_if_stmt(const std::shared_ptr<if_flow>& if_node, LoweringContext& ctx
 
     ctx.current_block->add_successor(then_block);
     ctx.current_block->add_successor(else_block);
-    ctx.current_block->set_terminal(ctx.function->create_instruction<CondJumpInstruction>(
-        cond, then_block, else_block, source_span_from(if_node)));
+    ctx.current_block->set_terminal(current_function(ctx).create_instruction<CondJumpInstruction>(
+        cond, then_block, else_block, source_location_from(if_node)));
 
     ctx.current_block = then_block;
     lower_stmt(if_node->tl(), ctx);
@@ -246,8 +254,8 @@ void lower_if_stmt(const std::shared_ptr<if_flow>& if_node, LoweringContext& ctx
 
 void lower_assignment(const std::shared_ptr<symasgn>& assign_node, LoweringContext& ctx) {
     Instruction* value = lower_expr(assign_node->v(), ctx);
-    append_instruction(ctx, ctx.function->create_instruction<AssignInstruction>(
-                                assign_node->name(), value, source_span_from(assign_node)));
+    append_instruction(ctx, current_function(ctx).create_instruction<AssignInstruction>(
+                                assign_node->name(), value, source_location_from(assign_node)));
 }
 
 void lower_stmt(const ast_ptr& node, LoweringContext& ctx) {
@@ -276,7 +284,7 @@ void lower_stmt(const ast_ptr& node, LoweringContext& ctx) {
             break;
     }
 
-    throw std::runtime_error("Unsupported statement node in IR lowering.");
+    throw std::runtime_error("IR lower 暂不支持该语句节点。");
 }
 
 ast_ptr script_body_from_unit(const pcdata& unit) {
@@ -311,8 +319,6 @@ void lower_unit_into_function(const pcdata& unit, bool is_first, Module& module)
     function->set_entry_block(entry);
 
     LoweringContext ctx;
-    ctx.module = &module;
-    ctx.function = function;
     ctx.current_block = entry;
     ctx.next_block_id = 0;
 
@@ -320,7 +326,7 @@ void lower_unit_into_function(const pcdata& unit, bool is_first, Module& module)
     lower_stmt(body, ctx);
     if (ctx.current_block != nullptr && ctx.current_block->terminal() == nullptr) {
         ctx.current_block->set_terminal(
-            function->create_instruction<ReturnInstruction>(source_span_from(body)));
+            current_function(ctx).create_instruction<ReturnInstruction>(source_location_from(body)));
     }
 }
 
@@ -328,7 +334,7 @@ void lower_unit_into_function(const pcdata& unit, bool is_first, Module& module)
 
 Module lower_parsed_units_to_ir(const std::vector<std::shared_ptr<pcdata>>& parsed_units) {
     if (parsed_units.empty() || parsed_units.front() == nullptr) {
-        throw std::runtime_error("No parsed units available for IR lowering.");
+        throw std::runtime_error("IR lower 没有可用的解析单元。");
     }
 
     const pcdata& first_unit = *parsed_units.front();
@@ -345,7 +351,7 @@ Module lower_parsed_units_to_ir(const std::vector<std::shared_ptr<pcdata>>& pars
     }
 
     if (module.entry_function() == nullptr) {
-        throw std::runtime_error("Failed to lower any function into IR.");
+        throw std::runtime_error("IR lower 失败：没有成功生成任何函数。");
     }
     return module;
 }

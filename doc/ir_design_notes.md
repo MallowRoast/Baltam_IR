@@ -354,7 +354,7 @@ StoreLocal a_slot, v2
 - 结果值列表
 - 操作数列表
 - `TypeInfo`
-- `SourceSpan`
+- `SourceLocation`
 - `EffectFlags`
 - `ProfileSiteId`
 
@@ -708,4 +708,3 @@ StoreLocal a_slot, v2
 - 模块/函数/block 分层
 - 调用点分类
 - 保留调试与回退能力
-

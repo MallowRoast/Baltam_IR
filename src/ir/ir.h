@@ -16,7 +16,7 @@ namespace baltam {
 /**
  * @brief 附着在 IR 指令上的源码位置信息。
  */
-struct SourceSpan {
+struct SourceLocation {
     std::string filename;
     int begin_line = 0;
     int begin_column = 0;
@@ -66,13 +66,13 @@ public:
     /**
      * @brief 返回可选的源码位置信息。
      */
-    const std::optional<SourceSpan>& source_span() const;
+    const std::optional<SourceLocation>& source_location() const;
 
 protected:
     /**
      * @brief 用动态类型标签构造一条指令。
      */
-    explicit Instruction(Type type, std::optional<SourceSpan> span = std::nullopt);
+    explicit Instruction(Type type, std::optional<SourceLocation> location = std::nullopt);
 
 private:
     friend class BasicBlock;
@@ -84,7 +84,7 @@ private:
 
     Type type_;
     BasicBlock* parent_ = nullptr;
-    std::optional<SourceSpan> source_span_;
+    std::optional<SourceLocation> source_location_;
 };
 
 /**
@@ -92,7 +92,7 @@ private:
  */
 class TextInstruction final : public Instruction {
 public:
-    explicit TextInstruction(std::string text, std::optional<SourceSpan> span = std::nullopt);
+    explicit TextInstruction(std::string text, std::optional<SourceLocation> location = std::nullopt);
 
     /**
      * @brief 返回原始文本内容。
@@ -108,7 +108,7 @@ private:
  */
 class NameInstruction final : public Instruction {
 public:
-    explicit NameInstruction(std::string name, std::optional<SourceSpan> span = std::nullopt);
+    explicit NameInstruction(std::string name, std::optional<SourceLocation> location = std::nullopt);
 
     /**
      * @brief 返回被引用的符号名。
@@ -126,13 +126,14 @@ private:
  */
 class NumberInstruction final : public Instruction {
 public:
-    using NumberValue = std::variant<bool, std::int64_t, double, std::complex<double>>;
+    using NumberValue = std::variant<bool, std::int64_t, std::uint64_t, double, std::complex<double>>;
 
-    explicit NumberInstruction(bool value, std::optional<SourceSpan> span = std::nullopt);
-    explicit NumberInstruction(std::int64_t value, std::optional<SourceSpan> span = std::nullopt);
-    explicit NumberInstruction(double value, std::optional<SourceSpan> span = std::nullopt);
+    explicit NumberInstruction(bool value, std::optional<SourceLocation> location = std::nullopt);
+    explicit NumberInstruction(std::int64_t value, std::optional<SourceLocation> location = std::nullopt);
+    explicit NumberInstruction(std::uint64_t value, std::optional<SourceLocation> location = std::nullopt);
+    explicit NumberInstruction(double value, std::optional<SourceLocation> location = std::nullopt);
     explicit NumberInstruction(std::complex<double> value,
-                               std::optional<SourceSpan> span = std::nullopt);
+                               std::optional<SourceLocation> location = std::nullopt);
 
     /**
      * @brief 返回字面量载荷。
@@ -161,7 +162,7 @@ public:
     };
 
     BinOpInstruction(Type op, Instruction* lhs, Instruction* rhs,
-                     std::optional<SourceSpan> span = std::nullopt);
+                     std::optional<SourceLocation> location = std::nullopt);
 
     /**
      * @brief 返回二元运算种类。
@@ -190,7 +191,7 @@ private:
 class AssignInstruction final : public Instruction {
 public:
     AssignInstruction(std::string name, Instruction* value,
-                      std::optional<SourceSpan> span = std::nullopt);
+                      std::optional<SourceLocation> location = std::nullopt);
 
     /**
      * @brief 返回赋值目标变量名。
@@ -213,7 +214,8 @@ private:
 class CallInstruction final : public Instruction {
 public:
     CallInstruction(std::string name, std::vector<Instruction*> out_args,
-                    std::vector<Instruction*> in_args, std::optional<SourceSpan> span = std::nullopt);
+                    std::vector<Instruction*> in_args,
+                    std::optional<SourceLocation> location = std::nullopt);
 
     /**
      * @brief 返回被调用函数名。
@@ -242,7 +244,7 @@ private:
 class CondJumpInstruction final : public Instruction {
 public:
     CondJumpInstruction(Instruction* cond, BasicBlock* true_block, BasicBlock* false_block,
-                        std::optional<SourceSpan> span = std::nullopt);
+                        std::optional<SourceLocation> location = std::nullopt);
 
     /**
      * @brief 返回分支条件指令。
@@ -270,7 +272,8 @@ private:
  */
 class JumpInstruction final : public Instruction {
 public:
-    explicit JumpInstruction(BasicBlock* target, std::optional<SourceSpan> span = std::nullopt);
+    explicit JumpInstruction(BasicBlock* target,
+                             std::optional<SourceLocation> location = std::nullopt);
 
     /**
      * @brief 返回跳转目标块。
@@ -286,7 +289,7 @@ private:
  */
 class ReturnInstruction final : public Instruction {
 public:
-    explicit ReturnInstruction(std::optional<SourceSpan> span = std::nullopt);
+    explicit ReturnInstruction(std::optional<SourceLocation> location = std::nullopt);
 };
 
 /**
@@ -298,6 +301,11 @@ public:
 class BasicBlock {
 public:
     explicit BasicBlock(std::string name);
+
+    /**
+     * @brief 判断给定块列表中是否包含指定基本块。
+     */
+    static bool contains_block(const std::vector<BasicBlock*>& blocks, const BasicBlock* target);
 
     /**
      * @brief 返回所属 Function；若尚未挂接则返回 nullptr。
@@ -490,29 +498,29 @@ public:
     /**
      * @brief 返回该模块的入口函数。
      */
-    ::baltam::Function* entry_function() const;
+    Function* entry_function() const;
 
     /**
      * @brief 按插入顺序返回本模块拥有的函数。
      */
-    const std::vector<std::unique_ptr<::baltam::Function>>& functions() const;
+    const std::vector<std::unique_ptr<Function>>& functions() const;
 
     /**
      * @brief 创建并接管一个新的 Function。
      */
-    ::baltam::Function* create_function(std::string name, ::baltam::Function::Type type);
+    Function* create_function(std::string name, Function::Type type);
 
     /**
      * @brief 设置该模块的入口函数。
      */
-    void set_entry_function(::baltam::Function* function);
+    void set_entry_function(Function* function);
 
 private:
     std::string name_;
     std::string source_path_;
     Type type_ = M_Function;
-    std::vector<std::unique_ptr<::baltam::Function>> function_storage_;
-    ::baltam::Function* entry_function_ = nullptr;
+    std::vector<std::unique_ptr<Function>> function_storage_;
+    Function* entry_function_ = nullptr;
 };
 
 /**

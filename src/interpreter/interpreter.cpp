@@ -1,12 +1,11 @@
 #include "interpreter/interpreter.h"
 
-#include <sstream>
 #include <stdexcept>
 #include <utility>
 
 #include "ba_obj/ba_obj.h"
-#include "ba_obj/matrix.h"
 #include "baltam_worker/builtin_manager.h"
+#include "print/obj2str.h"
 
 namespace baltam {
 Value eval_expr(Instruction* instruction, Frame& frame);
@@ -15,27 +14,11 @@ BasicBlock* exec_terminal(Instruction* instruction, Frame& frame);
 
 namespace {
 
-template <typename T>
-T scalar_value(const ba_obj& obj) {
-    const auto* matrix_ptr = obj.cget<matrix<T>>();
-    return (*matrix_ptr)[0];
-}
-
-std::string format_complex(const std::complex<double>& value) {
-    std::ostringstream oss;
-    oss << value.real();
-    if (value.imag() >= 0) {
-        oss << "+";
-    }
-    oss << value.imag() << "i";
-    return oss.str();
-}
-
 std::vector<Value> invoke_builtin(const std::string& name, const std::vector<Value>& in_args,
                                   std::size_t out_count) {
     baFunPtr function_ptr = nullptr;
     if (!lookup_builtin_function(name, function_ptr) || function_ptr == nullptr) {
-        throw std::runtime_error("Builtin function not found: " + name);
+        throw std::runtime_error("找不到内建函数：" + name);
     }
 
     std::vector<__const_ba_obj_p> builtin_in_args;
@@ -76,56 +59,12 @@ std::vector<Value> eval_call(const std::string& name, const std::vector<Value>& 
     return invoke_builtin(name, in_args, out_count);
 }
 
-bool to_cond(const Value& value) {
-    if (value == nullptr) {
-        throw std::runtime_error("Condition value is null.");
-    }
-
-    const ba_obj& obj = *value;
-    if (!obj.is_scalar()) {
-        throw std::runtime_error("Condition value must be scalar.");
-    }
-
-    switch (obj.type()) {
-        case ba_bool_mat:
-            return scalar_value<bool>(obj);
-        case ba_int8_mat:
-            return scalar_value<std::int8_t>(obj) != 0;
-        case ba_int16_mat:
-            return scalar_value<std::int16_t>(obj) != 0;
-        case ba_int_mat:
-            return scalar_value<std::int32_t>(obj) != 0;
-        case ba_int64_mat:
-            return scalar_value<std::int64_t>(obj) != 0;
-        case ba_uint8_mat:
-            return scalar_value<std::uint8_t>(obj) != 0;
-        case ba_uint16_mat:
-            return scalar_value<std::uint16_t>(obj) != 0;
-        case ba_uint_mat:
-            return scalar_value<std::uint32_t>(obj) != 0;
-        case ba_uint64_mat:
-            return scalar_value<std::uint64_t>(obj) != 0;
-        case ba_double_mat:
-            return scalar_value<double>(obj) != 0.0;
-        case ba_single_mat:
-            return scalar_value<float>(obj) != 0.0f;
-        case ba_complex_double_mat:
-            return scalar_value<std::complex<double>>(obj) != std::complex<double>{};
-        case ba_complex_single_mat:
-            return scalar_value<std::complex<float>>(obj) != std::complex<float>{};
-        default:
-            break;
-    }
-
-    throw std::runtime_error("Unsupported condition value type.");
-}
-
 void assign_output_operand(Instruction* operand, Value value, Frame& frame) {
     if (operand == nullptr) {
-        throw std::runtime_error("Call output operand is null.");
+        throw std::runtime_error("函数调用的输出操作数为空。");
     }
     if (operand->type() != Instruction::Name) {
-        throw std::runtime_error("Only NameInstruction is supported as a call output target.");
+        throw std::runtime_error("函数调用的输出目标目前只支持 NameInstruction。");
     }
 
     const auto* name_instruction = static_cast<const NameInstruction*>(operand);
@@ -204,10 +143,10 @@ void Frame::store(const std::string& name, Value value) {
 Value Frame::load(const std::string& name) const {
     auto it = symbols_.find(name);
     if (it == symbols_.end()) {
-        throw std::runtime_error("Undefined symbol: " + name);
+        throw std::runtime_error("未定义的符号：" + name);
     }
     if (!it->second.initialized || it->second.value == nullptr) {
-        throw std::runtime_error("Uninitialized symbol: " + name);
+        throw std::runtime_error("符号尚未初始化：" + name);
     }
     return it->second.value;
 }
@@ -231,7 +170,7 @@ void Frame::set_outputs(std::vector<Value> outputs) {
 
 Value eval_expr(Instruction* instruction, Frame& frame) {
     if (instruction == nullptr) {
-        throw std::runtime_error("Cannot evaluate a null instruction.");
+        throw std::runtime_error("不能对空指令求值。");
     }
 
     switch (instruction->type()) {
@@ -266,7 +205,7 @@ Value eval_expr(Instruction* instruction, Frame& frame) {
             break;
     }
 
-    throw std::runtime_error("Instruction is not a valid expression.");
+    throw std::runtime_error("该指令不能作为表达式求值。");
 }
 
 void exec_inst(Instruction* instruction, Frame& frame) {
@@ -296,7 +235,7 @@ void exec_inst(Instruction* instruction, Frame& frame) {
             break;
     }
 
-    throw std::runtime_error("Terminator instruction cannot appear in the block body.");
+    throw std::runtime_error("终结指令不能出现在基本块正文中。");
 }
 
 BasicBlock* exec_terminal(Instruction* instruction, Frame& frame) {
@@ -309,8 +248,11 @@ BasicBlock* exec_terminal(Instruction* instruction, Frame& frame) {
     switch (instruction->type()) {
         case Instruction::CondJump: {
             const auto* cond_jump = static_cast<const CondJumpInstruction*>(instruction);
-            return to_cond(eval_expr(cond_jump->cond(), frame)) ? cond_jump->true_block()
-                                                                 : cond_jump->false_block();
+            Value cond_value = eval_expr(cond_jump->cond(), frame);
+            if (cond_value == nullptr) {
+                throw std::runtime_error("条件值为空。");
+            }
+            return cond_value->as_bool() ? cond_jump->true_block() : cond_jump->false_block();
         }
         case Instruction::Jump: {
             const auto* jump = static_cast<const JumpInstruction*>(instruction);
@@ -329,15 +271,15 @@ BasicBlock* exec_terminal(Instruction* instruction, Frame& frame) {
             break;
     }
 
-    throw std::runtime_error("Block terminal is not a terminator instruction.");
+    throw std::runtime_error("基本块的 terminal 不是合法的终结指令。");
 }
 
 Frame execute_function(Function& function, const std::vector<Value>& args, Frame* caller) {
     if (function.entry_block() == nullptr) {
-        throw std::runtime_error("Function has no entry block: " + function.name());
+        throw std::runtime_error("函数缺少入口基本块：" + function.name());
     }
     if (args.size() != function.input_names().size()) {
-        throw std::runtime_error("Argument count mismatch when executing function: " + function.name());
+        throw std::runtime_error("执行函数时参数个数不匹配：" + function.name());
     }
 
     Frame frame(&function, caller, static_cast<int>(args.size()),
@@ -368,52 +310,7 @@ std::string value_text(const Value& value) {
     if (value == nullptr) {
         return "<null>";
     }
-
-    const ba_obj& obj = *value;
-    if (!obj.is_scalar()) {
-        return "<non-scalar>";
-    }
-
-    switch (obj.type()) {
-        case ba_bool_mat:
-            return scalar_value<bool>(obj) ? "true" : "false";
-        case ba_int8_mat:
-            return std::to_string(static_cast<int>(scalar_value<std::int8_t>(obj)));
-        case ba_int16_mat:
-            return std::to_string(scalar_value<std::int16_t>(obj));
-        case ba_int_mat:
-            return std::to_string(scalar_value<std::int32_t>(obj));
-        case ba_int64_mat:
-            return std::to_string(scalar_value<std::int64_t>(obj));
-        case ba_uint8_mat:
-            return std::to_string(static_cast<unsigned int>(scalar_value<std::uint8_t>(obj)));
-        case ba_uint16_mat:
-            return std::to_string(scalar_value<std::uint16_t>(obj));
-        case ba_uint_mat:
-            return std::to_string(scalar_value<std::uint32_t>(obj));
-        case ba_uint64_mat:
-            return std::to_string(scalar_value<std::uint64_t>(obj));
-        case ba_double_mat: {
-            std::ostringstream oss;
-            oss << scalar_value<double>(obj);
-            return oss.str();
-        }
-        case ba_single_mat: {
-            std::ostringstream oss;
-            oss << scalar_value<float>(obj);
-            return oss.str();
-        }
-        case ba_complex_double_mat:
-            return format_complex(scalar_value<std::complex<double>>(obj));
-        case ba_complex_single_mat: {
-            const std::complex<float> item = scalar_value<std::complex<float>>(obj);
-            return format_complex(std::complex<double>(item.real(), item.imag()));
-        }
-        default:
-            break;
-    }
-
-    return "<value>";
+    return internal::obj2str(*value);
 }
 
 }  // namespace baltam
