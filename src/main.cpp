@@ -8,6 +8,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "ba_obj/ba_obj.h"
@@ -20,7 +21,32 @@ using namespace baltam;
 
 namespace {
 
-constexpr const char* kDefaultScriptRelativePath = "/test/test1/test1.m";
+
+std::string source_path_from_relative(std::string_view relative_path) {
+    return std::string(BALTAM_IR_SOURCE_DIR) + std::string(relative_path);
+}
+
+std::string resolve_script_argument(const std::string& arg) {
+    if (arg == "simple_demo" || arg == "simple_demo.m") {
+        return source_path_from_relative("/test/simple_demo.m");
+    }
+    else if (arg == "test1" || arg == "test1.m") {
+        return source_path_from_relative("/test/test1/test1.m");
+    }
+    else if (arg == "test1_2" || arg == "test1_2.m") {
+        return source_path_from_relative("/test/test1_2/test1_2.m");
+    }
+    else if (arg == "test1_3" || arg == "test1_3.m") {
+        return source_path_from_relative("/test/test1_3/test1_3.m");
+    }
+    else if (arg == "test1_4" || arg == "test1_4.m") {
+        return source_path_from_relative("/test/test1_4/test1_4.m");
+    }
+    else if (arg == "test1_5" || arg == "test1_5.m") {
+        return source_path_from_relative("/test/test1_5/test1_5.m");
+    }
+    return arg;
+}
 
 void print_parsed_ast(const std::shared_ptr<pcdata>& parsed_unit, std::size_t index) {
     if (parsed_unit == nullptr) {
@@ -40,10 +66,6 @@ void print_parsed_ast(const std::shared_ptr<pcdata>& parsed_unit, std::size_t in
 
     std::cout << "  ast2str:" << std::endl;
     std::cout << ast2str(parsed_unit->ast) << std::endl;
-
-    std::cout << "  ast tree:" << std::endl;
-    printAst(parsed_unit->ast, nullptr, false);
-    std::cout << std::endl;
 }
 
 void print_frame_symbols(const Frame& frame) {
@@ -121,18 +143,7 @@ int main(int argc, char** argv) {
     script_paths.reserve(static_cast<std::size_t>(std::max(argc - 1, 0)));
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
-
-        // VSCode 的现有调试配置会传入 -nolauncher，这里直接忽略，
-        // 让 main 仍然能把后续参数当作 m 文件路径处理。
-        if (arg == "-nolauncher") {
-            continue;
-        }
-        script_paths.push_back(arg);
-    }
-
-    if (script_paths.empty()) {
-        // 不传 m 文件时默认进入 test1，便于直接在 IDE 中复现解释器问题。
-        script_paths.push_back(std::string(BALTAM_IR_SOURCE_DIR) + kDefaultScriptRelativePath);
+        script_paths.push_back(resolve_script_argument(arg));
     }
 
     for (std::size_t i = 0; i < script_paths.size(); ++i) {

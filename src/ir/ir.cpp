@@ -52,6 +52,8 @@ std::string binop_symbol(BinOpInstruction::Type op) {
             return "+";
         case BinOpInstruction::Subtract:
             return "-";
+        case BinOpInstruction::Eq:
+            return "==";
         case BinOpInstruction::Gt:
             return ">";
         case BinOpInstruction::Lt:

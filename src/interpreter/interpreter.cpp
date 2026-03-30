@@ -1,10 +1,15 @@
 #include "interpreter/interpreter.h"
 
+#include <complex>
+#include <cstdint>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
 
 #include "ba_obj/ba_obj.h"
+#include "ba_obj/cell.h"
+#include "ba_obj/function_handle.h"
+#include "ba_obj/matrix.h"
 #include "baltam_worker/builtin_manager.h"
 #include "print/obj2str.h"
 
@@ -121,6 +126,9 @@ Value eval_binop(BinOpInstruction::Type op, Value lhs, Value rhs) {
         case BinOpInstruction::Subtract:
             name = "minus";
             break;
+        case BinOpInstruction::Eq:
+            name = "eq";
+            break;
         case BinOpInstruction::Gt:
             name = "gt";
             break;
@@ -170,6 +178,99 @@ Value eval_unaryop(UnaryOpInstruction::Type op, Value operand) {
 
 std::vector<Value> eval_call(const std::string& name, const std::vector<Value>& in_args,
                              std::size_t out_count, Frame& frame) {
+    Module* module = frame.function() != nullptr ? frame.function()->parent() : nullptr;
+    auto invoke_module_function = [&](const std::string& function_name) -> std::vector<Value> {
+        if (module == nullptr) {
+            throw std::runtime_error("找不到可调用的函数：" + function_name);
+        }
+
+        for (const auto& function : module->functions()) {
+            if (function != nullptr && function->name() == function_name) {
+                Frame callee = execute_function(*function, in_args, &frame);
+                if (callee.outputs().size() < out_count) {
+                    throw std::runtime_error("函数输出个数不匹配：" + function_name);
+                }
+                if (out_count == 0) {
+                    return {};
+                }
+                std::vector<Value> outputs = callee.outputs();
+                outputs.resize(out_count);
+                return outputs;
+            }
+        }
+        throw std::runtime_error("找不到可调用的函数：" + function_name);
+    };
+
+    if (name == "__ir_make_cell__") {
+        if (out_count == 0) {
+            return {};
+        }
+        return {std::make_shared<ba_obj>(new cell_array(in_args, false))};
+    }
+
+    if (name == "__ir_make_function_handle__") {
+        if (in_args.size() != 1 || in_args.front() == nullptr) {
+            throw std::runtime_error("构造函数句柄时缺少函数名。");
+        }
+        if (out_count == 0) {
+            return {};
+        }
+        const std::string function_name = in_args.front()->as_string();
+        return {std::make_shared<ba_obj>(function_handle(fh_anonymous, function_name))};
+    }
+
+    if (name == "__ir_switch_match__") {
+        if (in_args.size() != 2) {
+            throw std::runtime_error("switch 匹配比较需要两个输入。");
+        }
+        if (out_count == 0) {
+            return {};
+        }
+
+        const Value& lhs = in_args[0];
+        const Value& rhs = in_args[1];
+        bool matched = false;
+
+        try {
+            if (lhs != nullptr && rhs != nullptr &&
+                ((lhs->_is_string() || lhs->is_char_vector()) &&
+                 (rhs->_is_string() || rhs->is_char_vector()))) {
+                matched = lhs->as_string() == rhs->as_string();
+            } else {
+                matched = eval_binop(BinOpInstruction::Eq, lhs, rhs)->as_bool();
+            }
+        } catch (const std::exception&) {
+            matched = false;
+        }
+
+        return {std::make_shared<ba_obj>(matched)};
+    }
+
+    if (frame.contains(name) && frame.is_initialized(name)) {
+        const Value callee_value = frame.load(name);
+        if (callee_value != nullptr && callee_value->type() == ba_function_handle) {
+            const auto* handle = callee_value->cget<function_handle>();
+            switch (handle->type()) {
+                case fh_anonymous:
+                case fh_mfunction:
+                    return invoke_module_function(handle->data());
+                case fh_builtin: {
+                    baFunPtr function_ptr = nullptr;
+                    if (!try_lookup_builtin_function_cached(handle->data(), function_ptr)) {
+                        throw std::runtime_error("找不到内置函数句柄：" + handle->data());
+                    }
+                    const std::size_t actual_out_count =
+                        out_count == 0 ? 0 : std::max(out_count, required_builtin_out_count(handle->data()));
+                    return invoke_function_ptr(handle->data(), function_ptr, in_args, actual_out_count,
+                                               CallableType::Builtin);
+                }
+                default:
+                    throw std::runtime_error("暂不支持该函数句柄类型：" +
+                                             std::string(fh_type_string(handle->type())));
+            }
+        }
+    }
+
     baFunPtr function_ptr = nullptr;
 
     if (try_lookup_builtin_function_cached(name, function_ptr)) {
@@ -184,27 +285,7 @@ std::vector<Value> eval_call(const std::string& name, const std::vector<Value>& 
                                    CallableType::Internal);
     }
 
-    Module* module = frame.function() != nullptr ? frame.function()->parent() : nullptr;
-    if (module == nullptr) {
-        throw std::runtime_error("找不到可调用的函数：" + name);
-    }
-
-    for (const auto& function : module->functions()) {
-        if (function != nullptr && function->name() == name) {
-            Frame callee = execute_function(*function, in_args, &frame);
-            if (callee.outputs().size() < out_count) {
-                throw std::runtime_error("函数输出个数不匹配：" + name);
-            }
-            if (out_count == 0) {
-                return {};
-            }
-            std::vector<Value> outputs = callee.outputs();
-            outputs.resize(out_count);
-            return outputs;
-        }
-    }
-
-    throw std::runtime_error("找不到可调用的函数：" + name);
+    return invoke_module_function(name);
 }
 
 void assign_output_operand(Instruction* operand, Value value, Frame& frame) {
@@ -245,6 +326,133 @@ std::vector<Value> collect_function_outputs(Function& function, const Frame& fra
         outputs.push_back(frame.load(name));
     }
     return outputs;
+}
+
+template <typename T>
+bool matrix_condition_value_from_data(const T* data, baSize size) {
+    for (baIndex i = 0; i < size; ++i) {
+        if (data[i] == T{}) {
+            return false;
+        }
+    }
+    return true;
+}
+
+template <typename T>
+bool matrix_condition_value(const matrix<T>& mat) {
+    const baSize size = mat.size();
+    if (size == 0) {
+        return false;
+    }
+
+    if (mat.is_contiguous()) {
+        return matrix_condition_value_from_data(mat.data(), size);
+    }
+
+    const matrix<T> contiguous = mat.contiguous();
+    return matrix_condition_value_from_data(contiguous.data(), size);
+}
+
+bool bool_matrix_condition_value(const matrix<bool>& mat) {
+    const baSize size = mat.size();
+    if (size == 0) {
+        return false;
+    }
+
+    if (mat.is_contiguous()) {
+        return matrix_condition_value_from_data(mat.data(), size);
+    }
+
+    const matrix<bool> contiguous = mat.contiguous();
+    return matrix_condition_value_from_data(contiguous.data(), size);
+}
+
+bool char_matrix_condition_value(const matrix<char>& mat) {
+    const baSize size = mat.size();
+    if (size == 0) {
+        return false;
+    }
+
+    if (mat.is_contiguous()) {
+        return matrix_condition_value_from_data(mat.data(), size);
+    }
+
+    const matrix<char> contiguous = mat.contiguous();
+    return matrix_condition_value_from_data(contiguous.data(), size);
+}
+
+bool complex_matrix_condition_value(const matrix<std::complex<double>>& mat) {
+    const baSize size = mat.size();
+    if (size == 0) {
+        return false;
+    }
+
+    if (mat.is_contiguous()) {
+        return matrix_condition_value_from_data(mat.data(), size);
+    }
+
+    const matrix<std::complex<double>> contiguous = mat.contiguous();
+    return matrix_condition_value_from_data(contiguous.data(), size);
+}
+
+bool complex_matrix_condition_value(const matrix<std::complex<float>>& mat) {
+    const baSize size = mat.size();
+    if (size == 0) {
+        return false;
+    }
+
+    if (mat.is_contiguous()) {
+        return matrix_condition_value_from_data(mat.data(), size);
+    }
+
+    const matrix<std::complex<float>> contiguous = mat.contiguous();
+    return matrix_condition_value_from_data(contiguous.data(), size);
+}
+
+bool condition_value_as_bool(const Value& value) {
+    if (value == nullptr) {
+        throw std::runtime_error("条件值为空。");
+    }
+
+    try {
+        return value->as_bool();
+    } catch (const std::invalid_argument&) {
+    }
+
+    switch (value->type()) {
+        case ba_int8_mat:
+            return matrix_condition_value(*value->cget<matrix<std::int8_t>>());
+        case ba_int16_mat:
+            return matrix_condition_value(*value->cget<matrix<std::int16_t>>());
+        case ba_int_mat:
+            return matrix_condition_value(*value->cget<matrix<std::int32_t>>());
+        case ba_int64_mat:
+            return matrix_condition_value(*value->cget<matrix<std::int64_t>>());
+        case ba_uint8_mat:
+            return matrix_condition_value(*value->cget<matrix<std::uint8_t>>());
+        case ba_uint16_mat:
+            return matrix_condition_value(*value->cget<matrix<std::uint16_t>>());
+        case ba_uint_mat:
+            return matrix_condition_value(*value->cget<matrix<std::uint32_t>>());
+        case ba_uint64_mat:
+            return matrix_condition_value(*value->cget<matrix<std::uint64_t>>());
+        case ba_double_mat:
+            return matrix_condition_value(*value->cget<matrix<double>>());
+        case ba_single_mat:
+            return matrix_condition_value(*value->cget<matrix<float>>());
+        case ba_complex_double_mat:
+            return complex_matrix_condition_value(*value->cget<matrix<std::complex<double>>>());
+        case ba_complex_single_mat:
+            return complex_matrix_condition_value(*value->cget<matrix<std::complex<float>>>());
+        case ba_char_mat:
+            return char_matrix_condition_value(*value->cget<matrix<char>>());
+        case ba_bool_mat:
+            return bool_matrix_condition_value(*value->cget<matrix<bool>>());
+        default:
+            break;
+    }
+
+    throw std::runtime_error("该 ba_obj 对象不能转化为 bool 标量。");
 }
 
 }  // namespace
@@ -407,10 +615,8 @@ BasicBlock* exec_terminal(Instruction* instruction, Frame& frame) {
         case Instruction::CondJump: {
             const auto* cond_jump = static_cast<const CondJumpInstruction*>(instruction);
             Value cond_value = eval_expr(cond_jump->cond(), frame);
-            if (cond_value == nullptr) {
-                throw std::runtime_error("条件值为空。");
-            }
-            return cond_value->as_bool() ? cond_jump->true_block() : cond_jump->false_block();
+            return condition_value_as_bool(cond_value) ? cond_jump->true_block()
+                                                       : cond_jump->false_block();
         }
         case Instruction::Jump: {
             const auto* jump = static_cast<const JumpInstruction*>(instruction);

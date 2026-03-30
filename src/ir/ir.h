@@ -189,6 +189,7 @@ public:
     enum Type {
         Add,
         Subtract,
+        Eq,
         Gt,
         Lt,
         Ne,

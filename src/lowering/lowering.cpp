@@ -168,9 +168,22 @@ Instruction* lower_number(const std::shared_ptr<numval>& number_node, LoweringCo
         throw std::runtime_error("IR lower 遇到了空的数字字面量。");
     }
 
-    if (text.find('i') != std::string::npos || text.find('j') != std::string::npos ||
-        text.find('I') != std::string::npos || text.find('J') != std::string::npos) {
-        throw std::runtime_error("IR lower 暂不支持复数字面量。");
+    const char suffix = text.back();
+    if (suffix == 'i' || suffix == 'j' || suffix == 'I' || suffix == 'J') {
+        const std::string imag_text = text.substr(0, text.size() - 1);
+        double imag_value = 0.0;
+        if (imag_text.empty() || imag_text == "+") {
+            imag_value = 1.0;
+        } else if (imag_text == "-") {
+            imag_value = -1.0;
+        } else {
+            imag_value = std::stod(imag_text);
+        }
+
+        Instruction* instruction = current_function(ctx).create_instruction<NumberInstruction>(
+            std::complex<double>{0.0, imag_value}, source_location_from(number_node));
+        append_instruction(ctx, instruction);
+        return instruction;
     }
 
     Instruction* instruction = current_function(ctx).create_instruction<NumberInstruction>(
@@ -216,6 +229,93 @@ Instruction* lower_builtin_call(const std::string& name, std::vector<Instruction
     return instruction;
 }
 
+void collect_expr_items(const ast_ptr& node, std::vector<ast_ptr>& items) {
+    if (!node) {
+        return;
+    }
+
+    if (node->nodetype == node_list || node->nodetype == node_horz_list) {
+        for (const ast_ptr& branch : node->branch) {
+            collect_expr_items(branch, items);
+        }
+        return;
+    }
+
+    items.push_back(node);
+}
+
+std::vector<ast_ptr> collect_cell_elements(const ast_ptr& node) {
+    std::vector<ast_ptr> items;
+    if (!node) {
+        return items;
+    }
+
+    for (const ast_ptr& branch : node->branch) {
+        collect_expr_items(branch, items);
+    }
+    return items;
+}
+
+Instruction* lower_concat_expr(const ast_ptr& node, const std::string& builtin_name,
+                               LoweringContext& ctx) {
+    std::vector<Instruction*> in_args;
+    in_args.reserve(node->branch.size());
+    for (const ast_ptr& branch : node->branch) {
+        in_args.push_back(lower_expr(branch, ctx));
+    }
+    return lower_builtin_call(builtin_name, {}, std::move(in_args), source_location_from(node), ctx);
+}
+
+Function* create_anonymous_function(const ast_ptr& node, LoweringContext& ctx) {
+    if (node->branch.size() < 2) {
+        throw std::runtime_error("IR lower 暂不支持空体匿名函数。");
+    }
+
+    Module* module = current_function(ctx).parent();
+    if (module == nullptr) {
+        throw std::runtime_error("IR lower 匿名函数时找不到模块。");
+    }
+
+    const std::string function_name = create_hidden_name(ctx, "anonymous");
+    Function* function = module->create_function(function_name, Function::LocalFunction);
+    function->set_input_names(collect_name_list(node->branch[0]));
+    function->set_output_names({"__anon_result"});
+
+    BasicBlock* entry = function->create_block("entry");
+    function->set_entry_block(entry);
+
+    LoweringContext anon_ctx;
+    anon_ctx.current_block = entry;
+    anon_ctx.next_hidden_id = ctx.next_hidden_id;
+
+    Instruction* value = lower_expr(node->branch[1], anon_ctx);
+    append_instruction(anon_ctx, current_function(anon_ctx).create_instruction<AssignInstruction>(
+                                     "__anon_result", value, source_location_from(node)));
+    anon_ctx.current_block->set_terminal(current_function(anon_ctx).create_instruction<ReturnInstruction>(
+        source_location_from(node)));
+
+    ctx.next_hidden_id = anon_ctx.next_hidden_id;
+    return function;
+}
+
+Instruction* lower_anonymous_function(const ast_ptr& node, LoweringContext& ctx) {
+    Function* function = create_anonymous_function(node, ctx);
+    Instruction* function_name = current_function(ctx).create_instruction<TextInstruction>(
+        function->name(), source_location_from(node));
+    append_instruction(ctx, function_name);
+    return lower_builtin_call("__ir_make_function_handle__", {}, {function_name},
+                              source_location_from(node), ctx);
+}
+
+Instruction* lower_cell_expr(const ast_ptr& node, LoweringContext& ctx) {
+    std::vector<Instruction*> in_args;
+    for (const ast_ptr& element : collect_cell_elements(node)) {
+        in_args.push_back(lower_expr(element, ctx));
+    }
+    return lower_builtin_call("__ir_make_cell__", {}, std::move(in_args), source_location_from(node),
+                              ctx);
+}
+
 Instruction* lower_expr(const ast_ptr& node, LoweringContext& ctx) {
     if (!node) {
         throw std::runtime_error("IR lower 不能处理空表达式节点。");
@@ -239,6 +339,18 @@ Instruction* lower_expr(const ast_ptr& node, LoweringContext& ctx) {
             append_instruction(ctx, instruction);
             return instruction;
         }
+        case node_horz_list:
+            return lower_concat_expr(node, "horzcat", ctx);
+        case node_vert_list:
+            return lower_concat_expr(node, "vertcat", ctx);
+        case node_cell:
+            return lower_cell_expr(node, ctx);
+        case node_logic_not: {
+            Instruction* operand = lower_expr(node->branch[0], ctx);
+            return lower_builtin_call("not", {}, {operand}, source_location_from(node), ctx);
+        }
+        case node_anonymous_func:
+            return lower_anonymous_function(node, ctx);
         case node_negative: {
             Instruction* operand = lower_expr(node->branch[0], ctx);
             Instruction* instruction = current_function(ctx).create_instruction<UnaryOpInstruction>(
@@ -250,6 +362,7 @@ Instruction* lower_expr(const ast_ptr& node, LoweringContext& ctx) {
         case node_subtract:
         case node_multiply:
         case node_power:
+        case node_eq:
         case node_greater_than:
         case node_less_than:
         case node_noteq:
@@ -257,6 +370,8 @@ Instruction* lower_expr(const ast_ptr& node, LoweringContext& ctx) {
             BinOpInstruction::Type op = BinOpInstruction::Add;
             if (node->nodetype == node_subtract) {
                 op = BinOpInstruction::Subtract;
+            } else if (node->nodetype == node_eq) {
+                op = BinOpInstruction::Eq;
             } else if (node->nodetype == node_multiply) {
                 op = BinOpInstruction::Multiply;
             } else if (node->nodetype == node_power) {
@@ -436,6 +551,118 @@ void lower_for_stmt(const std::shared_ptr<flow>& for_node, LoweringContext& ctx)
     ctx.current_block = exit_block;
 }
 
+void lower_while_stmt(const std::shared_ptr<if_flow>& while_node, LoweringContext& ctx) {
+    if (while_node->cond() == nullptr) {
+        throw std::runtime_error("IR lower 不能处理空的 while 条件。");
+    }
+
+    BasicBlock* header_block = create_block(ctx, "while_header");
+    BasicBlock* body_block = create_block(ctx, "while_body");
+    BasicBlock* exit_block = create_block(ctx, "while_exit");
+
+    ensure_fallthrough_to(ctx, header_block, while_node);
+
+    ctx.current_block = header_block;
+    Instruction* cond = lower_expr(while_node->cond(), ctx);
+    ctx.current_block->add_successor(body_block);
+    ctx.current_block->add_successor(exit_block);
+    ctx.current_block->set_terminal(current_function(ctx).create_instruction<CondJumpInstruction>(
+        cond, body_block, exit_block, source_location_from(while_node)));
+
+    ctx.current_block = body_block;
+    ctx.loop_stack.push_back({exit_block, header_block});
+    lower_stmt(while_node->tl(), ctx);
+    ctx.loop_stack.pop_back();
+    ensure_fallthrough_to(ctx, header_block, while_node->tl());
+
+    ctx.current_block = exit_block;
+}
+
+Instruction* build_switch_match_cond(const std::string& switch_value_name, const ast_ptr& match_node,
+                                     LoweringContext& ctx) {
+    std::vector<ast_ptr> match_items;
+    if (match_node != nullptr && match_node->nodetype == node_cell) {
+        match_items = collect_cell_elements(match_node);
+    } else if (match_node != nullptr) {
+        match_items.push_back(match_node);
+    }
+
+    if (match_items.empty()) {
+        throw std::runtime_error("switch case 缺少匹配值。");
+    }
+
+    Instruction* combined_cond = nullptr;
+    for (const ast_ptr& item : match_items) {
+        Instruction* lhs =
+            append_name_instruction(ctx, switch_value_name, source_location_from(match_node));
+        Instruction* rhs = lower_expr(item, ctx);
+        Instruction* eq = lower_builtin_call("__ir_switch_match__", {}, {lhs, rhs},
+                                             source_location_from(item), ctx);
+
+        if (combined_cond == nullptr) {
+            combined_cond = eq;
+            continue;
+        }
+
+        combined_cond = current_function(ctx).create_instruction<BinOpInstruction>(
+            BinOpInstruction::Or, combined_cond, eq, source_location_from(item));
+        append_instruction(ctx, combined_cond);
+    }
+
+    return combined_cond;
+}
+
+void lower_switch_stmt(const std::shared_ptr<switch_flow>& switch_node, LoweringContext& ctx) {
+    if (switch_node->expr() == nullptr || switch_node->cases() == nullptr) {
+        throw std::runtime_error("IR lower 不能处理空的 switch 语句。");
+    }
+
+    const std::string switch_value_name = create_hidden_name(ctx, "switch_value");
+    Instruction* switch_value = lower_expr(switch_node->expr(), ctx);
+    append_instruction(ctx, current_function(ctx).create_instruction<AssignInstruction>(
+                                switch_value_name, switch_value, source_location_from(switch_node)));
+
+    BasicBlock* exit_block = create_block(ctx, "switch_exit");
+    BasicBlock* dispatch_block = ctx.current_block;
+    ast_ptr otherwise_node = nullptr;
+
+    for (const ast_ptr& case_node : switch_node->cases()->branch) {
+        if (!case_node) {
+            continue;
+        }
+        if (case_node->nodetype == node_otherwise) {
+            otherwise_node = case_node;
+            continue;
+        }
+        if (case_node->nodetype != node_case || case_node->branch.size() < 2) {
+            throw std::runtime_error("IR lower 暂不支持该 switch 分支节点。");
+        }
+
+        ctx.current_block = dispatch_block;
+        Instruction* cond = build_switch_match_cond(switch_value_name, case_node->branch[0], ctx);
+        BasicBlock* body_block = create_block(ctx, "switch_case");
+        BasicBlock* next_block = create_block(ctx, "switch_next");
+        ctx.current_block->add_successor(body_block);
+        ctx.current_block->add_successor(next_block);
+        ctx.current_block->set_terminal(current_function(ctx).create_instruction<CondJumpInstruction>(
+            cond, body_block, next_block, source_location_from(case_node)));
+
+        ctx.current_block = body_block;
+        lower_stmt(case_node->branch[1], ctx);
+        ensure_fallthrough_to(ctx, exit_block, case_node->branch[1]);
+
+        dispatch_block = next_block;
+    }
+
+    ctx.current_block = dispatch_block;
+    if (otherwise_node != nullptr && !otherwise_node->branch.empty()) {
+        lower_stmt(otherwise_node->branch.back(), ctx);
+    }
+    ensure_fallthrough_to(ctx, exit_block, otherwise_node ? otherwise_node : switch_node);
+
+    ctx.current_block = exit_block;
+}
+
 void lower_assignment(const std::shared_ptr<symasgn>& assign_node, LoweringContext& ctx) {
     Instruction* value = lower_expr(assign_node->v(), ctx);
     append_instruction(ctx, current_function(ctx).create_instruction<AssignInstruction>(
@@ -461,8 +688,14 @@ void lower_stmt(const ast_ptr& node, LoweringContext& ctx) {
         case node_flow_if:
             lower_if_stmt(std::static_pointer_cast<if_flow>(node), ctx);
             return;
+        case node_flow_switch:
+            lower_switch_stmt(std::static_pointer_cast<switch_flow>(node), ctx);
+            return;
         case node_for:
             lower_for_stmt(std::static_pointer_cast<flow>(node), ctx);
+            return;
+        case node_flow_while:
+            lower_while_stmt(std::static_pointer_cast<if_flow>(node), ctx);
             return;
         case node_break:
             if (ctx.loop_stack.empty()) {

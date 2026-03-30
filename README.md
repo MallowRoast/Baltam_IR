@@ -175,3 +175,8 @@ std::vector<std::shared_ptr<ba_obj>> eval_call(
 1. 复用 `ba_obj` 作为统一运行时值类型
 2. 对接 `/opt/Baltamatica/lib` 下的运行时库
 3. 建立二元运算和函数调用的桥接层
+
+
+## TODO
+1. REPL 
+2. IR 格式化，提高可读性
