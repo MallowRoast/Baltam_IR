@@ -13,6 +13,15 @@
 
 namespace baltam {
 
+using ValueId = std::uint32_t;
+/**
+ * @brief 保留的无效 ValueId 哨兵值。
+ *
+ * 所有真实 `ValueId` 都从 1 开始分配，因此默认构造出来的 `ValueRef`
+ * 或 `InstValue` 只要仍然等于该值，就表示“尚未绑定到任何真实 IR 值”。
+ */
+inline constexpr ValueId InvalidValueId = 0;
+
 /**
  * @brief 附着在 IR 指令上的源码位置信息。
  */
@@ -22,6 +31,38 @@ struct SourceLocation {
     int begin_column = 0;
     int end_line = 0;
     int end_column = 0;
+};
+
+/**
+ * @brief 对某个 IR 结果值的轻量引用。
+ *
+ * 第一阶段先只用稳定的 `ValueId` 标识一个结果值；后续若引入 block
+ * argument、tuple-like 结果或更多调试字段，可继续扩展该结构。
+ */
+struct ValueRef {
+    ValueId id = InvalidValueId;
+
+    /**
+     * @brief 判断该引用是否已经绑定到一个合法结果值。
+     */
+    bool is_valid() const;
+};
+
+/**
+ * @brief 一条指令定义出的单个结果值的元数据。
+ *
+ * `debug_name` 用于打印出更接近源码的名字，例如 `%x.3`；`source_location`
+ * 允许在 SSA/value-based IR 阶段为单个结果保留更细粒度的调试信息。
+ */
+struct InstValue {
+    ValueId id = InvalidValueId;
+    std::string debug_name;
+    std::optional<SourceLocation> source_location;
+
+    /**
+     * @brief 判断该值定义是否已经分配了合法的 ValueId。
+     */
+    bool is_valid() const;
 };
 
 class BasicBlock;
@@ -45,6 +86,7 @@ public:
         Number,
         UnaryOp,
         BinOp,
+        Phi,
         Asgn,
         Call,
         CondJump,
@@ -69,6 +111,38 @@ public:
      */
     const std::optional<SourceLocation>& source_location() const;
 
+    /**
+     * @brief 返回当前指令定义出的结果值列表。
+     *
+     * 之所以是一个列表而不是单个 `InstValue`，是因为当前 IR 允许
+     * 一条指令定义 0 个、1 个或多个结果值。
+     *
+     * 典型场景是 MATLAB-like 多返回值调用，例如：
+     *
+     * `[a, b] = foo(x)`
+     *
+     * 在迁移后的 IR 里更自然的形态是“一条 call 指令定义两个结果值”，
+     * 而不是拆成两条独立指令。当前第一阶段迁移期间，大量现有指令可能
+     * 仍为空；后续随着 IR 向 value-based / SSA 演进，产值指令将逐步
+     * 在这里挂接结果定义。
+     */
+    const std::vector<InstValue>& value_defs() const;
+
+    /**
+     * @brief 返回当前指令定义的结果个数。
+     */
+    std::size_t value_count() const;
+
+    /**
+     * @brief 返回第 `index` 个结果定义对应的 ValueRef；越界时返回非法引用。
+     */
+    ValueRef value_ref(std::size_t index = 0) const;
+
+    /**
+     * @brief 判断当前指令是否定义了至少一个结果值。
+     */
+    bool has_values() const;
+
 protected:
     /**
      * @brief 用动态类型标签构造一条指令。
@@ -77,15 +151,27 @@ protected:
 
 private:
     friend class BasicBlock;
+    friend class Function;
 
     /**
      * @brief 将指令挂接到某个 BasicBlock。
      */
     void set_parent(BasicBlock* block);
 
+    /**
+     * @brief 返回第 `index` 个结果定义；仅供 `Instruction` 内部实现使用。
+     */
+    const InstValue* value_def(std::size_t index) const;
+
+    /**
+     * @brief 由 Function 在构建/迁移阶段批量替换该指令的结果定义。
+     */
+    void set_value_defs(std::vector<InstValue> values);
+
     Type type_;
     BasicBlock* parent_ = nullptr;
     std::optional<SourceLocation> source_location_;
+    std::vector<InstValue> value_defs_;
 };
 
 /**
@@ -146,6 +232,14 @@ private:
 };
 
 /**
+ * @brief Phi 节点的一条入边。
+ */
+struct PhiIncoming {
+    BasicBlock* predecessor = nullptr;
+    ValueRef value_ref;
+};
+
+/**
  * @brief 统一的单目运算指令。
  */
 class UnaryOpInstruction final : public Instruction {
@@ -157,8 +251,8 @@ public:
         UMinus,
     };
 
-    UnaryOpInstruction(Type op, Instruction* operand,
-                       std::optional<SourceLocation> location = std::nullopt);
+    explicit UnaryOpInstruction(Type op, ValueRef operand_ref,
+                                std::optional<SourceLocation> location = std::nullopt);
 
     /**
      * @brief 返回单目运算种类。
@@ -166,13 +260,13 @@ public:
     Type op() const;
 
     /**
-     * @brief 返回操作数。
+     * @brief 返回该操作数对应的 ValueRef。
      */
-    Instruction* operand() const;
+    ValueRef operand_ref() const;
 
 private:
     Type op_ = Type::UMinus;
-    Instruction* operand_ = nullptr;
+    ValueRef operand_ref_;
 };
 
 /**
@@ -198,7 +292,7 @@ public:
         Multiply,
     };
 
-    BinOpInstruction(Type op, Instruction* lhs, Instruction* rhs,
+    BinOpInstruction(Type op, ValueRef lhs_ref, ValueRef rhs_ref,
                      std::optional<SourceLocation> location = std::nullopt);
 
     /**
@@ -207,19 +301,19 @@ public:
     Type op() const;
 
     /**
-     * @brief 返回左操作数。
+     * @brief 返回左操作数的 ValueRef。
      */
-    Instruction* lhs() const;
+    ValueRef lhs_ref() const;
 
     /**
-     * @brief 返回右操作数。
+     * @brief 返回右操作数的 ValueRef。
      */
-    Instruction* rhs() const;
+    ValueRef rhs_ref() const;
 
 private:
     Type op_ = Type::Add;
-    Instruction* lhs_ = nullptr;
-    Instruction* rhs_ = nullptr;
+    ValueRef lhs_ref_;
+    ValueRef rhs_ref_;
 };
 
 /**
@@ -227,7 +321,7 @@ private:
  */
 class AssignInstruction final : public Instruction {
 public:
-    AssignInstruction(std::string name, Instruction* value,
+    AssignInstruction(std::string name, ValueRef value_ref,
                       std::optional<SourceLocation> location = std::nullopt);
 
     /**
@@ -236,13 +330,40 @@ public:
     const std::string& name() const;
 
     /**
-     * @brief 返回右侧被赋值的表达式。
+     * @brief 返回右值对应的 ValueRef。
      */
-    Instruction* value() const;
+    ValueRef value_ref() const;
 
 private:
     std::string name_;
-    Instruction* value_ = nullptr;
+    ValueRef value_ref_;
+};
+
+/**
+ * @brief CFG 合流点上的值合并指令。
+ */
+class PhiInstruction final : public Instruction {
+public:
+    explicit PhiInstruction(std::vector<PhiIncoming> incomings = {},
+                            std::optional<SourceLocation> location = std::nullopt);
+
+    /**
+     * @brief 返回全部 incoming。
+     */
+    const std::vector<PhiIncoming>& incomings() const;
+
+    /**
+     * @brief 返回 incoming 个数。
+     */
+    std::size_t incoming_count() const;
+
+    /**
+     * @brief 返回第 `index` 条 incoming；越界时返回 nullptr。
+     */
+    const PhiIncoming* incoming(std::size_t index) const;
+
+private:
+    std::vector<PhiIncoming> incomings_;
 };
 
 /**
@@ -250,8 +371,8 @@ private:
  */
 class CallInstruction final : public Instruction {
 public:
-    CallInstruction(std::string name, std::vector<Instruction*> out_args,
-                    std::vector<Instruction*> in_args,
+    CallInstruction(std::string name, std::size_t output_count,
+                    std::vector<ValueRef> in_arg_refs,
                     std::optional<SourceLocation> location = std::nullopt);
 
     /**
@@ -260,19 +381,29 @@ public:
     const std::string& name() const;
 
     /**
-     * @brief 返回输出参数列表。
+     * @brief 返回源码层显式请求的输出参数个数。
      */
-    const std::vector<Instruction*>& out_args() const;
+    std::size_t output_count() const;
 
     /**
-     * @brief 返回输入参数列表。
+     * @brief 返回输入参数个数，优先以 ValueRef 列表为准。
      */
-    const std::vector<Instruction*>& in_args() const;
+    std::size_t input_count() const;
+
+    /**
+     * @brief 返回第 `index` 个输入参数的 ValueRef；越界时返回非法引用。
+     */
+    ValueRef input_ref(std::size_t index) const;
+
+    /**
+     * @brief 返回输入参数对应的 ValueRef 列表。
+     */
+    const std::vector<ValueRef>& in_arg_refs() const;
 
 private:
     std::string name_;
-    std::vector<Instruction*> out_args_;
-    std::vector<Instruction*> in_args_;
+    std::size_t output_count_ = 0;
+    std::vector<ValueRef> in_arg_refs_;
 };
 
 /**
@@ -280,13 +411,8 @@ private:
  */
 class CondJumpInstruction final : public Instruction {
 public:
-    CondJumpInstruction(Instruction* cond, BasicBlock* true_block, BasicBlock* false_block,
+    CondJumpInstruction(ValueRef cond_ref, BasicBlock* true_block, BasicBlock* false_block,
                         std::optional<SourceLocation> location = std::nullopt);
-
-    /**
-     * @brief 返回分支条件指令。
-     */
-    Instruction* cond() const;
 
     /**
      * @brief 返回条件为真时的目标块。
@@ -298,10 +424,15 @@ public:
      */
     BasicBlock* false_block() const;
 
+    /**
+     * @brief 返回条件值对应的 ValueRef。
+     */
+    ValueRef cond_ref() const;
+
 private:
-    Instruction* cond_ = nullptr;
     BasicBlock* true_block_ = nullptr;
     BasicBlock* false_block_ = nullptr;
+    ValueRef cond_ref_;
 };
 
 /**
@@ -326,7 +457,26 @@ private:
  */
 class ReturnInstruction final : public Instruction {
 public:
-    explicit ReturnInstruction(std::optional<SourceLocation> location = std::nullopt);
+    explicit ReturnInstruction(std::vector<ValueRef> value_refs = {},
+                               std::optional<SourceLocation> location = std::nullopt);
+
+    /**
+     * @brief 返回显式返回值个数，优先以 ValueRef 列表为准。
+     */
+    std::size_t return_value_count() const;
+
+    /**
+     * @brief 返回第 `index` 个返回值的 ValueRef；越界时返回非法引用。
+     */
+    ValueRef return_value_ref(std::size_t index) const;
+
+    /**
+     * @brief 返回显式返回值对应的 ValueRef 列表。
+     */
+    const std::vector<ValueRef>& value_refs() const;
+
+private:
+    std::vector<ValueRef> value_refs_;
 };
 
 /**
@@ -477,6 +627,41 @@ public:
     void set_output_names(std::vector<std::string> names);
 
     /**
+     * @brief 分配一个新的结果值定义。
+     *
+     * 该接口为向 value-based / SSA IR 迁移预留；当前阶段可以逐步让
+     * 产值指令通过它获得稳定的 `ValueId`。
+     */
+    InstValue create_value(std::string debug_name = {},
+                           std::optional<SourceLocation> location = std::nullopt);
+
+    /**
+     * @brief 为一条已有指令挂接一组值定义。
+     */
+    void attach_value_defs(Instruction& instruction, std::vector<InstValue> values);
+
+    /**
+     * @brief 为一条已有指令挂接一个单值定义并返回该值。
+     */
+    InstValue attach_single_value(Instruction& instruction, std::string debug_name = {},
+                                  std::optional<SourceLocation> location = std::nullopt);
+
+    /**
+     * @brief 按 ValueId 查找本函数内对应的值定义元数据。
+     */
+    const InstValue* find_value(ValueId id) const;
+
+    /**
+     * @brief 按 ValueId 查找定义该值的指令；未找到时返回 nullptr。
+     */
+    Instruction* find_value_owner(ValueId id);
+
+    /**
+     * @brief 按 ValueId 查找定义该值的指令；未找到时返回 nullptr。
+     */
+    const Instruction* find_value_owner(ValueId id) const;
+
+    /**
      * @brief 创建并接管一个新的指令对象。
      */
     template <typename T, typename... Args>
@@ -503,6 +688,7 @@ private:
     std::vector<std::unique_ptr<BasicBlock>> block_storage_;
     std::vector<std::unique_ptr<Instruction>> instruction_storage_;
     BasicBlock* entry_block_ = nullptr;
+    ValueId next_value_id_ = 1;
 };
 
 /**

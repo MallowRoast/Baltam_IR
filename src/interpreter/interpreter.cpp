@@ -1,5 +1,6 @@
 #include "interpreter/interpreter.h"
 
+#include <algorithm>
 #include <complex>
 #include <cstdint>
 #include <stdexcept>
@@ -19,6 +20,79 @@ void exec_inst(Instruction* instruction, Frame& frame);
 BasicBlock* exec_terminal(Instruction* instruction, Frame& frame);
 
 namespace {
+Value load_use_value(Frame& frame, Instruction* instruction, ValueRef ref);
+
+void record_instruction_value(Frame& frame, Instruction& instruction, Value value) {
+    if (!instruction.has_values()) {
+        return;
+    }
+    frame.store_instruction_values(instruction, {std::move(value)});
+}
+
+Value record_and_return(Frame& frame, Instruction& instruction, Value value) {
+    record_instruction_value(frame, instruction, value);
+    return value;
+}
+
+void materialize_instruction_value(Frame& frame, Instruction& instruction) {
+    if (!instruction.has_values()) {
+        return;
+    }
+
+    (void)eval_expr(&instruction, frame);
+}
+
+Value eval_phi_instruction(const PhiInstruction& instruction, BasicBlock* predecessor, Frame& frame) {
+    for (const PhiIncoming& incoming : instruction.incomings()) {
+        if (incoming.predecessor == predecessor) {
+            return load_use_value(frame, nullptr, incoming.value_ref);
+        }
+    }
+
+    const std::string predecessor_name = predecessor != nullptr ? predecessor->name() : "<entry>";
+    throw std::runtime_error("phi 节点缺少来自前驱块 " + predecessor_name + " 的 incoming。");
+}
+
+void exec_phi_nodes(BasicBlock& block, BasicBlock* predecessor, Frame& frame) {
+    for (Instruction* instruction : block.instructions()) {
+        if (instruction == nullptr || instruction->type() != Instruction::Phi) {
+            break;
+        }
+
+        Value value = eval_phi_instruction(*static_cast<const PhiInstruction*>(instruction),
+                                           predecessor, frame);
+        record_instruction_value(frame, *instruction, std::move(value));
+    }
+}
+
+Function* value_owner_function(Frame& frame, Instruction* instruction) {
+    if (instruction != nullptr && instruction->parent() != nullptr &&
+        instruction->parent()->parent() != nullptr) {
+        return instruction->parent()->parent();
+    }
+    return frame.function();
+}
+
+Value load_use_value(Frame& frame, Instruction* instruction, ValueRef ref) {
+    if (ref.is_valid() && frame.has_value(ref.id)) {
+        return frame.load_value(ref);
+    }
+    if (ref.is_valid()) {
+        Function* function = value_owner_function(frame, instruction);
+        if (function != nullptr) {
+            if (Instruction* owner = function->find_value_owner(ref.id)) {
+                materialize_instruction_value(frame, *owner);
+                if (frame.has_value(ref.id)) {
+                    return frame.load_value(ref);
+                }
+            }
+        }
+    }
+    if (instruction == nullptr) {
+        throw std::runtime_error("尝试读取空的 IR 操作数。");
+    }
+    return eval_expr(instruction, frame);
+}
 
 enum class CallableType {
     Builtin,
@@ -288,33 +362,20 @@ std::vector<Value> eval_call(const std::string& name, const std::vector<Value>& 
     return invoke_module_function(name);
 }
 
-void assign_output_operand(Instruction* operand, Value value, Frame& frame) {
-    if (operand == nullptr) {
-        throw std::runtime_error("函数调用的输出操作数为空。");
-    }
-    if (operand->type() != Instruction::Name) {
-        throw std::runtime_error("函数调用的输出目标目前只支持 NameInstruction。");
-    }
-
-    const auto* name_instruction = static_cast<const NameInstruction*>(operand);
-    frame.store(name_instruction->name(), std::move(value));
-}
-
 std::vector<Value> eval_call_instruction(const CallInstruction& instruction, Frame& frame,
                                          std::size_t default_out_count) {
     std::vector<Value> in_args;
-    in_args.reserve(instruction.in_args().size());
-    for (Instruction* in_arg : instruction.in_args()) {
-        in_args.push_back(eval_expr(in_arg, frame));
+    const std::size_t in_arg_count = instruction.input_count();
+    in_args.reserve(in_arg_count);
+    for (std::size_t i = 0; i < in_arg_count; ++i) {
+        in_args.push_back(load_use_value(frame, nullptr, instruction.input_ref(i)));
     }
 
-    const std::size_t out_count = instruction.out_args().empty() ? default_out_count
-                                                                 : instruction.out_args().size();
+    const std::size_t out_count =
+        instruction.output_count() == 0 ? default_out_count : instruction.output_count();
     std::vector<Value> out_args = eval_call(instruction.name(), in_args, out_count, frame);
 
-    for (std::size_t i = 0; i < instruction.out_args().size(); ++i) {
-        assign_output_operand(instruction.out_args()[i], out_args[i], frame);
-    }
+    frame.store_instruction_values(instruction, out_args);
 
     return out_args;
 }
@@ -326,6 +387,28 @@ std::vector<Value> collect_function_outputs(Function& function, const Frame& fra
         outputs.push_back(frame.load(name));
     }
     return outputs;
+}
+
+std::vector<Value> collect_return_values(const ReturnInstruction& instruction, Frame& frame) {
+    const std::size_t value_count = instruction.return_value_count();
+    if (value_count == 0) {
+        return collect_function_outputs(*frame.function(), frame);
+    }
+
+    std::vector<Value> outputs;
+    outputs.reserve(value_count);
+    for (std::size_t i = 0; i < value_count; ++i) {
+        const ValueRef ref = instruction.return_value_ref(i);
+        outputs.push_back(load_use_value(frame, nullptr, ref));
+    }
+    return outputs;
+}
+
+Value maybe_eval_named_constant(const std::string& name) {
+    if (name == "i" || name == "j") {
+        return std::make_shared<ba_obj>(std::complex<double>{0.0, 1.0});
+    }
+    return nullptr;
 }
 
 template <typename T>
@@ -484,6 +567,10 @@ const Frame::SymbolTable& Frame::symbols() const {
     return symbols_;
 }
 
+const Frame::ValueTable& Frame::values() const {
+    return values_;
+}
+
 const std::vector<Value>& Frame::outputs() const {
     return outputs_;
 }
@@ -498,15 +585,51 @@ void Frame::store(const std::string& name, Value value) {
     binding.initialized = true;
 }
 
+void Frame::store_value(ValueId id, Value value) {
+    if (id == InvalidValueId) {
+        return;
+    }
+    values_[id] = std::move(value);
+}
+
+void Frame::store_instruction_values(const Instruction& instruction, const std::vector<Value>& values) {
+    const std::size_t count = std::min(instruction.value_count(), values.size());
+    for (std::size_t i = 0; i < count; ++i) {
+        const ValueRef ref = instruction.value_ref(i);
+        if (!ref.is_valid()) {
+            continue;
+        }
+        store_value(ref.id, values[i]);
+    }
+}
+
 Value Frame::load(const std::string& name) const {
     auto it = symbols_.find(name);
     if (it == symbols_.end()) {
+        if (Value constant = maybe_eval_named_constant(name); constant != nullptr) {
+            return constant;
+        }
         throw std::runtime_error("未定义的符号：" + name);
     }
     if (!it->second.initialized || it->second.value == nullptr) {
         throw std::runtime_error("符号尚未初始化：" + name);
     }
     return it->second.value;
+}
+
+Value Frame::load_value(ValueId id) const {
+    auto it = values_.find(id);
+    if (it == values_.end() || it->second == nullptr) {
+        throw std::runtime_error("未定义的 IR 值槽：" + std::to_string(id));
+    }
+    return it->second;
+}
+
+Value Frame::load_value(const ValueRef& ref) const {
+    if (!ref.is_valid()) {
+        throw std::runtime_error("尝试读取非法的 ValueRef。");
+    }
+    return load_value(ref.id);
 }
 
 bool Frame::contains(const std::string& name) const {
@@ -516,6 +639,10 @@ bool Frame::contains(const std::string& name) const {
 bool Frame::is_initialized(const std::string& name) const {
     auto it = symbols_.find(name);
     return it != symbols_.end() && it->second.initialized;
+}
+
+bool Frame::has_value(ValueId id) const {
+    return values_.find(id) != values_.end();
 }
 
 void Frame::set_returned(bool returned) {
@@ -534,32 +661,53 @@ Value eval_expr(Instruction* instruction, Frame& frame) {
     switch (instruction->type()) {
         case Instruction::Text: {
             const auto* text = static_cast<const TextInstruction*>(instruction);
-            return std::make_shared<ba_obj>(text->text().c_str(), ba_char_mat);
+            return record_and_return(frame, *instruction,
+                                     std::make_shared<ba_obj>(text->text().c_str(), ba_char_mat));
         }
         case Instruction::Name: {
             const auto* name = static_cast<const NameInstruction*>(instruction);
-            return frame.load(name->name());
+            if (!frame.contains(name->name())) {
+                if (Value constant = maybe_eval_named_constant(name->name()); constant != nullptr) {
+                    return record_and_return(frame, *instruction, constant);
+                }
+            }
+            return record_and_return(frame, *instruction, frame.load(name->name()));
         }
         case Instruction::Number: {
             const auto* number = static_cast<const NumberInstruction*>(instruction);
-            return std::visit(
+            return record_and_return(frame, *instruction, std::visit(
                 [](const auto& item) -> Value { return std::make_shared<ba_obj>(item); },
-                number->value());
+                number->value()));
         }
         case Instruction::UnaryOp: {
             const auto* unaryop = static_cast<const UnaryOpInstruction*>(instruction);
-            return eval_unaryop(unaryop->op(), eval_expr(unaryop->operand(), frame));
+            return record_and_return(frame, *instruction,
+                                     eval_unaryop(unaryop->op(),
+                                                  load_use_value(frame, nullptr,
+                                                                 unaryop->operand_ref())));
         }
         case Instruction::BinOp: {
             const auto* binop = static_cast<const BinOpInstruction*>(instruction);
-            return eval_binop(binop->op(), eval_expr(binop->lhs(), frame),
-                              eval_expr(binop->rhs(), frame));
+            return record_and_return(frame, *instruction,
+                                     eval_binop(binop->op(),
+                                                load_use_value(frame, nullptr, binop->lhs_ref()),
+                                                load_use_value(frame, nullptr, binop->rhs_ref())));
+        }
+        case Instruction::Phi: {
+            if (!instruction->has_values()) {
+                throw std::runtime_error("phi 节点缺少结果值定义。");
+            }
+            const ValueRef ref = instruction->value_ref();
+            if (!ref.is_valid() || !frame.has_value(ref.id)) {
+                throw std::runtime_error("phi 节点必须在基本块入口先完成求值。");
+            }
+            return frame.load_value(ref);
         }
         case Instruction::Call: {
             const auto* call = static_cast<const CallInstruction*>(instruction);
             std::vector<Value> out_args = eval_call_instruction(*call, frame, 1);
             if (out_args.empty()) {
-                return std::make_shared<ba_obj>();
+                return record_and_return(frame, *instruction, std::make_shared<ba_obj>());
             }
             return out_args.front();
         }
@@ -581,7 +729,7 @@ void exec_inst(Instruction* instruction, Frame& frame) {
     switch (instruction->type()) {
         case Instruction::Asgn: {
             const auto* assign = static_cast<const AssignInstruction*>(instruction);
-            frame.store(assign->name(), eval_expr(assign->value(), frame));
+            frame.store(assign->name(), load_use_value(frame, nullptr, assign->value_ref()));
             return;
         }
         case Instruction::Call: {
@@ -589,11 +737,14 @@ void exec_inst(Instruction* instruction, Frame& frame) {
             (void)eval_call_instruction(*call, frame, 0);
             return;
         }
+        case Instruction::Phi:
+            throw std::runtime_error("phi 节点必须位于基本块入口，不能按普通指令执行。");
         case Instruction::Text:
         case Instruction::Name:
         case Instruction::Number:
         case Instruction::UnaryOp:
         case Instruction::BinOp:
+            materialize_instruction_value(frame, *instruction);
             return;
         case Instruction::CondJump:
         case Instruction::Jump:
@@ -614,7 +765,7 @@ BasicBlock* exec_terminal(Instruction* instruction, Frame& frame) {
     switch (instruction->type()) {
         case Instruction::CondJump: {
             const auto* cond_jump = static_cast<const CondJumpInstruction*>(instruction);
-            Value cond_value = eval_expr(cond_jump->cond(), frame);
+            Value cond_value = load_use_value(frame, nullptr, cond_jump->cond_ref());
             return condition_value_as_bool(cond_value) ? cond_jump->true_block()
                                                        : cond_jump->false_block();
         }
@@ -624,13 +775,15 @@ BasicBlock* exec_terminal(Instruction* instruction, Frame& frame) {
         }
         case Instruction::Return:
             frame.set_returned(true);
-            frame.set_outputs(collect_function_outputs(*frame.function(), frame));
+            frame.set_outputs(
+                collect_return_values(*static_cast<const ReturnInstruction*>(instruction), frame));
             return nullptr;
         case Instruction::Text:
         case Instruction::Name:
         case Instruction::Number:
         case Instruction::UnaryOp:
         case Instruction::BinOp:
+        case Instruction::Phi:
         case Instruction::Asgn:
         case Instruction::Call:
             break;
@@ -661,11 +814,19 @@ Frame execute_function(Function& function, const std::vector<Value>& args, Frame
     }
 
     BasicBlock* block = function.entry_block();
+    BasicBlock* predecessor = nullptr;
     while (block != nullptr && !frame.returned()) {
+        exec_phi_nodes(*block, predecessor, frame);
+
         for (Instruction* instruction : block->instructions()) {
+            if (instruction != nullptr && instruction->type() == Instruction::Phi) {
+                continue;
+            }
             exec_inst(instruction, frame);
         }
-        block = exec_terminal(block->terminal(), frame);
+        BasicBlock* next_block = exec_terminal(block->terminal(), frame);
+        predecessor = block;
+        block = next_block;
     }
 
     if (!frame.returned()) {

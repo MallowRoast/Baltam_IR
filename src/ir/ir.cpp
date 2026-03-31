@@ -1,6 +1,7 @@
 #include "ir/ir.h"
 
 #include <algorithm>
+#include <iomanip>
 #include <sstream>
 #include <type_traits>
 #include <utility>
@@ -104,6 +105,13 @@ const char* module_type_name(Module::Type type) {
     return "unknown_module_type";
 }
 
+std::string format_value_ref(const Instruction* context, ValueRef ref);
+std::string format_inst_values(const std::vector<InstValue>& values);
+std::string format_name_list(const std::vector<std::string>& names);
+std::string format_block_list(const std::vector<BasicBlock*>& blocks);
+std::string format_source_location(const std::optional<SourceLocation>& location);
+std::size_t decimal_width(std::size_t value);
+
 std::string expr_text(const Instruction* instruction) {
     if (instruction == nullptr) {
         return "<null>";
@@ -113,78 +121,218 @@ std::string expr_text(const Instruction* instruction) {
         case Instruction::Text:
             return "'" + static_cast<const TextInstruction*>(instruction)->text() + "'";
         case Instruction::Name:
-            return static_cast<const NameInstruction*>(instruction)->name();
+            return "load " + static_cast<const NameInstruction*>(instruction)->name();
         case Instruction::Number: {
             const auto* number = static_cast<const NumberInstruction*>(instruction);
             return format_number(number->value());
         }
         case Instruction::UnaryOp: {
             const auto* unaryop = static_cast<const UnaryOpInstruction*>(instruction);
-            return "(" + unaryop_symbol(unaryop->op()) + expr_text(unaryop->operand()) + ")";
+            const ValueRef operand_ref = unaryop->operand_ref();
+            return "(" + unaryop_symbol(unaryop->op()) +
+                   (operand_ref.is_valid() ? format_value_ref(instruction, operand_ref)
+                                           : "<null>") +
+                   ")";
         }
         case Instruction::BinOp: {
             const auto* binop = static_cast<const BinOpInstruction*>(instruction);
-            return "(" + expr_text(binop->lhs()) + " " + binop_symbol(binop->op()) + " " +
-                   expr_text(binop->rhs()) + ")";
+            const ValueRef lhs_ref = binop->lhs_ref();
+            const ValueRef rhs_ref = binop->rhs_ref();
+            const std::string lhs_text =
+                lhs_ref.is_valid() ? format_value_ref(instruction, lhs_ref) : "<null>";
+            const std::string rhs_text =
+                rhs_ref.is_valid() ? format_value_ref(instruction, rhs_ref) : "<null>";
+            return "(" + lhs_text + " " + binop_symbol(binop->op()) + " " + rhs_text + ")";
         }
-        case Instruction::Asgn: {
-            const auto* asgn = static_cast<const AssignInstruction*>(instruction);
-            return asgn->name() + " = " + expr_text(asgn->value());
-        }
-        case Instruction::Call: {
-            const auto* call = static_cast<const CallInstruction*>(instruction);
-            std::string text;
-            if (!call->out_args().empty()) {
-                text += "[";
-                for (std::size_t i = 0; i < call->out_args().size(); ++i) {
-                    if (i != 0) {
-                        text += ", ";
-                    }
-                    text += expr_text(call->out_args()[i]);
-                }
-                text += "] = ";
-            }
-
-            text += call->name() + "(";
-            for (std::size_t i = 0; i < call->in_args().size(); ++i) {
+        case Instruction::Phi: {
+            const auto* phi = static_cast<const PhiInstruction*>(instruction);
+            std::string text = "phi(";
+            for (std::size_t i = 0; i < phi->incoming_count(); ++i) {
                 if (i != 0) {
                     text += ", ";
                 }
-                text += expr_text(call->in_args()[i]);
+                const PhiIncoming* incoming = phi->incoming(i);
+                if (incoming == nullptr) {
+                    text += "<null>";
+                    continue;
+                }
+                text += incoming->predecessor != nullptr ? incoming->predecessor->name() : "<entry>";
+                text += " -> ";
+                text += incoming->value_ref.is_valid() ? format_value_ref(instruction, incoming->value_ref)
+                                                       : "<null>";
+            }
+            text += ")";
+            return text;
+        }
+        case Instruction::Asgn: {
+            const auto* asgn = static_cast<const AssignInstruction*>(instruction);
+            const ValueRef value_ref = asgn->value_ref();
+            return "store " + asgn->name() + " <- " +
+                   (value_ref.is_valid() ? format_value_ref(instruction, value_ref) : "<null>");
+        }
+        case Instruction::Call: {
+            const auto* call = static_cast<const CallInstruction*>(instruction);
+            std::string text = "call " + call->name() + "(";
+            const std::size_t in_arg_count = call->input_count();
+            for (std::size_t i = 0; i < in_arg_count; ++i) {
+                if (i != 0) {
+                    text += ", ";
+                }
+                const ValueRef in_arg_ref = call->input_ref(i);
+                text += in_arg_ref.is_valid() ? format_value_ref(instruction, in_arg_ref)
+                                              : "<null>";
             }
             text += ")";
             return text;
         }
         case Instruction::CondJump: {
             const auto* cond_jump = static_cast<const CondJumpInstruction*>(instruction);
-            return "cond_jump " + expr_text(cond_jump->cond()) + " ? " +
-                   cond_jump->true_block()->name() + " : " + cond_jump->false_block()->name();
+            const ValueRef cond_ref = cond_jump->cond_ref();
+            return "br " +
+                   (cond_ref.is_valid() ? format_value_ref(instruction, cond_ref) : "<null>") +
+                   ", " + cond_jump->true_block()->name() + ", " + cond_jump->false_block()->name();
         }
         case Instruction::Jump: {
             const auto* jump = static_cast<const JumpInstruction*>(instruction);
-            return "jump " + jump->target()->name();
+            return "jmp " + jump->target()->name();
         }
         case Instruction::Return: {
-            return "return";
+            const auto* ret = static_cast<const ReturnInstruction*>(instruction);
+            std::string text = "ret";
+            const std::size_t value_count = ret->return_value_count();
+            if (value_count != 0) {
+                text += " ";
+                for (std::size_t i = 0; i < value_count; ++i) {
+                    if (i != 0) {
+                        text += ", ";
+                    }
+                    const ValueRef value_ref = ret->return_value_ref(i);
+                    text += value_ref.is_valid() ? format_value_ref(instruction, value_ref)
+                                                 : "<null>";
+                }
+            }
+            return text;
         }
     }
 
     return "<inst>";
 }
 
-void print_instruction(std::ostream& os, const Instruction& instruction) {
-    os << "    " << expr_text(&instruction);
+std::string format_inst_value(const InstValue& value) {
+    std::string text = "%";
+    if (!value.debug_name.empty()) {
+        text += value.debug_name;
+        text += ".";
+    }
+    text += std::to_string(value.id);
+    return text;
+}
 
-    if (instruction.source_location().has_value()) {
-        const SourceLocation& location = *instruction.source_location();
-        os << "    ; " << location.filename << ":" << location.begin_line << ":"
-           << location.begin_column;
+const Function* parent_function_from_instruction(const Instruction* instruction) {
+    if (instruction == nullptr || instruction->parent() == nullptr) {
+        return nullptr;
+    }
+    return instruction->parent()->parent();
+}
+
+std::string format_value_ref(const Instruction* context, ValueRef ref) {
+    if (!ref.is_valid()) {
+        return "<invalid>";
+    }
+    if (const Function* function = parent_function_from_instruction(context)) {
+        if (const InstValue* value = function->find_value(ref.id)) {
+            return format_inst_value(*value);
+        }
+    }
+    return "%" + std::to_string(ref.id);
+}
+
+std::string format_inst_values(const std::vector<InstValue>& values) {
+    std::ostringstream oss;
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) {
+            oss << ", ";
+        }
+        oss << format_inst_value(values[i]);
+    }
+    return oss.str();
+}
+
+std::string format_name_list(const std::vector<std::string>& names) {
+    std::ostringstream oss;
+    oss << "(";
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        if (i != 0) {
+            oss << ", ";
+        }
+        oss << names[i];
+    }
+    oss << ")";
+    return oss.str();
+}
+
+std::string format_block_list(const std::vector<BasicBlock*>& blocks) {
+    if (blocks.empty()) {
+        return "-";
     }
 
+    std::ostringstream oss;
+    for (std::size_t i = 0; i < blocks.size(); ++i) {
+        if (i != 0) {
+            oss << ", ";
+        }
+        oss << blocks[i]->name();
+    }
+    return oss.str();
+}
+
+std::string format_source_location(const std::optional<SourceLocation>& location) {
+    if (!location.has_value()) {
+        return {};
+    }
+    std::ostringstream oss;
+    oss << "  @" << location->filename << ":" << location->begin_line << ":" << location->begin_column;
+    return oss.str();
+}
+
+std::size_t decimal_width(std::size_t value) {
+    std::size_t width = 1;
+    while (value >= 10) {
+        value /= 10;
+        ++width;
+    }
+    return width;
+}
+
+void print_instruction(std::ostream& os, const Instruction& instruction, std::size_t index_width,
+                       std::optional<std::size_t> index = std::nullopt, bool is_terminal = false) {
+    os << "    ";
+    if (is_terminal) {
+        os << "T:";
+    } else if (index.has_value()) {
+        os << std::setw(static_cast<int>(index_width)) << *index << ":";
+    } else {
+        os << " :";
+    }
+    os << " ";
+
+    if (instruction.has_values()) {
+        os << format_inst_values(instruction.value_defs()) << " = ";
+    }
+    os << expr_text(&instruction);
+    os << format_source_location(instruction.source_location());
     os << "\n";
 }
 
 }  // namespace
+
+bool ValueRef::is_valid() const {
+    return id != InvalidValueId;
+}
+
+bool InstValue::is_valid() const {
+    return id != InvalidValueId;
+}
 
 Instruction::Instruction(Type type, std::optional<SourceLocation> location)
     : type_(type), source_location_(std::move(location)) {}
@@ -201,8 +349,39 @@ const std::optional<SourceLocation>& Instruction::source_location() const {
     return source_location_;
 }
 
+const std::vector<InstValue>& Instruction::value_defs() const {
+    return value_defs_;
+}
+
+std::size_t Instruction::value_count() const {
+    return value_defs_.size();
+}
+
+const InstValue* Instruction::value_def(std::size_t index) const {
+    if (index >= value_defs_.size()) {
+        return nullptr;
+    }
+    return &value_defs_[index];
+}
+
+ValueRef Instruction::value_ref(std::size_t index) const {
+    const InstValue* value = value_def(index);
+    if (value == nullptr) {
+        return {};
+    }
+    return ValueRef{value->id};
+}
+
+bool Instruction::has_values() const {
+    return !value_defs_.empty();
+}
+
 void Instruction::set_parent(BasicBlock* block) {
     parent_ = block;
+}
+
+void Instruction::set_value_defs(std::vector<InstValue> values) {
+    value_defs_ = std::move(values);
 }
 
 TextInstruction::TextInstruction(std::string text, std::optional<SourceLocation> location)
@@ -239,77 +418,100 @@ const NumberInstruction::NumberValue& NumberInstruction::value() const {
     return value_;
 }
 
-UnaryOpInstruction::UnaryOpInstruction(Type op, Instruction* operand,
+UnaryOpInstruction::UnaryOpInstruction(Type op, ValueRef operand_ref,
                                        std::optional<SourceLocation> location)
-    : Instruction(Instruction::UnaryOp, std::move(location)), op_(op), operand_(operand) {}
+    : Instruction(Instruction::UnaryOp, std::move(location)), op_(op), operand_ref_(operand_ref) {}
 
 UnaryOpInstruction::Type UnaryOpInstruction::op() const {
     return op_;
 }
 
-Instruction* UnaryOpInstruction::operand() const {
-    return operand_;
+ValueRef UnaryOpInstruction::operand_ref() const {
+    return operand_ref_;
 }
 
-BinOpInstruction::BinOpInstruction(Type op, Instruction* lhs, Instruction* rhs,
+BinOpInstruction::BinOpInstruction(Type op, ValueRef lhs_ref, ValueRef rhs_ref,
                                    std::optional<SourceLocation> location)
-    : Instruction(Instruction::BinOp, std::move(location)), op_(op), lhs_(lhs), rhs_(rhs) {}
+    : Instruction(Instruction::BinOp, std::move(location)),
+      op_(op),
+      lhs_ref_(lhs_ref),
+      rhs_ref_(rhs_ref) {}
 
 BinOpInstruction::Type BinOpInstruction::op() const {
     return op_;
 }
 
-Instruction* BinOpInstruction::lhs() const {
-    return lhs_;
+ValueRef BinOpInstruction::lhs_ref() const {
+    return lhs_ref_;
 }
 
-Instruction* BinOpInstruction::rhs() const {
-    return rhs_;
+ValueRef BinOpInstruction::rhs_ref() const {
+    return rhs_ref_;
 }
 
-AssignInstruction::AssignInstruction(std::string name, Instruction* value,
+AssignInstruction::AssignInstruction(std::string name, ValueRef value_ref,
                                      std::optional<SourceLocation> location)
-    : Instruction(Asgn, std::move(location)), name_(std::move(name)), value_(value) {}
+    : Instruction(Asgn, std::move(location)), name_(std::move(name)), value_ref_(value_ref) {}
 
 const std::string& AssignInstruction::name() const {
     return name_;
 }
 
-Instruction* AssignInstruction::value() const {
-    return value_;
+ValueRef AssignInstruction::value_ref() const {
+    return value_ref_;
 }
 
-CallInstruction::CallInstruction(std::string name, std::vector<Instruction*> out_args,
-                                 std::vector<Instruction*> in_args,
+PhiInstruction::PhiInstruction(std::vector<PhiIncoming> incomings,
+                               std::optional<SourceLocation> location)
+    : Instruction(Phi, std::move(location)), incomings_(std::move(incomings)) {}
+
+const std::vector<PhiIncoming>& PhiInstruction::incomings() const {
+    return incomings_;
+}
+
+std::size_t PhiInstruction::incoming_count() const {
+    return incomings_.size();
+}
+
+const PhiIncoming* PhiInstruction::incoming(std::size_t index) const {
+    return index < incomings_.size() ? &incomings_[index] : nullptr;
+}
+
+CallInstruction::CallInstruction(std::string name, std::size_t output_count,
+                                 std::vector<ValueRef> in_arg_refs,
                                  std::optional<SourceLocation> location)
     : Instruction(Call, std::move(location)),
       name_(std::move(name)),
-      out_args_(std::move(out_args)),
-      in_args_(std::move(in_args)) {}
+      output_count_(output_count),
+      in_arg_refs_(std::move(in_arg_refs)) {}
 
 const std::string& CallInstruction::name() const {
     return name_;
 }
 
-const std::vector<Instruction*>& CallInstruction::out_args() const {
-    return out_args_;
+std::size_t CallInstruction::output_count() const {
+    return output_count_;
 }
 
-const std::vector<Instruction*>& CallInstruction::in_args() const {
-    return in_args_;
+std::size_t CallInstruction::input_count() const {
+    return in_arg_refs_.size();
 }
 
-CondJumpInstruction::CondJumpInstruction(Instruction* cond, BasicBlock* true_block,
+ValueRef CallInstruction::input_ref(std::size_t index) const {
+    return index < in_arg_refs_.size() ? in_arg_refs_[index] : ValueRef{};
+}
+
+const std::vector<ValueRef>& CallInstruction::in_arg_refs() const {
+    return in_arg_refs_;
+}
+
+CondJumpInstruction::CondJumpInstruction(ValueRef cond_ref, BasicBlock* true_block,
                                          BasicBlock* false_block,
                                          std::optional<SourceLocation> location)
     : Instruction(Instruction::CondJump, std::move(location)),
-      cond_(cond),
       true_block_(true_block),
-      false_block_(false_block) {}
-
-Instruction* CondJumpInstruction::cond() const {
-    return cond_;
-}
+      false_block_(false_block),
+      cond_ref_(cond_ref) {}
 
 BasicBlock* CondJumpInstruction::true_block() const {
     return true_block_;
@@ -319,6 +521,10 @@ BasicBlock* CondJumpInstruction::false_block() const {
     return false_block_;
 }
 
+ValueRef CondJumpInstruction::cond_ref() const {
+    return cond_ref_;
+}
+
 JumpInstruction::JumpInstruction(BasicBlock* target, std::optional<SourceLocation> location)
     : Instruction(Jump, std::move(location)), target_(target) {}
 
@@ -326,8 +532,21 @@ BasicBlock* JumpInstruction::target() const {
     return target_;
 }
 
-ReturnInstruction::ReturnInstruction(std::optional<SourceLocation> location)
-    : Instruction(Return, std::move(location)) {}
+ReturnInstruction::ReturnInstruction(std::vector<ValueRef> value_refs,
+                                     std::optional<SourceLocation> location)
+    : Instruction(Return, std::move(location)), value_refs_(std::move(value_refs)) {}
+
+std::size_t ReturnInstruction::return_value_count() const {
+    return value_refs_.size();
+}
+
+ValueRef ReturnInstruction::return_value_ref(std::size_t index) const {
+    return index < value_refs_.size() ? value_refs_[index] : ValueRef{};
+}
+
+const std::vector<ValueRef>& ReturnInstruction::value_refs() const {
+    return value_refs_;
+}
 
 BasicBlock::BasicBlock(std::string name): name_(std::move(name)) {}
 
@@ -447,6 +666,62 @@ void Function::set_output_names(std::vector<std::string> names) {
     output_names_ = std::move(names);
 }
 
+InstValue Function::create_value(std::string debug_name,
+                                 std::optional<SourceLocation> location) {
+    InstValue value;
+    value.id = next_value_id_++;
+    value.debug_name = std::move(debug_name);
+    value.source_location = std::move(location);
+    return value;
+}
+
+void Function::attach_value_defs(Instruction& instruction, std::vector<InstValue> values) {
+    instruction.set_value_defs(std::move(values));
+}
+
+InstValue Function::attach_single_value(Instruction& instruction, std::string debug_name,
+                                        std::optional<SourceLocation> location) {
+    InstValue value = create_value(std::move(debug_name), std::move(location));
+    std::vector<InstValue> values;
+    values.push_back(value);
+    instruction.set_value_defs(std::move(values));
+    return value;
+}
+
+const InstValue* Function::find_value(ValueId id) const {
+    if (id == InvalidValueId) {
+        return nullptr;
+    }
+
+    for (const std::unique_ptr<Instruction>& instruction : instruction_storage_) {
+        for (const InstValue& value : instruction->value_defs()) {
+            if (value.id == id) {
+                return &value;
+            }
+        }
+    }
+    return nullptr;
+}
+
+Instruction* Function::find_value_owner(ValueId id) {
+    if (id == InvalidValueId) {
+        return nullptr;
+    }
+
+    for (const std::unique_ptr<Instruction>& instruction : instruction_storage_) {
+        for (const InstValue& value : instruction->value_defs()) {
+            if (value.id == id) {
+                return instruction.get();
+            }
+        }
+    }
+    return nullptr;
+}
+
+const Instruction* Function::find_value_owner(ValueId id) const {
+    return const_cast<Function*>(this)->find_value_owner(id);
+}
+
 void Function::set_parent(Module* module) {
     parent_ = module;
 }
@@ -487,10 +762,9 @@ void Module::set_entry_function(Function* function) {
 }
 
 void print_ir(std::ostream& os, const Module& module) {
-    os << "module " << module.name() << "\n";
-    os << "  type: " << module_type_name(module.type()) << "\n";
+    os << "module " << module.name() << " [" << module_type_name(module.type()) << "]\n";
     os << "  source: " << module.source_path() << "\n";
-    os << "  entry_function: ";
+    os << "  entry : ";
     if (module.entry_function() != nullptr) {
         os << module.entry_function()->name();
     } else {
@@ -499,8 +773,10 @@ void print_ir(std::ostream& os, const Module& module) {
     os << "\n";
 
     for (const auto& function : module.functions()) {
-        os << "\nfunction @" << function->name() << " {\n";
-        os << "  type: " << function_type_name(function->type()) << "\n";
+        os << "\nfunction @" << function->name() << " "
+           << format_name_list(function->input_names()) << " -> "
+           << format_name_list(function->output_names())
+           << " [" << function_type_name(function->type()) << "] {\n";
         os << "  entry: ";
         if (function->entry_block() != nullptr) {
             os << function->entry_block()->name();
@@ -508,39 +784,22 @@ void print_ir(std::ostream& os, const Module& module) {
             os << "<null>";
         }
         os << "\n";
-
-        os << "  blocks:\n";
         for (const auto& block : function->blocks()) {
-            os << "    " << block->name() << " preds=[";
-            for (std::size_t i = 0; i < block->predecessors().size(); ++i) {
-                if (i != 0) {
-                    os << ", ";
-                }
-                os << block->predecessors()[i]->name();
+            os << "\n";
+            os << "  block " << block->name()
+               << "  [preds: " << format_block_list(block->predecessors())
+               << "; succs: " << format_block_list(block->successors()) << "]\n";
+            const std::size_t index_width = decimal_width(
+                std::max<std::size_t>(block->instructions().size(), 1) - 1);
+            for (std::size_t i = 0; i < block->instructions().size(); ++i) {
+                print_instruction(os, *block->instructions()[i], index_width, i, false);
             }
-            os << "] succs=[";
-            for (std::size_t i = 0; i < block->successors().size(); ++i) {
-                if (i != 0) {
-                    os << ", ";
-                }
-                os << block->successors()[i]->name();
+            if (block->terminal() != nullptr) {
+                print_instruction(os, *block->terminal(), index_width, std::nullopt, true);
             }
-            os << "]\n";
         }
 
         os << "\n";
-        for (const auto& block : function->blocks()) {
-            os << "  block " << block->name() << ":\n";
-            for (const Instruction* instruction : block->instructions()) {
-                print_instruction(os, *instruction);
-            }
-            if (block->terminal() != nullptr) {
-                os << "    terminal:\n";
-                print_instruction(os, *block->terminal());
-            }
-            os << "\n";
-        }
-
         os << "}\n";
     }
 }
