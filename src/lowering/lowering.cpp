@@ -8,6 +8,8 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -22,9 +24,17 @@
 #include "ba_obj/matrix.h"
 
 namespace baltam {
+
 namespace {
 
-// Extracts IR source-location metadata from an AST node when available.
+ValueRef value_ref_from_instruction(Instruction* instruction, std::size_t index = 0);
+std::vector<ValueRef> collect_value_refs(const std::vector<Instruction*>& instructions);
+
+}  // namespace
+
+namespace {
+
+// 从 AST 节点提取 IR 源码位置信息；若缺失则返回空。
 std::optional<SourceLocation> source_location_from(const ast_ptr& node) {
     if (!node) {
         return std::nullopt;
@@ -39,7 +49,7 @@ std::optional<SourceLocation> source_location_from(const ast_ptr& node) {
     };
 }
 
-// Chooses the lowered function name for one parsed unit.
+// 为单个 parsed unit 选择 lowering 后的函数名。
 std::string function_name_from_unit(const pcdata& unit) {
     if (unit.is_mscript()) {
         return "__script_main__";
@@ -50,7 +60,7 @@ std::string function_name_from_unit(const pcdata& unit) {
     return "__unnamed_function__";
 }
 
-// Returns the filename stem used as the default module name.
+// 返回文件名 stem，作为默认模块名。
 std::string module_stem_from_path(const std::string& path) {
     if (path.empty()) {
         return {};
@@ -58,7 +68,7 @@ std::string module_stem_from_path(const std::string& path) {
     return std::filesystem::path(path).stem().string();
 }
 
-// Chooses the lowered module name, preferring the source filename.
+// 选择 lowering 后的模块名，优先使用源文件名。
 std::string module_name_from_unit(const pcdata& unit) {
     const std::string stem = module_stem_from_path(unit.filename);
     if (!stem.empty()) {
@@ -67,7 +77,7 @@ std::string module_name_from_unit(const pcdata& unit) {
     return function_name_from_unit(unit);
 }
 
-// Classifies a parsed unit as script, primary function, or local function.
+// 将一个 parsed unit 分类为脚本、主函数或局部函数。
 Function::Type function_type_from_unit(const pcdata& unit) {
     if (unit.is_mscript()) {
         return Function::Script;
@@ -77,7 +87,7 @@ Function::Type function_type_from_unit(const pcdata& unit) {
                : Function::LocalFunction;
 }
 
-// Derives the module kind from the parsed units being lowered.
+// 根据待 lower 的 parsed units 推导模块类型。
 Module::Type module_type_from_units(const std::vector<std::shared_ptr<pcdata>>& parsed_units) {
     if (!parsed_units.empty() && parsed_units.front() != nullptr && parsed_units.front()->is_mscript()) {
         return Module::M_Script;
@@ -85,7 +95,7 @@ Module::Type module_type_from_units(const std::vector<std::shared_ptr<pcdata>>& 
     return Module::M_Function;
 }
 
-// Collects names from AST nodes that encode identifier lists.
+// 从表示标识符列表的 AST 节点中收集名字。
 std::vector<std::string> collect_name_list(const ast_ptr& node) {
     if (!node) {
         return {};
@@ -118,7 +128,7 @@ std::vector<std::string> collect_name_list(const ast_ptr& node) {
     return {name};
 }
 
-// Appends a name once while preserving its discovery order.
+// 按发现顺序追加名字，并避免重复。
 void append_unique_name(std::vector<std::string>& names, const std::string& name) {
     if (name.empty()) {
         return;
@@ -128,7 +138,11 @@ void append_unique_name(std::vector<std::string>& names, const std::string& name
     }
 }
 
-// Collects all names assigned within a statement subtree.
+bool contains_name(const std::vector<std::string>& names, const std::string& name) {
+    return std::find(names.begin(), names.end(), name) != names.end();
+}
+
+// 收集一个语句子树中所有被赋值的名字。
 void collect_assigned_names(const ast_ptr& node, std::vector<std::string>& names) {
     if (!node) {
         return;
@@ -194,118 +208,373 @@ void collect_assigned_names(const ast_ptr& node, std::vector<std::string>& names
     }
 }
 
-struct LoweringContext {
-    BasicBlock* current_block = nullptr;
-    int next_block_id = 0;
-    int next_hidden_id = 0;
-    struct LoopContext {
-        BasicBlock* break_target = nullptr;
-        BasicBlock* continue_target = nullptr;
-    };
-    std::vector<LoopContext> loop_stack;
-};
-
-// Returns the function that owns the block currently being lowered.
-Function& current_function(LoweringContext& ctx) {
-    if (ctx.current_block == nullptr || ctx.current_block->parent() == nullptr) {
-        throw std::runtime_error("IR lower 时找不到当前函数。");
+// 收集一个表达式子树中被读取的名字。
+void collect_read_names(const ast_ptr& node, std::vector<std::string>& names) {
+    if (!node) {
+        return;
     }
-    return *ctx.current_block->parent();
+
+    switch (node->nodetype) {
+        case node_name:
+            append_unique_name(names, std::static_pointer_cast<symref>(node)->name());
+            return;
+        case node_number:
+        case node_text:
+        case node_char_mat:
+        case node_nop:
+        case node_andy_end_of_string:
+            return;
+        case node_asgn:
+            collect_read_names(std::static_pointer_cast<symasgn>(node)->v(), names);
+            return;
+        case node_multiple_func: {
+            const auto call = std::static_pointer_cast<multipleFuncCall>(node);
+            if (call->s() && call->s()->nodetype == node_name && call->type() == symbol_variable) {
+                collect_read_names(call->s(), names);
+            }
+            collect_read_names(call->in_args(), names);
+            return;
+        }
+        case node_anonymous_func:
+            // 匿名函数体在创建时不会立刻执行，这里不把其自由变量计为当前语句读集合。
+            return;
+        default:
+            break;
+    }
+
+    for (const ast_ptr& branch : node->branch) {
+        collect_read_names(branch, names);
+    }
 }
 
-// Creates a numbered basic block for the current function.
-BasicBlock* create_block(LoweringContext& ctx, const std::string& prefix) {
-    std::ostringstream oss;
-    oss << prefix << "_" << ctx.next_block_id++;
-    return current_function(ctx).create_block(oss.str());
+// 将尚未在当前路径上被定义的读名字加入 live-in 集合。
+void append_live_in_reads(const std::vector<std::string>& read_names,
+                          const std::unordered_set<std::string>& definitely_assigned,
+                          std::vector<std::string>& live_in_names) {
+    for (const std::string& name : read_names) {
+        if (definitely_assigned.find(name) == definitely_assigned.end()) {
+            append_unique_name(live_in_names, name);
+        }
+    }
 }
 
-Instruction* lower_expr(const ast_ptr& node, LoweringContext& ctx);
+// 以顺序语义近似收集“本轮开始时就需要的名字”，用于循环 carried-name 判断。
+void collect_live_in_names(const ast_ptr& node, std::vector<std::string>& live_in_names,
+                           std::unordered_set<std::string>& definitely_assigned) {
+    if (!node) {
+        return;
+    }
+
+    switch (node->nodetype) {
+        case node_runlist:
+        case node_cmdlist:
+        case node_list:
+        case node_horz_list:
+            for (const ast_ptr& branch : node->branch) {
+                collect_live_in_names(branch, live_in_names, definitely_assigned);
+            }
+            return;
+        case node_asgn: {
+            const auto assign = std::static_pointer_cast<symasgn>(node);
+            std::vector<std::string> read_names;
+            collect_read_names(assign->v(), read_names);
+            append_live_in_reads(read_names, definitely_assigned, live_in_names);
+            definitely_assigned.insert(assign->name());
+            return;
+        }
+        case node_multiple_func: {
+            const auto call = std::static_pointer_cast<multipleFuncCall>(node);
+            std::vector<std::string> read_names;
+            collect_read_names(call->in_args(), read_names);
+            append_live_in_reads(read_names, definitely_assigned, live_in_names);
+            for (const std::string& name : collect_name_list(call->out_args())) {
+                definitely_assigned.insert(name);
+            }
+            return;
+        }
+        case node_flow_if: {
+            const auto if_stmt = std::static_pointer_cast<if_flow>(node);
+            std::vector<std::string> cond_read_names;
+            collect_read_names(if_stmt->cond(), cond_read_names);
+            append_live_in_reads(cond_read_names, definitely_assigned, live_in_names);
+
+            std::unordered_set<std::string> then_assigned = definitely_assigned;
+            collect_live_in_names(if_stmt->tl(), live_in_names, then_assigned);
+
+            if (if_stmt->el() && if_stmt->el()->nodetype != node_nop) {
+                std::unordered_set<std::string> else_assigned = definitely_assigned;
+                collect_live_in_names(if_stmt->el(), live_in_names, else_assigned);
+
+                std::unordered_set<std::string> merged_assigned;
+                for (const std::string& name : then_assigned) {
+                    if (else_assigned.find(name) != else_assigned.end()) {
+                        merged_assigned.insert(name);
+                    }
+                }
+                definitely_assigned = std::move(merged_assigned);
+            }
+            return;
+        }
+        case node_flow_switch: {
+            const auto switch_stmt = std::static_pointer_cast<switch_flow>(node);
+            std::vector<std::string> expr_read_names;
+            collect_read_names(switch_stmt->expr(), expr_read_names);
+            append_live_in_reads(expr_read_names, definitely_assigned, live_in_names);
+
+            bool has_otherwise = false;
+            bool merged_initialized = false;
+            std::unordered_set<std::string> merged_assigned;
+            if (switch_stmt->cases()) {
+                for (const ast_ptr& case_node : switch_stmt->cases()->branch) {
+                    if (!case_node) {
+                        continue;
+                    }
+
+                    std::unordered_set<std::string> case_assigned = definitely_assigned;
+                    if (case_node->nodetype == node_case && case_node->branch.size() >= 2) {
+                        std::vector<std::string> match_read_names;
+                        collect_read_names(case_node->branch[0], match_read_names);
+                        append_live_in_reads(match_read_names, definitely_assigned, live_in_names);
+                        collect_live_in_names(case_node->branch[1], live_in_names, case_assigned);
+                    } else if (case_node->nodetype == node_otherwise && !case_node->branch.empty()) {
+                        has_otherwise = true;
+                        collect_live_in_names(case_node->branch.back(), live_in_names, case_assigned);
+                    } else {
+                        continue;
+                    }
+
+                    if (!merged_initialized) {
+                        merged_assigned = case_assigned;
+                        merged_initialized = true;
+                        continue;
+                    }
+
+                    std::unordered_set<std::string> intersection;
+                    for (const std::string& name : merged_assigned) {
+                        if (case_assigned.find(name) != case_assigned.end()) {
+                            intersection.insert(name);
+                        }
+                    }
+                    merged_assigned = std::move(intersection);
+                }
+            }
+
+            if (has_otherwise && merged_initialized) {
+                definitely_assigned = std::move(merged_assigned);
+            }
+            return;
+        }
+        case node_for: {
+            const auto for_stmt = std::static_pointer_cast<flow>(node);
+            std::vector<std::string> iterable_read_names;
+            collect_read_names(for_stmt->cond(), iterable_read_names);
+            append_live_in_reads(iterable_read_names, definitely_assigned, live_in_names);
+
+            std::unordered_set<std::string> body_assigned = definitely_assigned;
+            if (for_stmt->var_ref() && for_stmt->var_ref()->nodetype == node_name) {
+                body_assigned.insert(std::static_pointer_cast<symref>(for_stmt->var_ref())->name());
+            }
+            collect_live_in_names(for_stmt->tl(), live_in_names, body_assigned);
+            return;
+        }
+        case node_flow_while: {
+            const auto while_stmt = std::static_pointer_cast<if_flow>(node);
+            std::vector<std::string> cond_read_names;
+            collect_read_names(while_stmt->cond(), cond_read_names);
+            append_live_in_reads(cond_read_names, definitely_assigned, live_in_names);
+
+            std::unordered_set<std::string> body_assigned = definitely_assigned;
+            collect_live_in_names(while_stmt->tl(), live_in_names, body_assigned);
+            return;
+        }
+        case node_break:
+        case node_continue:
+            return;
+        default: {
+            std::vector<std::string> read_names;
+            collect_read_names(node, read_names);
+            append_live_in_reads(read_names, definitely_assigned, live_in_names);
+            return;
+        }
+    }
+}
+
+bool is_noreturn_call(const std::shared_ptr<multipleFuncCall>& call_node) {
+    return call_node != nullptr && call_node->name() == "error" &&
+           collect_name_list(call_node->out_args()).empty();
+}
+
+bool stmt_guaranteed_noreturn(const ast_ptr& node) {
+    if (!node) {
+        return false;
+    }
+
+    switch (node->nodetype) {
+        case node_runlist:
+        case node_cmdlist:
+        case node_list:
+        case node_horz_list:
+            for (auto it = node->branch.rbegin(); it != node->branch.rend(); ++it) {
+                if (*it != nullptr) {
+                    return stmt_guaranteed_noreturn(*it);
+                }
+            }
+            return false;
+        case node_multiple_func:
+            return is_noreturn_call(std::static_pointer_cast<multipleFuncCall>(node));
+        case node_flow_if: {
+            const auto if_stmt = std::static_pointer_cast<if_flow>(node);
+            return if_stmt->el() != nullptr && if_stmt->el()->nodetype != node_nop &&
+                   stmt_guaranteed_noreturn(if_stmt->tl()) &&
+                   stmt_guaranteed_noreturn(if_stmt->el());
+        }
+        case node_flow_switch: {
+            const auto switch_stmt = std::static_pointer_cast<switch_flow>(node);
+            if (!switch_stmt->cases()) {
+                return false;
+            }
+            bool has_otherwise = false;
+            for (const ast_ptr& case_node : switch_stmt->cases()->branch) {
+                if (!case_node) {
+                    continue;
+                }
+                if (case_node->nodetype == node_case && case_node->branch.size() >= 2) {
+                    if (!stmt_guaranteed_noreturn(case_node->branch[1])) {
+                        return false;
+                    }
+                } else if (case_node->nodetype == node_otherwise && !case_node->branch.empty()) {
+                    has_otherwise = true;
+                    if (!stmt_guaranteed_noreturn(case_node->branch.back())) {
+                        return false;
+                    }
+                }
+            }
+            return has_otherwise;
+        }
+        default:
+            return false;
+    }
+}
+
+ValueRef lower_expr(const ast_ptr& node, LoweringContext& ctx);
 void lower_stmt(const ast_ptr& node, LoweringContext& ctx);
 
-// Builds NameInstructions that read the function's declared return bindings.
-std::vector<Instruction*> build_explicit_return_values(Function& function,
-                                                       std::optional<SourceLocation> location) {
-    std::vector<Instruction*> values;
+// 要求当前路径上某个名字已经绑定到合法 ValueRef。
+ValueRef require_symbol_value_ref(const LoweringContext& ctx, const std::string& name) {
+    const ValueRef ref = ctx.lookup_symbol_value_ref(name);
+    if (!ref.is_valid()) {
+        throw std::runtime_error("IR lower 找不到符号 `" + name + "` 的当前 SSA 值。");
+    }
+    return ref;
+}
+
+void bind_name_value(LoweringContext& ctx, const std::string& name, ValueRef value_ref,
+                     std::optional<SourceLocation> location) {
+    (void)location;
+    if (name.empty() || !value_ref.is_valid()) {
+        return;
+    }
+    ctx.bind_symbol_value(name, value_ref);
+}
+
+ValueRef append_undef_value(LoweringContext& ctx, std::optional<SourceLocation> location) {
+    Instruction* undef = ctx.function().create_instruction<UndefInstruction>(std::move(location));
+    return ctx.append_valued_instruction(undef)->value_ref();
+}
+
+void bind_symbol_value_only(LoweringContext& ctx, const std::string& name, ValueRef value_ref) {
+    ctx.bind_symbol_value(name, value_ref);
+}
+
+std::vector<ValueRef> build_explicit_return_values(const Function& function, LoweringContext& ctx,
+                                                   std::optional<SourceLocation> location) {
+    (void)location;
+    std::vector<ValueRef> values;
     values.reserve(function.output_names().size());
     for (const std::string& name : function.output_names()) {
-        Instruction* value = function.create_instruction<NameInstruction>(name, location);
-        function.attach_single_value(*value, name, location);
-        values.push_back(value);
+        values.push_back(require_symbol_value_ref(ctx, name));
     }
     return values;
 }
 
-// Allocates a fresh hidden binding name used by lowering temporaries.
-std::string create_hidden_name(LoweringContext& ctx, const std::string& prefix) {
-    std::ostringstream oss;
-    oss << "__" << prefix << "_" << ctx.next_hidden_id++;
-    return oss.str();
-}
-
-// Converts an instruction result into a value reference, if present.
-ValueRef value_ref_from_instruction(Instruction* instruction, std::size_t index = 0) {
-    return instruction == nullptr ? ValueRef{} : instruction->value_ref(index);
-}
-
-// Collects value references from a list of previously lowered instructions.
-std::vector<ValueRef> collect_value_refs(const std::vector<Instruction*>& instructions) {
-    std::vector<ValueRef> refs;
-    refs.reserve(instructions.size());
-    for (Instruction* instruction : instructions) {
-        refs.push_back(value_ref_from_instruction(instruction));
-    }
-    return refs;
-}
-
-Instruction* append_valued_instruction(LoweringContext& ctx, Instruction* instruction,
-                                       std::string debug_name);
-void append_instruction(LoweringContext& ctx, Instruction* instruction);
-Instruction* append_name_instruction(LoweringContext& ctx, const std::string& name,
-                                     std::optional<SourceLocation> location);
-AssignInstruction* create_assign_instruction_from_ref(LoweringContext& ctx, std::string name,
-                                                      ValueRef value_ref,
-                                                      std::optional<SourceLocation> location);
-
-struct MergeSnapshot {
-    BasicBlock* predecessor = nullptr;
-    std::vector<ValueRef> value_refs;
-};
-
-// Captures the current values for names that must be merged later.
-std::optional<MergeSnapshot> capture_merge_snapshot(LoweringContext& ctx,
-                                                    const std::vector<std::string>& names,
-                                                    std::optional<SourceLocation> location) {
+// 捕获后续需要合并的名字在当前路径上的取值。
+std::optional<LoweringContext::MergeSnapshot> capture_merge_snapshot(
+    LoweringContext& ctx, const std::vector<std::string>& names,
+    std::optional<SourceLocation> location) {
+    (void)location;
     if (names.empty() || ctx.current_block == nullptr || ctx.current_block->terminal() != nullptr) {
         return std::nullopt;
     }
 
-    MergeSnapshot snapshot;
+    LoweringContext::MergeSnapshot snapshot;
     snapshot.predecessor = ctx.current_block;
     snapshot.value_refs.reserve(names.size());
     for (const std::string& name : names) {
-        Instruction* current_value = append_name_instruction(ctx, name, location);
-        snapshot.value_refs.push_back(value_ref_from_instruction(current_value));
+        ValueRef current_value = ctx.lookup_symbol_value_ref(name);
+        if (!current_value.is_valid()) {
+            std::string known_names;
+            for (const auto& [known_name, known_ref] : ctx.symbol_table) {
+                if (!known_names.empty()) {
+                    known_names += ", ";
+                }
+                known_names += known_name;
+                known_names += "=";
+                known_names += known_ref.is_valid() ? std::to_string(known_ref.id) : "<invalid>";
+            }
+            std::string location_text;
+            if (location.has_value()) {
+                location_text = "，位置: " + location->filename + ":" +
+                                std::to_string(location->begin_line);
+            }
+            throw std::runtime_error("IR lower 在合流点捕获快照时找不到符号 `" + name +
+                                     "` 的当前 SSA 值" + location_text + "；当前路径上的符号有: [" +
+                                     known_names + "]。");
+        }
+        snapshot.value_refs.push_back(current_value);
     }
     return snapshot;
 }
 
-// Inserts merge assignments, creating phi nodes when multiple predecessors reach the merge.
+LoweringContext::MergeSnapshot make_merge_snapshot(
+    BasicBlock* predecessor, const LoweringContext::SymbolTable& symbol_table,
+    const std::vector<std::string>& names, bool allow_missing = false) {
+    LoweringContext::MergeSnapshot snapshot;
+    snapshot.predecessor = predecessor;
+    snapshot.value_refs.reserve(names.size());
+    for (const std::string& name : names) {
+        const auto it = symbol_table.find(name);
+        if (it == symbol_table.end()) {
+            if (!allow_missing) {
+                throw std::runtime_error("IR lower 在构造合流快照时找不到符号 `" + name +
+                                         "` 的当前 SSA 值。");
+            }
+            snapshot.value_refs.push_back(ValueRef{});
+            continue;
+        }
+        snapshot.value_refs.push_back(it->second);
+    }
+    return snapshot;
+}
+
+// 插入合并赋值；若有多个前驱到达合流点，则创建 phi 节点。
 void append_phi_merge_assignments(LoweringContext& ctx, const std::vector<std::string>& names,
-                                  const std::vector<MergeSnapshot>& snapshots,
+                                  const std::vector<LoweringContext::MergeSnapshot>& snapshots,
                                   std::optional<SourceLocation> location) {
     if (ctx.current_block == nullptr || names.empty()) {
         return;
     }
 
+    std::vector<std::pair<std::string, ValueRef>> merged_values;
+    merged_values.reserve(names.size());
     for (std::size_t i = 0; i < names.size(); ++i) {
-        std::vector<PhiIncoming> incomings;
+        std::vector<PhiInstruction::Incoming> incomings;
         incomings.reserve(snapshots.size());
-        for (const MergeSnapshot& snapshot : snapshots) {
+        for (const LoweringContext::MergeSnapshot& snapshot : snapshots) {
             if (snapshot.predecessor == nullptr || i >= snapshot.value_refs.size()) {
                 continue;
             }
-            incomings.push_back(PhiIncoming{snapshot.predecessor, snapshot.value_refs[i]});
+            incomings.push_back(PhiInstruction::Incoming{snapshot.predecessor,
+                                                         snapshot.value_refs[i]});
         }
 
         if (incomings.empty()) {
@@ -313,127 +582,71 @@ void append_phi_merge_assignments(LoweringContext& ctx, const std::vector<std::s
         }
 
         if (incomings.size() == 1) {
-            append_instruction(ctx, create_assign_instruction_from_ref(ctx, names[i],
-                                                                       incomings.front().value_ref,
-                                                                       location));
+            merged_values.push_back({names[i], incomings.front().value_ref});
             continue;
         }
 
         Instruction* phi =
-            current_function(ctx).create_instruction<PhiInstruction>(std::move(incomings), location);
-        append_valued_instruction(ctx, phi, names[i]);
-        append_instruction(ctx, create_assign_instruction_from_ref(ctx, names[i], phi->value_ref(),
-                                                                   location));
+            ctx.function().create_instruction<PhiInstruction>(std::move(incomings), location);
+        ctx.append_valued_instruction(phi, names[i]);
+        merged_values.push_back({names[i], phi->value_ref()});
+    }
+
+    for (const auto& [name, value_ref] : merged_values) {
+        bind_symbol_value_only(ctx, name, value_ref);
     }
 }
 
-// Appends one instruction to the current basic block.
-void append_instruction(LoweringContext& ctx, Instruction* instruction) {
-    if (ctx.current_block == nullptr) {
-        throw std::runtime_error("IR lower 指令时找不到当前基本块。");
-    }
-    ctx.current_block->append_instruction(instruction);
-}
-
-// Attaches one value definition to an instruction and appends it.
-Instruction* append_valued_instruction(LoweringContext& ctx, Instruction* instruction,
-                                       std::string debug_name = {}) {
-    if (instruction == nullptr) {
-        return nullptr;
-    }
-    current_function(ctx).attach_single_value(*instruction, std::move(debug_name),
-                                              instruction->source_location());
-    append_instruction(ctx, instruction);
-    return instruction;
-}
-
-// Attaches multiple value definitions to an instruction and appends it.
-Instruction* append_multi_valued_instruction(LoweringContext& ctx, Instruction* instruction,
-                                             const std::vector<std::string>& debug_names) {
-    if (instruction == nullptr) {
-        return nullptr;
+// 在循环头部为 loop-carried 名字插入 phi，并把结果重新绑定回名字表。
+std::vector<PhiInstruction*> append_loop_header_phi_bindings(
+    LoweringContext& ctx, const std::vector<std::string>& names,
+    const std::optional<LoweringContext::MergeSnapshot>& entry_snapshot,
+    std::optional<SourceLocation> location) {
+    if (ctx.current_block == nullptr || names.empty() || !entry_snapshot.has_value()) {
+        return {};
     }
 
-    std::vector<InstValue> values;
-    const std::size_t value_count = debug_names.empty() ? 1 : debug_names.size();
-    values.reserve(value_count);
-    for (std::size_t i = 0; i < value_count; ++i) {
-        values.push_back(current_function(ctx).create_value(
-            debug_names.empty() ? std::string{} : debug_names[i], instruction->source_location()));
+    std::vector<PhiInstruction*> phis;
+    phis.reserve(names.size());
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        std::vector<PhiInstruction::Incoming> incomings;
+        if (entry_snapshot->predecessor != nullptr && i < entry_snapshot->value_refs.size()) {
+            incomings.push_back(
+                PhiInstruction::Incoming{entry_snapshot->predecessor, entry_snapshot->value_refs[i]});
+        }
+
+        Instruction* phi =
+            ctx.function().create_instruction<PhiInstruction>(std::move(incomings), location);
+        ctx.append_valued_instruction(phi, names[i]);
+        phis.push_back(static_cast<PhiInstruction*>(phi));
     }
 
-    current_function(ctx).attach_value_defs(*instruction, std::move(values));
-    append_instruction(ctx, instruction);
-    return instruction;
+    for (std::size_t i = 0; i < names.size() && i < phis.size(); ++i) {
+        bind_symbol_value_only(ctx, names[i], phis[i]->value_ref());
+    }
+    return phis;
 }
 
-// Creates a unary operator instruction from one lowered operand.
-UnaryOpInstruction* create_unaryop_instruction(LoweringContext& ctx, UnaryOpInstruction::Type op,
-                                               Instruction* operand,
-                                               std::optional<SourceLocation> location) {
-    return current_function(ctx).create_instruction<UnaryOpInstruction>(
-        op, value_ref_from_instruction(operand), std::move(location));
+// 将循环体回边上的取值补充到循环头 phi 的 incoming 列表里。
+void append_loop_backedge_incomings(const std::vector<PhiInstruction*>& phis,
+                                    const std::vector<LoweringContext::MergeSnapshot>& snapshots) {
+    for (std::size_t i = 0; i < phis.size(); ++i) {
+        PhiInstruction* phi = phis[i];
+        if (phi == nullptr) {
+            continue;
+        }
+
+        for (const LoweringContext::MergeSnapshot& snapshot : snapshots) {
+            if (snapshot.predecessor == nullptr || i >= snapshot.value_refs.size()) {
+                continue;
+            }
+            phi->append_incoming(PhiInstruction::Incoming{snapshot.predecessor, snapshot.value_refs[i]});
+        }
+    }
 }
 
-// Creates a binary operator instruction from two lowered operands.
-BinOpInstruction* create_binop_instruction(LoweringContext& ctx, BinOpInstruction::Type op,
-                                           Instruction* lhs, Instruction* rhs,
-                                           std::optional<SourceLocation> location) {
-    return current_function(ctx).create_instruction<BinOpInstruction>(
-        op, value_ref_from_instruction(lhs), value_ref_from_instruction(rhs), std::move(location));
-}
-
-// Creates an assignment that binds a name to a lowered value instruction.
-AssignInstruction* create_assign_instruction(LoweringContext& ctx, std::string name, Instruction* value,
-                                             std::optional<SourceLocation> location) {
-    return current_function(ctx).create_instruction<AssignInstruction>(
-        std::move(name), value_ref_from_instruction(value), std::move(location));
-}
-
-// Creates an assignment that binds a name directly to a value reference.
-AssignInstruction* create_assign_instruction_from_ref(LoweringContext& ctx, std::string name,
-                                                      ValueRef value_ref,
-                                                      std::optional<SourceLocation> location) {
-    return current_function(ctx).create_instruction<AssignInstruction>(std::move(name), value_ref,
-                                                                       std::move(location));
-}
-
-// Creates a call instruction with a fixed result arity and lowered inputs.
-CallInstruction* create_call_instruction(LoweringContext& ctx, std::string name,
-                                         std::size_t output_count,
-                                         std::vector<Instruction*> in_args,
-                                         std::optional<SourceLocation> location) {
-    std::vector<ValueRef> in_arg_refs = collect_value_refs(in_args);
-    return current_function(ctx).create_instruction<CallInstruction>(
-        std::move(name), output_count, std::move(in_arg_refs), std::move(location));
-}
-
-// Creates a conditional branch instruction from a lowered condition value.
-CondJumpInstruction* create_cond_jump_instruction(LoweringContext& ctx, Instruction* cond,
-                                                  BasicBlock* true_block, BasicBlock* false_block,
-                                                  std::optional<SourceLocation> location) {
-    return current_function(ctx).create_instruction<CondJumpInstruction>(
-        value_ref_from_instruction(cond), true_block, false_block, std::move(location));
-}
-
-// Creates a function return instruction from lowered result values.
-ReturnInstruction* create_return_instruction(LoweringContext& ctx, std::vector<Instruction*> values,
-                                             std::optional<SourceLocation> location) {
-    std::vector<ValueRef> value_refs = collect_value_refs(values);
-    return current_function(ctx).create_instruction<ReturnInstruction>(std::move(value_refs),
-                                                                       std::move(location));
-}
-
-// Lowers one variable read and appends it as a value-producing instruction.
-Instruction* append_name_instruction(LoweringContext& ctx, const std::string& name,
-                                     std::optional<SourceLocation> location) {
-    Instruction* instruction =
-        current_function(ctx).create_instruction<NameInstruction>(name, std::move(location));
-    return append_valued_instruction(ctx, instruction, name);
-}
-
-// Lowers a numeric literal, including MATLAB-style imaginary suffixes.
-Instruction* lower_number(const std::shared_ptr<numval>& number_node, LoweringContext& ctx) {
+// lower 数字字面量，包含 MATLAB 风格的虚数后缀。
+ValueRef lower_number(const std::shared_ptr<numval>& number_node, LoweringContext& ctx) {
     std::string text = number_node->str;
     text.erase(std::remove_if(text.begin(), text.end(),
                               [](unsigned char ch) { return std::isspace(ch) != 0; }),
@@ -454,21 +667,21 @@ Instruction* lower_number(const std::shared_ptr<numval>& number_node, LoweringCo
             imag_value = std::stod(imag_text);
         }
 
-        Instruction* instruction = current_function(ctx).create_instruction<NumberInstruction>(
+        Instruction* instruction = ctx.function().create_instruction<NumberInstruction>(
             std::complex<double>{0.0, imag_value}, source_location_from(number_node));
-        return append_valued_instruction(ctx, instruction);
+        return ctx.append_valued_instruction(instruction)->value_ref();
     }
 
-    Instruction* instruction = current_function(ctx).create_instruction<NumberInstruction>(
+    Instruction* instruction = ctx.function().create_instruction<NumberInstruction>(
         std::stod(text), source_location_from(number_node));
-    return append_valued_instruction(ctx, instruction);
+    return ctx.append_valued_instruction(instruction)->value_ref();
 }
 
-// Lowers a general function call and emits explicit assignments for its outputs.
-Instruction* lower_call(const std::shared_ptr<multipleFuncCall>& call_node, LoweringContext& ctx) {
+// lower 普通函数调用，并为其输出显式生成赋值。
+ValueRef lower_call(const std::shared_ptr<multipleFuncCall>& call_node, LoweringContext& ctx) {
     std::vector<std::string> out_names = collect_name_list(call_node->out_args());
 
-    std::vector<Instruction*> in_args;
+    std::vector<ValueRef> in_args;
     if (call_node->in_args()) {
         if (call_node->in_args()->nodetype == node_list || call_node->in_args()->nodetype == node_horz_list) {
             for (const ast_ptr& branch : call_node->in_args()->branch) {
@@ -479,35 +692,42 @@ Instruction* lower_call(const std::shared_ptr<multipleFuncCall>& call_node, Lowe
         }
     }
 
-    Instruction* instruction =
-        create_call_instruction(ctx, call_node->name(), out_names.size(), std::move(in_args),
-                                source_location_from(call_node));
-    Instruction* call = append_multi_valued_instruction(ctx, instruction, out_names);
-    for (std::size_t i = 0; i < out_names.size(); ++i) {
-        append_instruction(ctx, create_assign_instruction_from_ref(
-                                    ctx, out_names[i], call->value_ref(i),
-                                    source_location_from(call_node->out_args())));
+    Instruction* instruction = nullptr;
+    const ValueRef callee_ref = ctx.lookup_symbol_value_ref(call_node->name());
+    if (call_node->type() == symbol_variable) {
+        if (!callee_ref.is_valid()) {
+            throw std::runtime_error("IR lower 找不到可调用变量 `" + call_node->name() +
+                                     "` 的当前 SSA 值。");
+        }
+        instruction =
+            ctx.create_call_instruction(callee_ref, out_names.size(), std::move(in_args),
+                                        source_location_from(call_node));
+    } else {
+        instruction = ctx.create_call_instruction(call_node->name(), out_names.size(),
+                                                  std::move(in_args), source_location_from(call_node));
     }
-    return call;
+    Instruction* call = ctx.append_valued_instruction(instruction, out_names);
+    for (std::size_t i = 0; i < out_names.size(); ++i) {
+        bind_name_value(ctx, out_names[i], call->value_ref(i), source_location_from(call_node->out_args()));
+    }
+    return call->value_ref();
 }
 
-// Lowers a builtin call helper and emits explicit assignments for named outputs.
-Instruction* lower_builtin_call(const std::string& name, std::vector<std::string> out_names,
-                                std::vector<Instruction*> in_args,
-                                std::optional<SourceLocation> location, LoweringContext& ctx) {
+// lower 内置函数调用辅助逻辑，并为命名输出显式生成赋值。
+ValueRef lower_builtin_call(const std::string& name, std::vector<std::string> out_names,
+                            std::vector<ValueRef> in_args,
+                            std::optional<SourceLocation> location, LoweringContext& ctx) {
     const std::optional<SourceLocation> bind_location = location;
-    Instruction* instruction = create_call_instruction(ctx, name, out_names.size(),
-                                                       std::move(in_args), std::move(location));
-    Instruction* call = append_multi_valued_instruction(ctx, instruction, out_names);
+    Instruction* instruction =
+        ctx.create_call_instruction(name, out_names.size(), std::move(in_args), std::move(location));
+    Instruction* call = ctx.append_valued_instruction(instruction, out_names);
     for (std::size_t i = 0; i < out_names.size(); ++i) {
-        append_instruction(ctx, create_assign_instruction_from_ref(ctx, out_names[i],
-                                                                   call->value_ref(i),
-                                                                   bind_location));
+        bind_name_value(ctx, out_names[i], call->value_ref(i), bind_location);
     }
-    return call;
+    return call->value_ref();
 }
 
-// Flattens nested list-like AST nodes into expression items.
+// 将嵌套的列表类 AST 节点拍平成表达式项序列。
 void collect_expr_items(const ast_ptr& node, std::vector<ast_ptr>& items) {
     if (!node) {
         return;
@@ -523,7 +743,7 @@ void collect_expr_items(const ast_ptr& node, std::vector<ast_ptr>& items) {
     items.push_back(node);
 }
 
-// Collects cell-array elements into a flat list for builtin lowering.
+// 收集元胞数组元素，并拍平成用于 builtin lowering 的列表。
 std::vector<ast_ptr> collect_cell_elements(const ast_ptr& node) {
     std::vector<ast_ptr> items;
     if (!node) {
@@ -536,10 +756,10 @@ std::vector<ast_ptr> collect_cell_elements(const ast_ptr& node) {
     return items;
 }
 
-// Lowers horizontal or vertical concatenation through the corresponding builtin.
-Instruction* lower_concat_expr(const ast_ptr& node, const std::string& builtin_name,
-                               LoweringContext& ctx) {
-    std::vector<Instruction*> in_args;
+// 通过对应 builtin lower 横向或纵向拼接表达式。
+ValueRef lower_concat_expr(const ast_ptr& node, const std::string& builtin_name,
+                           LoweringContext& ctx) {
+    std::vector<ValueRef> in_args;
     in_args.reserve(node->branch.size());
     for (const ast_ptr& branch : node->branch) {
         in_args.push_back(lower_expr(branch, ctx));
@@ -547,18 +767,18 @@ Instruction* lower_concat_expr(const ast_ptr& node, const std::string& builtin_n
     return lower_builtin_call(builtin_name, {}, std::move(in_args), source_location_from(node), ctx);
 }
 
-// Builds a hidden local function that implements an anonymous function body.
+// 构造一个隐藏的局部函数，用来承载匿名函数函数体。
 Function* create_anonymous_function(const ast_ptr& node, LoweringContext& ctx) {
     if (node->branch.size() < 2) {
         throw std::runtime_error("IR lower 暂不支持空体匿名函数。");
     }
 
-    Module* module = current_function(ctx).parent();
+    Module* module = ctx.function().parent();
     if (module == nullptr) {
         throw std::runtime_error("IR lower 匿名函数时找不到模块。");
     }
 
-    const std::string function_name = create_hidden_name(ctx, "anonymous");
+    const std::string function_name = ctx.create_hidden_name("anonymous");
     Function* function = module->create_function(function_name, Function::LocalFunction);
     function->set_input_names(collect_name_list(node->branch[0]));
     function->set_output_names({"__anon_result"});
@@ -569,32 +789,33 @@ Function* create_anonymous_function(const ast_ptr& node, LoweringContext& ctx) {
     LoweringContext anon_ctx;
     anon_ctx.current_block = entry;
     anon_ctx.next_hidden_id = ctx.next_hidden_id;
+    for (std::size_t i = 0; i < function->input_names().size(); ++i) {
+        anon_ctx.bind_symbol_value(function->input_names()[i], function->input_ref(i));
+    }
 
-    Instruction* value = lower_expr(node->branch[1], anon_ctx);
-    append_instruction(anon_ctx, create_assign_instruction(anon_ctx, "__anon_result", value,
-                                                           source_location_from(node)));
-    anon_ctx.current_block->set_terminal(
-        create_return_instruction(anon_ctx, build_explicit_return_values(*function,
-                                                                         source_location_from(node)),
-                                  source_location_from(node)));
+    const ValueRef value_ref = lower_expr(node->branch[1], anon_ctx);
+    bind_name_value(anon_ctx, "__anon_result", value_ref, source_location_from(node));
+    anon_ctx.current_block->set_terminal(anon_ctx.create_return_instruction(
+        build_explicit_return_values(*function, anon_ctx, source_location_from(node)),
+        source_location_from(node)));
 
     ctx.next_hidden_id = anon_ctx.next_hidden_id;
     return function;
 }
 
-// Lowers an anonymous function into a function handle construction call.
-Instruction* lower_anonymous_function(const ast_ptr& node, LoweringContext& ctx) {
+// 将匿名函数 lower 为函数句柄构造调用。
+ValueRef lower_anonymous_function(const ast_ptr& node, LoweringContext& ctx) {
     Function* function = create_anonymous_function(node, ctx);
-    Instruction* function_name = current_function(ctx).create_instruction<TextInstruction>(
+    Instruction* function_name = ctx.function().create_instruction<TextInstruction>(
         function->name(), source_location_from(node));
-    append_valued_instruction(ctx, function_name);
-    return lower_builtin_call("__ir_make_function_handle__", {}, {function_name},
+    const ValueRef function_name_ref = ctx.append_valued_instruction(function_name)->value_ref();
+    return lower_builtin_call("__ir_make_function_handle__", {}, {function_name_ref},
                               source_location_from(node), ctx);
 }
 
-// Lowers a cell expression through the runtime cell-construction builtin.
-Instruction* lower_cell_expr(const ast_ptr& node, LoweringContext& ctx) {
-    std::vector<Instruction*> in_args;
+// 通过运行时元胞构造 builtin 来 lower 元胞表达式。
+ValueRef lower_cell_expr(const ast_ptr& node, LoweringContext& ctx) {
+    std::vector<ValueRef> in_args;
     for (const ast_ptr& element : collect_cell_elements(node)) {
         in_args.push_back(lower_expr(element, ctx));
     }
@@ -602,8 +823,8 @@ Instruction* lower_cell_expr(const ast_ptr& node, LoweringContext& ctx) {
                               ctx);
 }
 
-// Lowers one expression node into value-producing IR.
-Instruction* lower_expr(const ast_ptr& node, LoweringContext& ctx) {
+// 将一个表达式节点 lower 为产值 IR。
+ValueRef lower_expr(const ast_ptr& node, LoweringContext& ctx) {
     if (!node) {
         throw std::runtime_error("IR lower 不能处理空表达式节点。");
     }
@@ -611,18 +832,23 @@ Instruction* lower_expr(const ast_ptr& node, LoweringContext& ctx) {
     switch (node->nodetype) {
         case node_name: {
             const auto sym = std::static_pointer_cast<symref>(node);
-            Instruction* instruction = current_function(ctx).create_instruction<NameInstruction>(
-                sym->name(), source_location_from(node));
-            return append_valued_instruction(ctx, instruction, sym->name());
+            const ValueRef ref = ctx.lookup_symbol_value_ref(sym->name());
+            if (ref.is_valid()) {
+                return ref;
+            }
+            if (sym->get_symbol_type() == symbol_variable) {
+                throw std::runtime_error("IR lower 找不到符号 `" + sym->name() + "` 的当前 SSA 值。");
+            }
+            return ctx.append_binding_instruction(sym->name(), source_location_from(node))->value_ref();
         }
         case node_number:
             return lower_number(std::static_pointer_cast<numval>(node), ctx);
         case node_text:
         case node_char_mat: {
             const auto text = std::static_pointer_cast<textNode>(node);
-            Instruction* instruction = current_function(ctx).create_instruction<TextInstruction>(
+            Instruction* instruction = ctx.function().create_instruction<TextInstruction>(
                 text->str, source_location_from(node));
-            return append_valued_instruction(ctx, instruction);
+            return ctx.append_valued_instruction(instruction)->value_ref();
         }
         case node_horz_list:
             return lower_concat_expr(node, "horzcat", ctx);
@@ -631,16 +857,18 @@ Instruction* lower_expr(const ast_ptr& node, LoweringContext& ctx) {
         case node_cell:
             return lower_cell_expr(node, ctx);
         case node_logic_not: {
-            Instruction* operand = lower_expr(node->branch[0], ctx);
-            return lower_builtin_call("not", {}, {operand}, source_location_from(node), ctx);
+            Instruction* instruction = ctx.create_unaryop_instruction(
+                UnaryOpInstruction::Logic_Not, lower_expr(node->branch[0], ctx),
+                source_location_from(node));
+            return ctx.append_valued_instruction(instruction)->value_ref();
         }
         case node_anonymous_func:
             return lower_anonymous_function(node, ctx);
         case node_negative: {
-            Instruction* operand = lower_expr(node->branch[0], ctx);
-            Instruction* instruction = create_unaryop_instruction(
-                ctx, UnaryOpInstruction::UMinus, operand, source_location_from(node));
-            return append_valued_instruction(ctx, instruction);
+            Instruction* instruction = ctx.create_unaryop_instruction(
+                UnaryOpInstruction::UMinus, lower_expr(node->branch[0], ctx),
+                source_location_from(node));
+            return ctx.append_valued_instruction(instruction)->value_ref();
         }
         case node_add:
         case node_subtract:
@@ -670,11 +898,11 @@ Instruction* lower_expr(const ast_ptr& node, LoweringContext& ctx) {
                 op = BinOpInstruction::Or;
             }
 
-            Instruction* lhs = lower_expr(node->branch[0], ctx);
-            Instruction* rhs = lower_expr(node->branch[1], ctx);
             Instruction* instruction =
-                create_binop_instruction(ctx, op, lhs, rhs, source_location_from(node));
-            return append_valued_instruction(ctx, instruction);
+                ctx.create_binop_instruction(op, lower_expr(node->branch[0], ctx),
+                                             lower_expr(node->branch[1], ctx),
+                                             source_location_from(node));
+            return ctx.append_valued_instruction(instruction)->value_ref();
         }
         case node_multiple_func:
             return lower_call(std::static_pointer_cast<multipleFuncCall>(node), ctx);
@@ -682,7 +910,7 @@ Instruction* lower_expr(const ast_ptr& node, LoweringContext& ctx) {
             if (node->branch.size() != 2 && node->branch.size() != 3) {
                 throw std::runtime_error("IR lower 暂不支持该冒号表达式。");
             }
-            std::vector<Instruction*> in_args;
+            std::vector<ValueRef> in_args;
             in_args.reserve(node->branch.size());
             for (const ast_ptr& branch : node->branch) {
                 in_args.push_back(lower_expr(branch, ctx));
@@ -696,17 +924,16 @@ Instruction* lower_expr(const ast_ptr& node, LoweringContext& ctx) {
     throw std::runtime_error("IR lower 暂不支持该表达式节点。");
 }
 
-// Adds a fallthrough jump when the current block does not already terminate.
+// 若当前基本块尚未终结，则补一条 fallthrough 跳转。
 void ensure_fallthrough_to(LoweringContext& ctx, BasicBlock* target, const ast_ptr& node) {
     if (ctx.current_block != nullptr && ctx.current_block->terminal() == nullptr) {
         ctx.current_block->add_successor(target);
         ctx.current_block->set_terminal(
-            current_function(ctx).create_instruction<JumpInstruction>(target,
-                                                                      source_location_from(node)));
+            ctx.function().create_instruction<JumpInstruction>(target, source_location_from(node)));
     }
 }
 
-// Lowers each statement in a sequential statement list.
+// 依次 lower 顺序语句列表中的每条语句。
 void lower_stmt_list(const ast_ptr& node, LoweringContext& ctx) {
     if (!node) {
         return;
@@ -719,58 +946,76 @@ void lower_stmt_list(const ast_ptr& node, LoweringContext& ctx) {
     }
 }
 
-// Lowers an if/else CFG and inserts merge assignments for shared outputs.
+// lower if/else CFG，并为共享输出插入合并赋值。
 void lower_if_stmt(const std::shared_ptr<if_flow>& if_node, LoweringContext& ctx) {
-    Instruction* cond = lower_expr(if_node->cond(), ctx);
-    std::vector<std::string> merge_names;
+    const ValueRef cond = lower_expr(if_node->cond(), ctx);
+    const LoweringContext::SymbolTable entry_symbol_table = ctx.symbol_table;
+    std::vector<std::string> assigned_names;
+    std::vector<std::string> then_assigned;
+    std::vector<std::string> else_assigned;
+    collect_assigned_names(if_node->tl(), then_assigned);
     if (if_node->el() && if_node->el()->nodetype != node_nop) {
-        std::vector<std::string> then_assigned;
-        std::vector<std::string> else_assigned;
-        collect_assigned_names(if_node->tl(), then_assigned);
         collect_assigned_names(if_node->el(), else_assigned);
-        for (const std::string& name : then_assigned) {
-            if (std::find(else_assigned.begin(), else_assigned.end(), name) != else_assigned.end()) {
-                merge_names.push_back(name);
-            }
-        }
+    }
+    assigned_names = then_assigned;
+    for (const std::string& name : else_assigned) {
+        append_unique_name(assigned_names, name);
     }
 
-    BasicBlock* then_block = create_block(ctx, "if_true");
-    BasicBlock* else_block = create_block(ctx, "if_false");
-    BasicBlock* exit_block = create_block(ctx, "if_exit");
+    BasicBlock* then_block = ctx.create_block("if_true");
+    BasicBlock* else_block = ctx.create_block("if_false");
+    BasicBlock* exit_block = ctx.create_block("if_exit");
 
     ctx.current_block->add_successor(then_block);
     ctx.current_block->add_successor(else_block);
     ctx.current_block->set_terminal(
-        create_cond_jump_instruction(ctx, cond, then_block, else_block, source_location_from(if_node)));
+        ctx.create_cond_jump_instruction(cond, then_block, else_block, source_location_from(if_node)));
 
     ctx.current_block = then_block;
+    ctx.symbol_table = entry_symbol_table;
     lower_stmt(if_node->tl(), ctx);
-    std::optional<MergeSnapshot> then_snapshot =
-        capture_merge_snapshot(ctx, merge_names, source_location_from(if_node->tl()));
+    BasicBlock* then_end_block = ctx.current_block;
+    const LoweringContext::SymbolTable then_symbol_table = ctx.symbol_table;
     ensure_fallthrough_to(ctx, exit_block, if_node->tl());
 
     ctx.current_block = else_block;
+    ctx.symbol_table = entry_symbol_table;
     if (if_node->el() && if_node->el()->nodetype != node_nop) {
         lower_stmt(if_node->el(), ctx);
     }
-    std::optional<MergeSnapshot> else_snapshot =
-        capture_merge_snapshot(ctx, merge_names, source_location_from(if_node->el() ? if_node->el()
-                                                                                    : if_node));
+    BasicBlock* else_end_block = ctx.current_block;
+    const LoweringContext::SymbolTable else_symbol_table = ctx.symbol_table;
     ensure_fallthrough_to(ctx, exit_block, if_node->el());
 
+    std::vector<std::string> merge_names;
     ctx.current_block = exit_block;
-    std::vector<MergeSnapshot> snapshots;
-    if (then_snapshot.has_value()) {
-        snapshots.push_back(*then_snapshot);
+    ctx.symbol_table = entry_symbol_table;
+    const bool then_reaches_exit = then_end_block != nullptr;
+    const bool else_reaches_exit = else_end_block != nullptr;
+    for (const std::string& name : assigned_names) {
+        const bool then_has_name =
+            then_reaches_exit && then_symbol_table.find(name) != then_symbol_table.end();
+        const bool else_has_name =
+            else_reaches_exit && else_symbol_table.find(name) != else_symbol_table.end();
+        if ((!then_reaches_exit || then_has_name) && (!else_reaches_exit || else_has_name) &&
+            (then_reaches_exit || else_reaches_exit)) {
+            merge_names.push_back(name);
+        }
     }
-    if (else_snapshot.has_value()) {
-        snapshots.push_back(*else_snapshot);
+    for (const std::string& name : assigned_names) {
+        ctx.erase_symbol_value(name);
+    }
+    std::vector<LoweringContext::MergeSnapshot> snapshots;
+    if (then_reaches_exit) {
+        snapshots.push_back(make_merge_snapshot(then_end_block, then_symbol_table, merge_names));
+    }
+    if (else_reaches_exit) {
+        snapshots.push_back(make_merge_snapshot(else_end_block, else_symbol_table, merge_names));
     }
     append_phi_merge_assignments(ctx, merge_names, snapshots, source_location_from(if_node));
 }
 
-// Lowers a for-loop through the foreach runtime protocol.
+// 通过 foreach 运行时协议来 lower for 循环。
 void lower_for_stmt(const std::shared_ptr<flow>& for_node, LoweringContext& ctx) {
     if (for_node->var_ref() == nullptr || for_node->var_ref()->nodetype != node_name) {
         throw std::runtime_error("IR lower 目前只支持名字形式的 for 循环变量。");
@@ -779,21 +1024,33 @@ void lower_for_stmt(const std::shared_ptr<flow>& for_node, LoweringContext& ctx)
         throw std::runtime_error("IR lower 不能处理空的 for 迭代表达式。");
     }
     const auto loop_var = std::static_pointer_cast<symref>(for_node->var_ref());
-    BasicBlock* preheader_block = create_block(ctx, "for_preheader");
-    BasicBlock* header_block = create_block(ctx, "for_header");
-    BasicBlock* body_block = create_block(ctx, "for_body");
-    BasicBlock* latch_block = create_block(ctx, "for_latch");
-    BasicBlock* exit_block = create_block(ctx, "for_exit");
+    const LoweringContext::SymbolTable outer_symbol_table = ctx.symbol_table;
+    std::vector<std::string> loop_assigned_names;
+    append_unique_name(loop_assigned_names, loop_var->name());
+    collect_assigned_names(for_node->tl(), loop_assigned_names);
+    std::vector<std::string> loop_exit_names = loop_assigned_names;
+    std::vector<std::string> loop_carried_names = loop_assigned_names;
+    std::unordered_set<std::string> definitely_assigned = {loop_var->name()};
+    std::vector<std::string> loop_live_in_names;
+    collect_live_in_names(for_node->tl(), loop_live_in_names, definitely_assigned);
+    for (const std::string& name : loop_live_in_names) {
+        append_unique_name(loop_carried_names, name);
+    }
+    BasicBlock* preheader_block = ctx.create_block("for_preheader");
+    BasicBlock* header_block = ctx.create_block("for_header");
+    BasicBlock* body_block = ctx.create_block("for_body");
+    BasicBlock* latch_block = ctx.create_block("for_latch");
+    BasicBlock* exit_block = ctx.create_block("for_exit");
 
     ensure_fallthrough_to(ctx, preheader_block, for_node);
 
-    const std::string state_name = create_hidden_name(ctx, "foreach_state");
-    const std::string max_iter_name = create_hidden_name(ctx, "foreach_max_iter");
-    const std::string iter_index_name = create_hidden_name(ctx, "foreach_iter_index");
-    const std::string current_value_name = create_hidden_name(ctx, "foreach_value");
+    const std::string state_name = ctx.create_hidden_name("foreach_state");
+    const std::string max_iter_name = ctx.create_hidden_name("foreach_max_iter");
+    const std::string iter_index_name = ctx.create_hidden_name("foreach_iter_index");
+    const std::string current_value_name = ctx.create_hidden_name("foreach_value");
 
     ctx.current_block = preheader_block;
-    Instruction* iterable = lower_expr(for_node->cond(), ctx);
+    const ValueRef iterable = lower_expr(for_node->cond(), ctx);
     std::vector<std::string> init_out_args;
     // foreach_init 的真实返回值是 [state, max_iter]，第二个结果即使当前
     // 解释器阶段还没有直接使用，也需要在 IR 中显式接住，以匹配运行时 ABI。
@@ -803,93 +1060,191 @@ void lower_for_stmt(const std::shared_ptr<flow>& for_node, LoweringContext& ctx)
                              source_location_from(for_node), ctx);
 
     Instruction* init_index =
-        current_function(ctx).create_instruction<NumberInstruction>(std::int64_t{1},
-                                                                    source_location_from(for_node));
-    append_valued_instruction(ctx, init_index);
-    append_instruction(ctx, create_assign_instruction(ctx, iter_index_name, init_index,
-                                                      source_location_from(for_node)));
+        ctx.function().create_instruction<NumberInstruction>(std::int64_t{1},
+                                                             source_location_from(for_node));
+    ctx.append_valued_instruction(init_index);
+    bind_name_value(ctx, iter_index_name, init_index->value_ref(), source_location_from(for_node));
+    LoweringContext::SymbolTable loop_entry_symbol_table = ctx.symbol_table;
+    for (const std::string& name : loop_carried_names) {
+        if (loop_entry_symbol_table.find(name) == loop_entry_symbol_table.end()) {
+            const ValueRef undef_ref = append_undef_value(ctx, source_location_from(for_node));
+            loop_entry_symbol_table[name] = undef_ref;
+            ctx.bind_symbol_value(name, undef_ref);
+        }
+    }
+    const LoweringContext::MergeSnapshot entry_snapshot =
+        make_merge_snapshot(preheader_block, loop_entry_symbol_table, loop_carried_names);
     ensure_fallthrough_to(ctx, header_block, for_node);
 
     ctx.current_block = header_block;
+    ctx.symbol_table = loop_entry_symbol_table;
+    std::vector<PhiInstruction::Incoming> iter_index_incomings;
+    iter_index_incomings.push_back(
+        PhiInstruction::Incoming{preheader_block, require_symbol_value_ref(ctx, iter_index_name)});
+    Instruction* iter_index_phi_inst =
+        ctx.function().create_instruction<PhiInstruction>(std::move(iter_index_incomings),
+                                                          source_location_from(for_node));
+    ctx.append_valued_instruction(iter_index_phi_inst, iter_index_name);
+    auto* iter_index_phi = static_cast<PhiInstruction*>(iter_index_phi_inst);
+    const std::vector<PhiInstruction*> header_phis = append_loop_header_phi_bindings(
+        ctx, loop_carried_names, entry_snapshot, source_location_from(for_node));
+    bind_name_value(ctx, iter_index_name, iter_index_phi->value_ref(), source_location_from(for_node));
+
+    const LoweringContext::SymbolTable header_symbol_table = ctx.symbol_table;
+
     // foreach_init 返回的第二个结果是最大迭代次数；循环头只负责用隐藏计数器判断是否越界。
-    Instruction* max_iter_value =
-        append_name_instruction(ctx, max_iter_name, source_location_from(for_node));
-    Instruction* iter_index_value =
-        append_name_instruction(ctx, iter_index_name, source_location_from(for_node));
-    Instruction* done = create_binop_instruction(ctx, BinOpInstruction::Lt, max_iter_value,
-                                                 iter_index_value, source_location_from(for_node));
-    append_valued_instruction(ctx, done);
+    Instruction* done = ctx.create_binop_instruction(
+        BinOpInstruction::Lt, require_symbol_value_ref(ctx, max_iter_name),
+        require_symbol_value_ref(ctx, iter_index_name), source_location_from(for_node));
+    ctx.append_valued_instruction(done);
+    const std::optional<LoweringContext::MergeSnapshot> exit_snapshot =
+        capture_merge_snapshot(ctx, loop_exit_names, source_location_from(for_node));
     ctx.current_block->add_successor(exit_block);
     ctx.current_block->add_successor(body_block);
     ctx.current_block->set_terminal(
-        create_cond_jump_instruction(ctx, done, exit_block, body_block, source_location_from(for_node)));
+        ctx.create_cond_jump_instruction(done, exit_block, body_block, source_location_from(for_node)));
 
     ctx.current_block = body_block;
+    ctx.symbol_table = header_symbol_table;
     // foreach_iterate 的输出才是当前轮次的循环变量值，不应直接把 foreach_init 的状态对象赋给用户变量。
-    Instruction* state_value =
-        append_name_instruction(ctx, state_name, source_location_from(for_node));
     std::vector<std::string> iterate_out_args;
     iterate_out_args.push_back(current_value_name);
-    (void)lower_builtin_call("foreach_iterate", std::move(iterate_out_args), {state_value},
-                             source_location_from(for_node), ctx);
-    Instruction* current_value =
-        append_name_instruction(ctx, current_value_name, source_location_from(for_node));
-    append_instruction(ctx, create_assign_instruction(ctx, loop_var->name(), current_value,
-                                                      source_location_from(for_node)));
-    ctx.loop_stack.push_back({exit_block, latch_block});
+    Instruction* iterate_call = ctx.append_valued_instruction(
+        ctx.create_call_instruction("foreach_iterate", 1,
+                                    {require_symbol_value_ref(ctx, state_name)},
+                                    source_location_from(for_node)),
+        iterate_out_args);
+    bind_name_value(ctx, current_value_name, iterate_call->value_ref(0), source_location_from(for_node));
+    bind_name_value(ctx, loop_var->name(), iterate_call->value_ref(0), source_location_from(for_node));
+    std::vector<LoweringContext::MergeSnapshot> continue_snapshots;
+    std::vector<LoweringContext::MergeSnapshot> break_snapshots;
+    ctx.loop_stack.push_back({exit_block,
+                              latch_block,
+                              loop_carried_names.empty() ? nullptr : &loop_carried_names,
+                              loop_carried_names.empty() ? nullptr : &continue_snapshots,
+                              loop_exit_names.empty() ? nullptr : &loop_exit_names,
+                              loop_exit_names.empty() ? nullptr : &break_snapshots});
     lower_stmt(for_node->tl(), ctx);
     ctx.loop_stack.pop_back();
+    std::optional<LoweringContext::MergeSnapshot> backedge_snapshot =
+        capture_merge_snapshot(ctx, loop_carried_names, source_location_from(for_node->tl()));
     ensure_fallthrough_to(ctx, latch_block, for_node->tl());
 
     ctx.current_block = latch_block;
-    Instruction* iter_index_for_add =
-        append_name_instruction(ctx, iter_index_name, source_location_from(for_node));
+    ctx.symbol_table = header_symbol_table;
+    std::vector<LoweringContext::MergeSnapshot> latch_snapshots = continue_snapshots;
+    if (backedge_snapshot.has_value()) {
+        latch_snapshots.push_back(*backedge_snapshot);
+    }
+    append_phi_merge_assignments(ctx, loop_carried_names, latch_snapshots, source_location_from(for_node));
+
     Instruction* one =
-        current_function(ctx).create_instruction<NumberInstruction>(std::int64_t{1},
-                                                                    source_location_from(for_node));
-    append_valued_instruction(ctx, one);
-    Instruction* next_index =
-        create_binop_instruction(ctx, BinOpInstruction::Add, iter_index_for_add, one,
-                                 source_location_from(for_node));
-    append_valued_instruction(ctx, next_index);
-    append_instruction(ctx, create_assign_instruction(ctx, iter_index_name, next_index,
-                                                      source_location_from(for_node)));
+        ctx.function().create_instruction<NumberInstruction>(std::int64_t{1},
+                                                             source_location_from(for_node));
+    ctx.append_valued_instruction(one);
+    Instruction* next_index = ctx.create_binop_instruction(
+        BinOpInstruction::Add, require_symbol_value_ref(ctx, iter_index_name), one->value_ref(),
+        source_location_from(for_node));
+    ctx.append_valued_instruction(next_index);
+    bind_name_value(ctx, iter_index_name, next_index->value_ref(), source_location_from(for_node));
+    iter_index_phi->append_incoming(PhiInstruction::Incoming{latch_block, next_index->value_ref()});
+    if (!header_phis.empty()) {
+        if (std::optional<LoweringContext::MergeSnapshot> latch_snapshot =
+                capture_merge_snapshot(ctx, loop_carried_names, source_location_from(for_node));
+            latch_snapshot.has_value()) {
+            append_loop_backedge_incomings(header_phis, {*latch_snapshot});
+        }
+    }
     ensure_fallthrough_to(ctx, header_block, for_node);
 
     ctx.current_block = exit_block;
+    ctx.symbol_table = outer_symbol_table;
+    for (const std::string& name : loop_assigned_names) {
+        ctx.erase_symbol_value(name);
+    }
+    std::vector<LoweringContext::MergeSnapshot> exit_snapshots;
+    if (exit_snapshot.has_value()) {
+        exit_snapshots.push_back(*exit_snapshot);
+    }
+    exit_snapshots.insert(exit_snapshots.end(), break_snapshots.begin(), break_snapshots.end());
+    append_phi_merge_assignments(ctx, loop_exit_names, exit_snapshots,
+                                 source_location_from(for_node));
 }
 
-// Lowers a while-loop CFG with explicit header, body, and exit blocks.
+// 使用显式的 header、body、exit 基本块来 lower while 循环。
 void lower_while_stmt(const std::shared_ptr<if_flow>& while_node, LoweringContext& ctx) {
     if (while_node->cond() == nullptr) {
         throw std::runtime_error("IR lower 不能处理空的 while 条件。");
     }
 
-    BasicBlock* header_block = create_block(ctx, "while_header");
-    BasicBlock* body_block = create_block(ctx, "while_body");
-    BasicBlock* exit_block = create_block(ctx, "while_exit");
+    const LoweringContext::SymbolTable outer_symbol_table = ctx.symbol_table;
+    std::vector<std::string> loop_assigned_names;
+    collect_assigned_names(while_node->tl(), loop_assigned_names);
+    std::vector<std::string> loop_exit_names = loop_assigned_names;
+    LoweringContext::SymbolTable loop_entry_symbol_table = outer_symbol_table;
+    for (const std::string& name : loop_exit_names) {
+        if (loop_entry_symbol_table.find(name) == loop_entry_symbol_table.end()) {
+            const ValueRef undef_ref = append_undef_value(ctx, source_location_from(while_node));
+            loop_entry_symbol_table[name] = undef_ref;
+            ctx.bind_symbol_value(name, undef_ref);
+        }
+    }
+    const LoweringContext::MergeSnapshot entry_snapshot =
+        make_merge_snapshot(ctx.current_block, loop_entry_symbol_table, loop_exit_names);
+
+    BasicBlock* header_block = ctx.create_block("while_header");
+    BasicBlock* body_block = ctx.create_block("while_body");
+    BasicBlock* exit_block = ctx.create_block("while_exit");
 
     ensure_fallthrough_to(ctx, header_block, while_node);
 
     ctx.current_block = header_block;
-    Instruction* cond = lower_expr(while_node->cond(), ctx);
+    ctx.symbol_table = loop_entry_symbol_table;
+    const std::vector<PhiInstruction*> header_phis = append_loop_header_phi_bindings(
+        ctx, loop_exit_names, entry_snapshot, source_location_from(while_node));
+    const ValueRef cond = lower_expr(while_node->cond(), ctx);
+    const std::optional<LoweringContext::MergeSnapshot> exit_snapshot =
+        capture_merge_snapshot(ctx, loop_exit_names, source_location_from(while_node));
     ctx.current_block->add_successor(body_block);
     ctx.current_block->add_successor(exit_block);
-    ctx.current_block->set_terminal(create_cond_jump_instruction(
-        ctx, cond, body_block, exit_block, source_location_from(while_node)));
+    ctx.current_block->set_terminal(
+        ctx.create_cond_jump_instruction(cond, body_block, exit_block, source_location_from(while_node)));
 
     ctx.current_block = body_block;
-    ctx.loop_stack.push_back({exit_block, header_block});
+    std::vector<LoweringContext::MergeSnapshot> continue_snapshots;
+    std::vector<LoweringContext::MergeSnapshot> break_snapshots;
+    ctx.loop_stack.push_back({exit_block,
+                              header_block,
+                              loop_exit_names.empty() ? nullptr : &loop_exit_names,
+                              loop_exit_names.empty() ? nullptr : &continue_snapshots,
+                              loop_exit_names.empty() ? nullptr : &loop_exit_names,
+                              loop_exit_names.empty() ? nullptr : &break_snapshots});
     lower_stmt(while_node->tl(), ctx);
     ctx.loop_stack.pop_back();
+    std::optional<LoweringContext::MergeSnapshot> backedge_snapshot =
+        capture_merge_snapshot(ctx, loop_exit_names, source_location_from(while_node->tl()));
     ensure_fallthrough_to(ctx, header_block, while_node->tl());
+    if (!header_phis.empty()) {
+        std::vector<LoweringContext::MergeSnapshot> backedge_snapshots = continue_snapshots;
+        if (backedge_snapshot.has_value()) {
+            backedge_snapshots.push_back(*backedge_snapshot);
+        }
+        append_loop_backedge_incomings(header_phis, backedge_snapshots);
+    }
 
     ctx.current_block = exit_block;
+    ctx.symbol_table = outer_symbol_table;
+    std::vector<LoweringContext::MergeSnapshot> exit_snapshots;
+    if (exit_snapshot.has_value()) {
+        exit_snapshots.push_back(*exit_snapshot);
+    }
+    exit_snapshots.insert(exit_snapshots.end(), break_snapshots.begin(), break_snapshots.end());
+    append_phi_merge_assignments(ctx, loop_exit_names, exit_snapshots, source_location_from(while_node));
 }
 
-// Builds the match condition for one switch case, including cell-list cases.
-Instruction* build_switch_match_cond(const std::string& switch_value_name, const ast_ptr& match_node,
-                                     LoweringContext& ctx) {
+// 为一个 switch case 构造匹配条件，包含元胞列表 case。
+ValueRef build_switch_match_cond(ValueRef switch_value, const ast_ptr& match_node,
+                                 LoweringContext& ctx) {
     std::vector<ast_ptr> match_items;
     if (match_node != nullptr && match_node->nodetype == node_cell) {
         match_items = collect_cell_elements(match_node);
@@ -901,44 +1256,44 @@ Instruction* build_switch_match_cond(const std::string& switch_value_name, const
         throw std::runtime_error("switch case 缺少匹配值。");
     }
 
-    Instruction* combined_cond = nullptr;
+    ValueRef combined_cond;
     for (const ast_ptr& item : match_items) {
-        Instruction* lhs =
-            append_name_instruction(ctx, switch_value_name, source_location_from(match_node));
-        Instruction* rhs = lower_expr(item, ctx);
-        Instruction* eq = lower_builtin_call("__ir_switch_match__", {}, {lhs, rhs},
-                                             source_location_from(item), ctx);
+        const ValueRef rhs = lower_expr(item, ctx);
+        const ValueRef eq = lower_builtin_call("__ir_switch_match__", {}, {switch_value, rhs},
+                                               source_location_from(item), ctx);
 
-        if (combined_cond == nullptr) {
+        if (!combined_cond.is_valid()) {
             combined_cond = eq;
             continue;
         }
 
-        combined_cond = create_binop_instruction(ctx, BinOpInstruction::Or, combined_cond, eq,
-                                                 source_location_from(item));
-        append_valued_instruction(ctx, combined_cond);
+        Instruction* merged_cond =
+            ctx.create_binop_instruction(BinOpInstruction::Or, combined_cond, eq,
+                                         source_location_from(item));
+        combined_cond = ctx.append_valued_instruction(merged_cond)->value_ref();
     }
 
     return combined_cond;
 }
 
-// Lowers a switch statement into chained dispatch blocks plus merge handling.
+// 将 switch 语句 lower 为串联的 dispatch 基本块，并处理合流。
 void lower_switch_stmt(const std::shared_ptr<switch_flow>& switch_node, LoweringContext& ctx) {
     if (switch_node->expr() == nullptr || switch_node->cases() == nullptr) {
         throw std::runtime_error("IR lower 不能处理空的 switch 语句。");
     }
 
-    const std::string switch_value_name = create_hidden_name(ctx, "switch_value");
-    Instruction* switch_value = lower_expr(switch_node->expr(), ctx);
-    append_instruction(ctx, create_assign_instruction(ctx, switch_value_name, switch_value,
-                                                      source_location_from(switch_node)));
+    const ValueRef switch_value = lower_expr(switch_node->expr(), ctx);
 
-    BasicBlock* exit_block = create_block(ctx, "switch_exit");
+    BasicBlock* exit_block = ctx.create_block("switch_exit");
     BasicBlock* dispatch_block = ctx.current_block;
+    const LoweringContext::SymbolTable entry_symbol_table = ctx.symbol_table;
     ast_ptr otherwise_node = nullptr;
+    std::vector<std::string> assigned_names;
     std::vector<std::string> merge_names;
-    std::vector<MergeSnapshot> merge_snapshots;
-    bool merge_names_initialized = false;
+    std::vector<std::vector<std::string>> case_assigned_lists;
+    std::vector<bool> case_fallthroughs;
+    std::vector<std::string> otherwise_assigned;
+    std::vector<LoweringContext::MergeSnapshot> merge_snapshots;
 
     for (const ast_ptr& case_node : switch_node->cases()->branch) {
         if (!case_node) {
@@ -946,22 +1301,11 @@ void lower_switch_stmt(const std::shared_ptr<switch_flow>& switch_node, Lowering
         }
         if (case_node->nodetype == node_otherwise) {
             otherwise_node = case_node;
-            std::vector<std::string> otherwise_assigned;
             if (!case_node->branch.empty()) {
                 collect_assigned_names(case_node->branch.back(), otherwise_assigned);
             }
-            if (!merge_names_initialized) {
-                merge_names = otherwise_assigned;
-                merge_names_initialized = true;
-            } else {
-                std::vector<std::string> intersection;
-                for (const std::string& name : merge_names) {
-                    if (std::find(otherwise_assigned.begin(), otherwise_assigned.end(), name) !=
-                        otherwise_assigned.end()) {
-                        intersection.push_back(name);
-                    }
-                }
-                merge_names = std::move(intersection);
+            for (const std::string& name : otherwise_assigned) {
+                append_unique_name(assigned_names, name);
             }
             continue;
         }
@@ -971,32 +1315,57 @@ void lower_switch_stmt(const std::shared_ptr<switch_flow>& switch_node, Lowering
 
         std::vector<std::string> case_assigned;
         collect_assigned_names(case_node->branch[1], case_assigned);
-        if (!merge_names_initialized) {
-            merge_names = case_assigned;
-            merge_names_initialized = true;
-        } else {
-            std::vector<std::string> intersection;
-            for (const std::string& name : merge_names) {
-                if (std::find(case_assigned.begin(), case_assigned.end(), name) !=
-                    case_assigned.end()) {
-                    intersection.push_back(name);
-                }
+        case_assigned_lists.push_back(case_assigned);
+        case_fallthroughs.push_back(!stmt_guaranteed_noreturn(case_node->branch[1]));
+        for (const std::string& name : case_assigned) {
+            append_unique_name(assigned_names, name);
+        }
+    }
+
+    const bool otherwise_fallthrough =
+        otherwise_node == nullptr || !stmt_guaranteed_noreturn(otherwise_node->branch.back());
+    for (const std::string& name : assigned_names) {
+        const bool entry_has_name = entry_symbol_table.find(name) != entry_symbol_table.end();
+        bool available_on_all_case_paths = true;
+        for (std::size_t i = 0; i < case_assigned_lists.size(); ++i) {
+            if (!case_fallthroughs[i]) {
+                continue;
             }
-            merge_names = std::move(intersection);
+            if (!contains_name(case_assigned_lists[i], name) && !entry_has_name) {
+                available_on_all_case_paths = false;
+                break;
+            }
+        }
+        if (!available_on_all_case_paths) {
+            continue;
+        }
+        if (otherwise_node != nullptr) {
+            if (!otherwise_fallthrough || contains_name(otherwise_assigned, name) || entry_has_name) {
+                merge_names.push_back(name);
+            }
+        } else if (entry_has_name) {
+            merge_names.push_back(name);
+        }
+    }
+
+    for (const ast_ptr& case_node : switch_node->cases()->branch) {
+        if (!case_node || case_node->nodetype != node_case || case_node->branch.size() < 2) {
+            continue;
         }
 
         ctx.current_block = dispatch_block;
-        Instruction* cond = build_switch_match_cond(switch_value_name, case_node->branch[0], ctx);
-        BasicBlock* body_block = create_block(ctx, "switch_case");
-        BasicBlock* next_block = create_block(ctx, "switch_next");
+        const ValueRef cond = build_switch_match_cond(switch_value, case_node->branch[0], ctx);
+        BasicBlock* body_block = ctx.create_block("switch_case");
+        BasicBlock* next_block = ctx.create_block("switch_next");
         ctx.current_block->add_successor(body_block);
         ctx.current_block->add_successor(next_block);
-        ctx.current_block->set_terminal(create_cond_jump_instruction(
-            ctx, cond, body_block, next_block, source_location_from(case_node)));
+        ctx.current_block->set_terminal(ctx.create_cond_jump_instruction(
+            cond, body_block, next_block, source_location_from(case_node)));
 
         ctx.current_block = body_block;
+        ctx.symbol_table = entry_symbol_table;
         lower_stmt(case_node->branch[1], ctx);
-        if (std::optional<MergeSnapshot> snapshot = capture_merge_snapshot(
+        if (std::optional<LoweringContext::MergeSnapshot> snapshot = capture_merge_snapshot(
                 ctx, merge_names, source_location_from(case_node->branch[1]));
             snapshot.has_value()) {
             merge_snapshots.push_back(*snapshot);
@@ -1006,15 +1375,12 @@ void lower_switch_stmt(const std::shared_ptr<switch_flow>& switch_node, Lowering
         dispatch_block = next_block;
     }
 
-    if (otherwise_node == nullptr) {
-        merge_names.clear();
-    }
-
     ctx.current_block = dispatch_block;
+    ctx.symbol_table = entry_symbol_table;
     if (otherwise_node != nullptr && !otherwise_node->branch.empty()) {
         lower_stmt(otherwise_node->branch.back(), ctx);
     }
-    if (std::optional<MergeSnapshot> snapshot =
+    if (std::optional<LoweringContext::MergeSnapshot> snapshot =
             capture_merge_snapshot(ctx, merge_names,
                                    source_location_from(otherwise_node ? otherwise_node : switch_node));
         snapshot.has_value()) {
@@ -1023,17 +1389,20 @@ void lower_switch_stmt(const std::shared_ptr<switch_flow>& switch_node, Lowering
     ensure_fallthrough_to(ctx, exit_block, otherwise_node ? otherwise_node : switch_node);
 
     ctx.current_block = exit_block;
+    ctx.symbol_table = entry_symbol_table;
+    for (const std::string& name : assigned_names) {
+        ctx.erase_symbol_value(name);
+    }
     append_phi_merge_assignments(ctx, merge_names, merge_snapshots, source_location_from(switch_node));
 }
 
-// Lowers a simple variable assignment statement.
+// lower 简单变量赋值语句。
 void lower_assignment(const std::shared_ptr<symasgn>& assign_node, LoweringContext& ctx) {
-    Instruction* value = lower_expr(assign_node->v(), ctx);
-    append_instruction(ctx, create_assign_instruction(ctx, assign_node->name(), value,
-                                                      source_location_from(assign_node)));
+    const ValueRef value_ref = lower_expr(assign_node->v(), ctx);
+    bind_name_value(ctx, assign_node->name(), value_ref, source_location_from(assign_node));
 }
 
-// Dispatches one statement node to the corresponding lowering routine.
+// 将一条语句节点分发到对应的 lowering 逻辑。
 void lower_stmt(const ast_ptr& node, LoweringContext& ctx) {
     if (!node) {
         return;
@@ -1047,9 +1416,14 @@ void lower_stmt(const ast_ptr& node, LoweringContext& ctx) {
         case node_asgn:
             lower_assignment(std::static_pointer_cast<symasgn>(node), ctx);
             return;
-        case node_multiple_func:
-            (void)lower_call(std::static_pointer_cast<multipleFuncCall>(node), ctx);
+        case node_multiple_func: {
+            const auto call_node = std::static_pointer_cast<multipleFuncCall>(node);
+            (void)lower_call(call_node, ctx);
+            if (is_noreturn_call(call_node)) {
+                ctx.current_block = nullptr;
+            }
             return;
+        }
         case node_flow_if:
             lower_if_stmt(std::static_pointer_cast<if_flow>(node), ctx);
             return;
@@ -1066,8 +1440,16 @@ void lower_stmt(const ast_ptr& node, LoweringContext& ctx) {
             if (ctx.loop_stack.empty()) {
                 throw std::runtime_error("break 只能出现在循环内部。");
             }
+            if (ctx.loop_stack.back().break_snapshots != nullptr &&
+                ctx.loop_stack.back().break_names != nullptr) {
+                if (std::optional<LoweringContext::MergeSnapshot> snapshot = capture_merge_snapshot(
+                        ctx, *ctx.loop_stack.back().break_names, source_location_from(node));
+                    snapshot.has_value()) {
+                    ctx.loop_stack.back().break_snapshots->push_back(*snapshot);
+                }
+            }
             ctx.current_block->add_successor(ctx.loop_stack.back().break_target);
-            ctx.current_block->set_terminal(current_function(ctx).create_instruction<JumpInstruction>(
+            ctx.current_block->set_terminal(ctx.function().create_instruction<JumpInstruction>(
                 ctx.loop_stack.back().break_target, source_location_from(node)));
             ctx.current_block = nullptr;
             return;
@@ -1075,8 +1457,16 @@ void lower_stmt(const ast_ptr& node, LoweringContext& ctx) {
             if (ctx.loop_stack.empty()) {
                 throw std::runtime_error("continue 只能出现在循环内部。");
             }
+            if (ctx.loop_stack.back().continue_snapshots != nullptr &&
+                ctx.loop_stack.back().carried_names != nullptr) {
+                if (std::optional<LoweringContext::MergeSnapshot> snapshot = capture_merge_snapshot(
+                        ctx, *ctx.loop_stack.back().carried_names, source_location_from(node));
+                    snapshot.has_value()) {
+                    ctx.loop_stack.back().continue_snapshots->push_back(*snapshot);
+                }
+            }
             ctx.current_block->add_successor(ctx.loop_stack.back().continue_target);
-            ctx.current_block->set_terminal(current_function(ctx).create_instruction<JumpInstruction>(
+            ctx.current_block->set_terminal(ctx.function().create_instruction<JumpInstruction>(
                 ctx.loop_stack.back().continue_target, source_location_from(node)));
             ctx.current_block = nullptr;
             return;
@@ -1090,12 +1480,12 @@ void lower_stmt(const ast_ptr& node, LoweringContext& ctx) {
     throw std::runtime_error("IR lower 暂不支持该语句节点。");
 }
 
-// Returns the body subtree for script units.
+// 返回脚本单元对应的函数体子树。
 ast_ptr script_body_from_unit(const pcdata& unit) {
     return unit.ast;
 }
 
-// Returns the executable body subtree for function units.
+// 返回函数单元对应的可执行函数体子树。
 ast_ptr function_body_from_unit(const pcdata& unit) {
     if (unit.ast && unit.ast->nodetype == node_mfile_func) {
         return std::static_pointer_cast<mFileFunc>(unit.ast)->body();
@@ -1103,7 +1493,7 @@ ast_ptr function_body_from_unit(const pcdata& unit) {
     return unit.ast;
 }
 
-// Populates function input and output names from pcdata or function AST fallback.
+// 用 pcdata 填充函数输入输出名字；缺失时回退到函数 AST。
 void populate_function_signature(Function& function, const pcdata& unit) {
     if (unit.m_in_arg_names != nullptr && !unit.m_in_arg_names->empty()) {
         function.set_input_names(*unit.m_in_arg_names);
@@ -1122,7 +1512,7 @@ void populate_function_signature(Function& function, const pcdata& unit) {
     }
 }
 
-// Lowers one parsed unit into a function attached to the target module.
+// 将一个 parsed unit lower 为挂接到目标模块上的函数。
 void lower_unit_into_function(const pcdata& unit, Module& module) {
     Function* function = module.create_function(function_name_from_unit(unit),
                                                 function_type_from_unit(unit));
@@ -1137,20 +1527,23 @@ void lower_unit_into_function(const pcdata& unit, Module& module) {
     LoweringContext ctx;
     ctx.current_block = entry;
     ctx.next_block_id = 0;
+    for (std::size_t i = 0; i < function->input_names().size(); ++i) {
+        ctx.bind_symbol_value(function->input_names()[i], function->input_ref(i));
+    }
 
     ast_ptr body = unit.is_mscript() ? script_body_from_unit(unit) : function_body_from_unit(unit);
     lower_stmt(body, ctx);
     if (ctx.current_block != nullptr && ctx.current_block->terminal() == nullptr) {
         ctx.current_block->set_terminal(
-            create_return_instruction(ctx, build_explicit_return_values(*function,
-                                                                        source_location_from(body)),
-                                      source_location_from(body)));
+            ctx.create_return_instruction(build_explicit_return_values(*function, ctx,
+                                                                       source_location_from(body)),
+                                          source_location_from(body)));
     }
 }
 
 }  // namespace
 
-// Lowers parsed units into one IR module with an entry function.
+// 将 parsed units lower 为一个带入口函数的 IR 模块。
 Module lower_parsed_units_to_ir(const std::vector<std::shared_ptr<pcdata>>& parsed_units) {
     if (parsed_units.empty() || parsed_units.front() == nullptr) {
         throw std::runtime_error("IR lower 没有可用的解析单元。");

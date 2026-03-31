@@ -82,8 +82,9 @@ public:
      */
     enum Type {
         Text,
-        Name,
+        Binding,
         Number,
+        Undef,
         UnaryOp,
         BinOp,
         Phi,
@@ -191,11 +192,12 @@ private:
 };
 
 /**
- * @brief 对应名字引用的 IR 节点，例如 `a` 或 `b`。
+ * @brief 对应运行时名字绑定读取的 IR 节点，例如函数入参或动态变量读取。
  */
-class NameInstruction final : public Instruction {
+class BindingInstruction final : public Instruction {
 public:
-    explicit NameInstruction(std::string name, std::optional<SourceLocation> location = std::nullopt);
+    explicit BindingInstruction(std::string name,
+                                std::optional<SourceLocation> location = std::nullopt);
 
     /**
      * @brief 返回被引用的符号名。
@@ -232,11 +234,11 @@ private:
 };
 
 /**
- * @brief Phi 节点的一条入边。
+ * @brief 显式表示“当前路径上尚未定义具体值”的 SSA 占位指令。
  */
-struct PhiIncoming {
-    BasicBlock* predecessor = nullptr;
-    ValueRef value_ref;
+class UndefInstruction final : public Instruction {
+public:
+    explicit UndefInstruction(std::optional<SourceLocation> location = std::nullopt);
 };
 
 /**
@@ -248,6 +250,7 @@ public:
      * @brief 具体的单目运算种类。
      */
     enum Type {
+        Logic_Not,
         UMinus,
     };
 
@@ -344,13 +347,21 @@ private:
  */
 class PhiInstruction final : public Instruction {
 public:
-    explicit PhiInstruction(std::vector<PhiIncoming> incomings = {},
+    /**
+     * @brief Phi 节点的一条入边。
+     */
+    struct Incoming {
+        BasicBlock* predecessor = nullptr;
+        ValueRef value_ref;
+    };
+
+    explicit PhiInstruction(std::vector<Incoming> incomings = {},
                             std::optional<SourceLocation> location = std::nullopt);
 
     /**
      * @brief 返回全部 incoming。
      */
-    const std::vector<PhiIncoming>& incomings() const;
+    const std::vector<Incoming>& incomings() const;
 
     /**
      * @brief 返回 incoming 个数。
@@ -360,10 +371,15 @@ public:
     /**
      * @brief 返回第 `index` 条 incoming；越界时返回 nullptr。
      */
-    const PhiIncoming* incoming(std::size_t index) const;
+    const Incoming* incoming(std::size_t index) const;
+
+    /**
+     * @brief 追加一条 incoming。
+     */
+    void append_incoming(Incoming incoming);
 
 private:
-    std::vector<PhiIncoming> incomings_;
+    std::vector<Incoming> incomings_;
 };
 
 /**
@@ -374,11 +390,23 @@ public:
     CallInstruction(std::string name, std::size_t output_count,
                     std::vector<ValueRef> in_arg_refs,
                     std::optional<SourceLocation> location = std::nullopt);
+    CallInstruction(ValueRef callee_ref, std::size_t output_count, std::vector<ValueRef> in_arg_refs,
+                    std::optional<SourceLocation> location = std::nullopt);
 
     /**
      * @brief 返回被调用函数名。
      */
     const std::string& name() const;
+
+    /**
+     * @brief 返回间接调用目标对应的 ValueRef；直接调用时为非法引用。
+     */
+    ValueRef callee_ref() const;
+
+    /**
+     * @brief 返回该调用是否通过运行时值决定目标。
+     */
+    bool is_indirect() const;
 
     /**
      * @brief 返回源码层显式请求的输出参数个数。
@@ -402,6 +430,7 @@ public:
 
 private:
     std::string name_;
+    ValueRef callee_ref_;
     std::size_t output_count_ = 0;
     std::vector<ValueRef> in_arg_refs_;
 };
@@ -592,6 +621,11 @@ public:
     const std::vector<std::string>& input_names() const;
 
     /**
+     * @brief 返回输入参数在 SSA IR 中对应的值定义。
+     */
+    const std::vector<InstValue>& input_values() const;
+
+    /**
      * @brief 返回输出参数名列表。
      */
     const std::vector<std::string>& output_names() const;
@@ -620,6 +654,11 @@ public:
      * @brief 设置输入参数名列表。
      */
     void set_input_names(std::vector<std::string> names);
+
+    /**
+     * @brief 返回第 `index` 个输入参数的 ValueRef；越界时返回非法引用。
+     */
+    ValueRef input_ref(std::size_t index) const;
 
     /**
      * @brief 设置输出参数名列表。
@@ -684,6 +723,7 @@ private:
     std::string name_;
     Type type_ = PrimaryFunction;
     std::vector<std::string> input_names_;
+    std::vector<InstValue> input_values_;
     std::vector<std::string> output_names_;
     std::vector<std::unique_ptr<BasicBlock>> block_storage_;
     std::vector<std::unique_ptr<Instruction>> instruction_storage_;

@@ -5,7 +5,7 @@
 #include <vector>
 
 #include "pcdata.h"
-#include "ir/ir.h"
+#include "lowering/lowering_context.h"
 
 namespace baltam {
 

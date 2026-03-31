@@ -48,36 +48,31 @@ std::string resolve_script_argument(const std::string& arg) {
     return arg;
 }
 
-void print_parsed_ast(const std::shared_ptr<pcdata>& parsed_unit, std::size_t index) {
-    if (parsed_unit == nullptr) {
-        std::cout << "pcdata[" << index << "] is null" << std::endl;
-        return;
-    }
-
-    std::cout << "pcdata[" << index << "]" << std::endl;
-    std::cout << "  filename: " << parsed_unit->filename << std::endl;
-    std::cout << "  is_mscript: " << std::boolalpha << parsed_unit->is_mscript() << std::endl;
-    std::cout << "  is_mfun: " << std::boolalpha << parsed_unit->is_mfun() << std::endl;
-
-    if (parsed_unit->ast == nullptr) {
-        std::cout << "  ast: null" << std::endl;
-        return;
-    }
-
-    std::cout << "  ast2str:" << std::endl;
-    std::cout << ast2str(parsed_unit->ast) << std::endl;
-}
-
-void print_frame_symbols(const Frame& frame) {
-    std::cout << "Interpreter frame:" << std::endl;
-    for (const auto& [name, binding] : frame.symbols()) {
-        std::cout << "  " << name << " = ";
-        if (!binding.initialized) {
-            std::cout << "<uninitialized>";
-        } else {
-            std::cout << value_text(binding.value);
+void print_frame_state(const Frame& frame) {
+    std::cout << "Interpreter outputs:" << std::endl;
+    if (frame.function() != nullptr) {
+        const auto& output_names = frame.function()->output_names();
+        const auto& outputs = frame.outputs();
+        for (std::size_t i = 0; i < output_names.size(); ++i) {
+            std::cout << "  " << output_names[i] << " = ";
+            if (i < outputs.size()) {
+                std::cout << value_text(outputs[i]);
+            } else {
+                std::cout << "<missing>";
+            }
+            std::cout << std::endl;
         }
-        std::cout << std::endl;
+    }
+
+    bool has_initialized_binding = false;
+    for (const auto& [name, binding] : frame.symbols()) {
+        if (binding.initialized) {
+            if (!has_initialized_binding) {
+                std::cout << "Interpreter bindings:" << std::endl;
+                has_initialized_binding = true;
+            }
+            std::cout << "  " << name << " = " << value_text(binding.value) << std::endl;
+        }
     }
 }
 
@@ -93,11 +88,6 @@ int run_m_file(const std::string& script_path) {
     if (parsed_units.empty()) {
         std::cerr << "文件未生成 AST: " << script_path << std::endl;
         return 1;
-    }
-
-    std::cout << "Parsed file: " << script_path << std::endl;
-    for (std::size_t i = 0; i < parsed_units.size(); ++i) {
-        print_parsed_ast(parsed_units[i], i);
     }
 
     try {
@@ -116,7 +106,7 @@ int run_m_file(const std::string& script_path) {
             }
 
             const Frame frame = execute_function(*module.entry_function(), args);
-            print_frame_symbols(frame);
+            print_frame_state(frame);
             std::cout << std::endl;
         }
     } catch (const std::exception& ex) {

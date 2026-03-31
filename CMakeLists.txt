@@ -7,6 +7,8 @@ project(TEST_KERNEL)
 add_executable(main
     src/main.cpp
     src/ir/ir.cpp
+    src/ir/ir_printer.cpp
+    src/lowering/lowering_context.cpp
     src/lowering/lowering.cpp
     src/interpreter/interpreter.cpp
 )
