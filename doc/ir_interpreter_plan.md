@@ -2,415 +2,174 @@
 
 ## 目标
 
-本文档整理当前这版 IR 的直接执行方案。前提如下：
+本文档描述当前仓库已经落地的 IR 解释器模型，以及接下来更值得推进的方向。
 
-- 运行时值统一表示为 `std::shared_ptr<ba_obj>`
-- 运算符如 `+`、`*`、`>` 已有对应实现
-- 内建函数如 `sin` 已有对应实现
+它不再讨论早期基于 `NameInstruction`、`out_args` 或 `ForRangeInstruction` 的旧设计。
 
-目标不是立即设计高性能执行器，而是先明确一版最小、可落地的 IR 解释器。
+## 当前状态
 
-## 核心判断
+当前项目已经具备完整的：
 
-在当前条件下，IR 解释器应该做成一个很薄的执行层：
+- `AST -> IR lowering`
+- IR 文本打印
+- IR 解释执行
 
-- 不重新发明值系统
-- 不重新实现内建函数
-- 不重新实现运算符
-- 只负责调度 IR 节点，并把执行请求转发到现有 runtime
-
-## 需要准备的内容
-
-### 1. 执行帧 Frame
-
-每次执行一个 `Function`，都需要一个运行时执行帧。
-
-第一版建议使用：
+解释器入口是 `execute_function(Function&, args, caller)`，运行时值统一为：
 
 ```cpp
 using Value = std::shared_ptr<ba_obj>;
-
-struct Binding {
-    Value value;
-    bool initialized = false;
-};
-
-class Frame {
-public:
-    using SymbolTable = std::unordered_map<std::string, Binding>;
-
-    Function* function = nullptr;
-    Frame* caller = nullptr;
-    int nargin = 0;
-    int nargout = 0;
-    bool returned = false;
-    SymbolTable symbols;
-    std::vector<Value> outputs;
-};
 ```
 
-原因是当前 IR 中：
+## 运行时模型
 
-- `NameInstruction` 通过名字引用变量
-- `AssignInstruction` 通过名字写变量
-- `Function` 会持有输入输出参数名列表
+### 1. Frame
 
-因此第一版按名字管理运行时变量最省事，也最贴近 MATLAB-like 工作区语义。
+当前 `Frame` 同时维护两套状态：
 
-建议 `Frame` 提供最小接口：
+- 名字环境：`SymbolTable`
+- 值结果表：`ValueTable`
 
-- `declare(name)`
-- `store(name, value)`
-- `load(name)`
-- `contains(name)`
-- `is_initialized(name)`
+也就是说，当前解释器不是纯名字模型，也不是纯 SSA 执行器，而是 hybrid 模型：
+
+- `AssignInstruction` 仍会写名字环境
+- 计算结果会写入 `ValueId`
+- 后续指令优先按 `ValueRef` 取值
+
+### 2. 输入与输出
+
+当前执行模型里：
+
+- 函数输入参数会先写入对应 `input_ref()` 的值槽
+- 输出参数名会在建帧时预声明
+- 显式 `ReturnInstruction` 优先返回自身携带的 `ValueRef` 列表
+- 如果函数自然结束，则仍可按输出名字收集结果
+
+这与当前 IR“值结果 + 名字环境并存”的设计保持一致。
+
+## 执行循环
+
+当前 block 调度的关键语义是：
+
+1. 从 `entry_block()` 开始
+2. 进入块时先执行块首 `phi`
+3. 再执行普通指令
+4. 最后执行 terminator，决定下一个块
+
+这里最重要的约束是：
+
+- `phi` 只能出现在块首
+- `phi` 不能按普通指令执行
+- `phi` 的 incoming 由前驱块决定
+
+这套语义已经是完整 SSA block-entry 规则的雏形。
+
+## 求值与物化
+
+### 1. 普通求值
+
+当前解释器会对下面这些节点做表达式求值：
+
+- `BindingInstruction`
+- `NumberInstruction`
+- `UnaryOpInstruction`
+- `BinOpInstruction`
+- `CallInstruction`
+- `PhiInstruction`
 
 其中：
 
-- `load(name)` 对“名字不存在”或“已声明但未初始化”都应报错
-- 输入参数在建帧时按 `Function::input_names()` 写入 `symbols`
-- 输出参数在建帧时按 `Function::output_names()` 预声明
-- `ReturnInstruction` 只负责结束执行，函数返回值由 `Function::output_names()` 从 `symbols` 中顺序收集
+- `PhiInstruction` 不能临时现算，必须在 block 入口预先求值
+- 其余产值节点可按需物化
 
-后续如果要优化，可以再逐步替换成 slot 表。
+### 2. `ValueRef` 读取
 
-### 2. 表达式求值入口
+当前取值逻辑的关键点是：
 
-建议准备一个统一入口：
+- 优先从 `Frame::ValueTable` 读取
+- 若值槽中尚未写入，则按 `ValueId -> owner instruction` 回溯物化
 
-```cpp
-std::shared_ptr<ba_obj> eval_expr(Instruction* inst, Frame& frame);
-```
+这意味着当前解释器已经不再只是“按顺序执行并把结果全丢进名字表”，而是具备了基本的 value-based 物化能力。
 
-第一版主要处理：
+## 运行时桥接
 
-- `NameInstruction`
-- `NumberInstruction`
-- `BinOpInstruction`
-- `CallInstruction`
+当前解释器依赖运行时桥接层完成：
 
-语义建议如下：
+- 一元运算
+- 二元运算
+- 条件判断
+- 内建函数调用
+- 内部函数调用
 
-- `NameInstruction`
-  - 从 `frame.symbols` 读取变量值
-- `NumberInstruction`
-  - 将字面量包装成对应的 `ba_obj`
-- `BinOpInstruction`
-  - 递归求左右值
-  - 调用已有的运算符实现
-- `CallInstruction`
-  - 递归求输入参数
-  - 调用已有的函数实现
+解释器本身的职责应继续保持克制：
 
-### 3. 语句执行入口
+- 不重做值系统
+- 不重做 builtin 实现
+- 不重做对象系统
+- 只负责调度 IR 与 runtime 之间的连接
 
-建议准备一个语句执行入口：
+## 循环语义
 
-```cpp
-void exec_inst(Instruction* inst, Frame& frame);
-```
+当前 `for` 并不是通过专门循环节点执行，而是 lower 成显式 CFG，并通过运行时协议配合：
 
-第一版主要处理：
+- `foreach_init`
+- `foreach_iterate`
 
-- `AssignInstruction`
-- `CallInstruction`
+这条路径已经比早期“专门循环指令”更接近长期可维护的方案。
 
-语义建议如下：
+因此后续应继续坚持：
 
-- `AssignInstruction`
-  - 计算右值
-  - 写入 `frame.symbols[name]`
-- `CallInstruction`
-  - 计算输入参数
-  - 调用 runtime 中已有的函数实现
-  - 将结果写入 `out_args`
+- `for i = expr` 统一建模
+- `node_colon` 作为普通表达式 lower
+- 循环语义由 CFG + runtime helper 共同表达
 
-## 控制流执行
+## 当前解释器的主要约束
 
-### 4. Block 调度循环
+### 1. 名字环境仍然活跃
 
-每个 `Function` 的执行，从 `entry_block()` 开始。
+当前很多可观察语义仍然依赖名字环境，因此不能把解释器直接当成“纯 SSA 执行器”。
 
-建议执行流程：
+### 2. 还没有 verifier 保底
 
-1. 顺序执行 `block->instructions()`
-2. 执行 `block->terminal()`
-3. 根据 terminal 的结果跳到下一个 block
+目前解释器能执行当前 IR，但中间还缺：
 
-可表达为：
+- CFG verifier
+- phi 完整性检查
+- use-def 检查
 
-```cpp
-BasicBlock* bb = func.entry_block();
-while (bb != nullptr) {
-    for (Instruction* inst : bb->instructions()) {
-        exec_inst(inst, frame);
-    }
-    bb = exec_terminal(bb->terminal(), frame);
-}
-```
+如果后续引入优化和 SSA pass，这一层必须先补。
 
-### 5. Terminal 执行入口
+### 3. 还没有 optimizer 集成
 
-建议准备一个 terminal 调度入口：
+当前执行链仍然主要是：
 
-```cpp
-BasicBlock* exec_terminal(Instruction* term, Frame& frame);
-```
+`lower -> print -> execute`
 
-第一版处理：
+后续更合理的形态应是：
 
-- `CondJumpInstruction`
-- `JumpInstruction`
-- `ReturnInstruction`
-
-语义建议如下：
-
-- `CondJumpInstruction`
-  - 计算条件表达式
-  - 根据结果跳转到 `true_block` 或 `false_block`
-- `JumpInstruction`
-  - 直接返回目标 block
-- `ReturnInstruction`
-  - 结束函数执行
-  - 返回到调用方
-
-## 运行时桥接层
-
-因为数值系统、运算符和函数实现已经存在，IR 解释器最重要的是桥接。
-
-建议把桥接集中到两类接口：
-
-### 运算符桥接
-
-```cpp
-std::shared_ptr<ba_obj> eval_binop(BinOpInstruction::Type op,
-                                   std::shared_ptr<ba_obj> lhs,
-                                   std::shared_ptr<ba_obj> rhs);
-```
-
-职责：
-
-- 按 `BinOpInstruction::Type` 分派到已有的 `+`、`*`、`>` 实现
-
-### 函数调用桥接
-
-```cpp
-std::vector<std::shared_ptr<ba_obj>> eval_call(const std::string& name,
-                                               const std::vector<std::shared_ptr<ba_obj>>& in_args);
-```
-
-职责：
-
-- 按函数名调用已有 runtime/builtin 层实现
-- 返回输出参数列表
-
-这样做的好处是：
-
-- IR 层只关心调度，不关心具体 runtime 细节
-- 解释器结构更薄
-- 后续替换调用策略更容易
-
-## 条件判断
-
-### 6. 条件值转换
-
-`CondJumpInstruction` 的条件最终会落到一个 `std::shared_ptr<ba_obj>` 上，因此还需要统一条件判断入口：
-
-```cpp
-bool to_cond(const std::shared_ptr<ba_obj>& value);
-```
-
-这个函数应负责复用 MATLAB-like 语义，例如：
-
-- logical scalar
-- 非零数值
-- 可能的矩阵条件行为
-
-它是控制流执行中的关键桥接点。
-
-## `for` 循环设计
-
-### 7. `for` 的源码语义
-
-MATLAB-like 语言里的 `for` 应统一理解成：
-
-```matlab
-for i = expr
-    ...
-end
-```
-
-这里：
-
-- `for i = 2:4` 只是 `expr` 恰好是一个 `node_colon`
-- `for i = a` 和 `for i = 2:4` 在 IR 层不应被建模成两种不同循环
-- `node_colon` 本身应 lower 成运行时 `colon(...)` 调用，而不是专门的循环节点
-
-因此，当前已经落下去的 `ForRangeInstruction` 只是过渡方案，后续应移除。
-
-### 8. `for` 的 CFG 形状
-
-既然运行时已经存在 `foreach_init` 和 `foreach_iterate`，`for` 更合适的 lower 方式是：
-
-```text
-for.preheader:
-  %iter = eval(expr)
-  %state = foreach_init(%iter)
-  jump for.header
-
-for.header:
-  [%has_value, %current] = foreach_iterate(%state)
-  cond_jump %has_value ? for.body : for.end
-
-for.body:
-  i = %current
-  ... body ...
-  jump for.header
-
-for.end:
-```
-
-这套设计里建议使用 4 个 `BasicBlock`：
-
-- `for.preheader`
-- `for.header`
-- `for.body`
-- `for.end`
-
-如果以后为了 profile / JIT 想把回边点单独规范化，也可以再拆一个 `for.latch`，但当前阶段不是必须。
-
-### 9. `break` 与 `continue`
-
-lowering `for` 时需要维护一个循环上下文栈，例如：
-
-```cpp
-struct LoopContext {
-    BasicBlock* break_target;
-    BasicBlock* continue_target;
-};
-```
-
-进入 `for` 时压栈：
-
-- `break_target = for.end`
-- `continue_target = for.header`
-
-这样：
-
-- `break` 直接 lower 成 `jump for.end`
-- `continue` 直接 lower 成 `jump for.header`
-
-嵌套循环时，只需要读取栈顶的循环上下文即可。
-
-### 10. `node_colon` 的 lowering
-
-`node_colon` 应作为普通表达式处理：
-
-```text
-2:4      -> call "colon"(2, 4)
-1:2:9    -> call "colon"(1, 2, 9)
-```
-
-这样 `for i = 2:4` 会自然变成：
-
-- 先把 `2:4` lower 成 `colon(2, 4)`
-- 再按统一的 `for i = expr` 方案进入 `foreach_init / foreach_iterate`
-
-这能把 `for i = a` 和 `for i = 2:4` 彻底统一到同一条 IR 执行链上。
-
-## 建议的最小实现顺序
-
-建议按下面顺序推进：
-
-1. 定义 `Frame`
-2. 实现 `eval_expr`
-3. 实现 `exec_inst`
-4. 实现 `exec_terminal`
-5. 建立 `eval_binop`
-6. 建立 `eval_call`
-7. 把 `node_colon` lower 成运行时 `colon(...)`
-8. 把 `for` lower 成 `foreach_init / foreach_iterate` 的 CFG
-9. 支持 `break/continue`
-10. 用 `simple_demo.m` 和简单 `for` 用例跑通整条链路
-
-## 为什么这版解释器值得做
-
-当前这版 IR 解释器虽然还不会比 AST 解释器高级很多，但它有一个重要优势：
-
-- 执行对象已经从“树”变成了“显式 CFG + 指令序列”
-
-这为后续工作创造了基础条件：
-
-- profile
-- 热点识别
-- block 级优化
-- JIT
-- deopt / fallback
-
-因此，这版解释器的意义主要不是“立刻比 AST 解释器更强”，而是“为后续执行体系提供正确的载体”。
-
-## 当前主线
-
-在 `simple_demo.m` 跑通以后，当前阶段的主线不再是重新设计执行架构，
-而是持续扩大：
-
-- `AST -> IR lowering` 的语法覆盖面
-- `IR -> runtime` 的解释执行语义覆盖面
-
-也就是说，接下来的重点是让更多 MATLAB-like 语法能够：
-
-1. 被稳定 lower 成 IR
-2. 被当前 IR 解释器正确执行
+`lower -> verify -> optimize(optional) -> execute`
 
 ## 接下来的重点
 
-### 1. 扩大 lowering 覆盖
+如果只看解释器这条线，后续更值得推进的是：
 
-优先支持投入产出比较高的 AST 节点，例如：
+1. 扩大 lowering 可覆盖的语法子集
+2. 扩大解释器可正确执行的 IR 子集
+3. 补 `Verifier`
+4. 在执行链中加入 `PassManager` / `optimize_module()`
+5. 为 profile 和优化预留更清晰的插桩点
 
-- `return`
-- 单目运算
-- 更多比较/逻辑运算
-- `elseif`
-- `while`
-- `for`
-- 多返回值函数调用
-- 普通 `m` 函数定义和调用
-- 局部函数
-- `break/continue`
+不建议当前优先做的事情包括：
 
-### 2. 补齐解释器语义
-
-随着 lowering 覆盖面扩大，解释器侧也需要同步补齐：
-
-- 函数输入输出参数绑定
-- `nargin/nargout`
-- `ans`
-- 更清晰的未定义变量/未初始化变量报错
-- builtin 调用错误透传
-- script workspace 和 function workspace 的差异
-- 后续的 `persistent/global`
-
-## 当前阶段的判断
-
-因此，当前最重要的工作可以概括为两句话：
-
-1. 不急着再换执行架构，而是先把现有 `IR + Interpreter` 主链做厚。
-2. 让更多 `m` 语法能够被 lower 并执行，是这段时间最核心的演进方向。
+- 把解释器整套重写成纯 SSA 执行器
+- 为解释器单独再发明一套新 IR
+- 在没有 verifier 的情况下叠加复杂优化
 
 ## 总结
 
-在现有 runtime 条件下，IR 解释器的最小方案可以概括为：
+当前 Baltam_IR 解释器已经不是“最小 demo 设想”，而是一条真实可运行的主执行链。
 
-- 一个 `Frame`
-- 一组表达式求值函数
-- 一组语句执行函数
-- 一个 block 调度循环
-- 一个 terminal 跳转入口
-- 两类运行时桥接：运算符和函数
+接下来最重要的不是再换解释执行模型，而是：
 
-而运行时值继续统一复用：
-
-- `std::shared_ptr<ba_obj>`
-
-这是当前最直接、风险最低、最容易从 demo 走向可执行原型的路径。
+- 继续做厚当前 `IR + Interpreter`
+- 给它补 verifier 和 optimizer 入口
+- 让后续 SSA 和优化器建立在这条已跑通的主链上
