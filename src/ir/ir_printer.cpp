@@ -7,6 +7,7 @@
 #include <sstream>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace baltam {
@@ -145,6 +146,16 @@ const char* module_type_name(Module::Type type) {
     return "unknown_module_type";
 }
 
+using DisplayNameMap = std::unordered_map<ValueId, std::string>;
+
+const DisplayNameMap* current_display_names = nullptr;
+
+struct DisplayValueInfo {
+    ValueId id = InvalidValueId;
+    std::string debug_name;
+    bool is_phi = false;
+};
+
 std::string format_value_ref(const Instruction* context, ValueRef ref);
 std::string format_inst_values(const std::vector<InstValue>& values);
 std::string format_argument_list(const std::vector<InstValue>& values);
@@ -162,6 +173,100 @@ struct SourceComment {
 
 std::optional<SourceComment> source_comment_from_location(
     const std::optional<SourceLocation>& location);
+
+void collect_display_value_infos(std::vector<DisplayValueInfo>& infos,
+                                 const std::vector<InstValue>& values, bool is_phi) {
+    for (const InstValue& value : values) {
+        if (!value.is_valid()) {
+            continue;
+        }
+        infos.push_back(DisplayValueInfo{value.id, value.debug_name, is_phi});
+    }
+}
+
+DisplayNameMap build_display_names(const Function& function) {
+    std::vector<DisplayValueInfo> infos;
+    collect_display_value_infos(infos, function.input_values(), false);
+
+    for (const auto& block : function.blocks()) {
+        for (Instruction* instruction : block->instructions()) {
+            if (instruction == nullptr) {
+                continue;
+            }
+            collect_display_value_infos(infos, instruction->value_defs(),
+                                        instruction->type() == Instruction::Phi);
+        }
+        if (block->terminal() != nullptr) {
+            collect_display_value_infos(infos, block->terminal()->value_defs(),
+                                        block->terminal()->type() == Instruction::Phi);
+        }
+    }
+
+    std::unordered_map<std::string, std::size_t> name_counts;
+    std::unordered_map<std::string, std::size_t> first_indices;
+    std::unordered_map<std::string, std::size_t> first_phi_indices;
+    for (std::size_t i = 0; i < infos.size(); ++i) {
+        if (infos[i].debug_name.empty()) {
+            continue;
+        }
+        ++name_counts[infos[i].debug_name];
+        first_indices.emplace(infos[i].debug_name, i);
+        if (infos[i].is_phi) {
+            first_phi_indices.emplace(infos[i].debug_name, i);
+        }
+    }
+
+    std::unordered_map<std::string, std::size_t> canonical_indices;
+    for (const auto& [name, count] : name_counts) {
+        if (count <= 1) {
+            continue;
+        }
+        const auto phi_it = first_phi_indices.find(name);
+        canonical_indices[name] =
+            phi_it != first_phi_indices.end() ? phi_it->second : first_indices.at(name);
+    }
+
+    DisplayNameMap display_names;
+    std::unordered_map<std::string, std::size_t> next_versions;
+    std::unordered_set<std::string> used_display_names;
+    std::size_t next_anonymous_id = 1;
+
+    for (std::size_t i = 0; i < infos.size(); ++i) {
+        const DisplayValueInfo& info = infos[i];
+        if (info.debug_name.empty()) {
+            std::string display_name;
+            do {
+                display_name = "%" + std::to_string(next_anonymous_id++);
+            } while (used_display_names.find(display_name) != used_display_names.end());
+            display_names[info.id] = display_name;
+            used_display_names.insert(display_name);
+            continue;
+        }
+
+        const auto count_it = name_counts.find(info.debug_name);
+        const bool has_conflict = count_it != name_counts.end() && count_it->second > 1;
+        const auto canonical_it = canonical_indices.find(info.debug_name);
+        if (!has_conflict || (canonical_it != canonical_indices.end() && canonical_it->second == i)) {
+            const std::string display_name = "%" + info.debug_name;
+            display_names[info.id] = display_name;
+            used_display_names.insert(display_name);
+            continue;
+        }
+
+        std::size_t& next_version = next_versions[info.debug_name];
+        if (next_version == 0) {
+            next_version = 1;
+        }
+        std::string display_name;
+        do {
+            display_name = "%" + info.debug_name + "." + std::to_string(next_version++);
+        } while (used_display_names.find(display_name) != used_display_names.end());
+        display_names[info.id] = display_name;
+        used_display_names.insert(display_name);
+    }
+
+    return display_names;
+}
 
 std::string expr_text(const Instruction* instruction) {
     if (instruction == nullptr) {
@@ -282,13 +387,16 @@ std::string expr_text(const Instruction* instruction) {
 }
 
 std::string format_inst_value(const InstValue& value) {
-    std::string text = "%";
-    if (!value.debug_name.empty()) {
-        text += value.debug_name;
-        text += ".";
+    if (current_display_names != nullptr) {
+        const auto it = current_display_names->find(value.id);
+        if (it != current_display_names->end()) {
+            return it->second;
+        }
     }
-    text += std::to_string(value.id);
-    return text;
+    if (!value.debug_name.empty()) {
+        return "%" + value.debug_name;
+    }
+    return "%" + std::to_string(value.id);
 }
 
 const Function* parent_function_from_instruction(const Instruction* instruction) {
@@ -301,6 +409,12 @@ const Function* parent_function_from_instruction(const Instruction* instruction)
 std::string format_value_ref(const Instruction* context, ValueRef ref) {
     if (!ref.is_valid()) {
         return "<invalid>";
+    }
+    if (current_display_names != nullptr) {
+        const auto it = current_display_names->find(ref.id);
+        if (it != current_display_names->end()) {
+            return it->second;
+        }
     }
     if (const Function* function = parent_function_from_instruction(context)) {
         if (const InstValue* value = function->find_value(ref.id)) {
@@ -496,7 +610,7 @@ void print_instruction(std::ostream& os, const Instruction& instruction, std::si
         } else {
             os << "  ";
         }
-        os << "; src: " << last_source_comment->text;
+        os << "; " << last_source_comment->text;
     }
     os << "\n";
 }
@@ -514,6 +628,8 @@ void print_ir(std::ostream& os, const Module& module) {
        << "\n";
 
     for (const auto& function : module.functions()) {
+        const DisplayNameMap display_names = build_display_names(*function);
+        current_display_names = &display_names;
         os << "\ndefine " << format_function_ref(function->name())
            << format_argument_list(function->input_values()) << " {\n";
         os << "  ; kind = " << function_type_name(function->type()) << "\n";
@@ -554,6 +670,7 @@ void print_ir(std::ostream& os, const Module& module) {
 
         os << "\n";
         os << "}\n";
+        current_display_names = nullptr;
     }
 }
 

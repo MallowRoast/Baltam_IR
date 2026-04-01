@@ -6,11 +6,15 @@ project(TEST_KERNEL)
 
 add_executable(main
     src/main.cpp
+    src/analysis/analysis_manager.cpp
+    src/analysis/verifier.cpp
     src/ir/ir.cpp
     src/ir/ir_printer.cpp
     src/lowering/lowering_context.cpp
     src/lowering/lowering.cpp
     src/interpreter/interpreter.cpp
+    src/optimizer/pass_manager.cpp
+    src/optimizer/optimize.cpp
 )
 target_compile_definitions(main PRIVATE BALTAM_IR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_include_directories(main PRIVATE src)

@@ -51,7 +51,7 @@ struct ValueRef {
 /**
  * @brief 一条指令定义出的单个结果值的元数据。
  *
- * `debug_name` 用于打印出更接近源码的名字，例如 `%x.3`；`source_location`
+ * `debug_name` 用于优先打印出更接近源码的名字，例如 `%x`；`source_location`
  * 允许在 SSA/value-based IR 阶段为单个结果保留更细粒度的调试信息。
  */
 struct InstValue {
@@ -689,6 +689,11 @@ public:
      * @brief 按 ValueId 查找本函数内对应的值定义元数据。
      */
     const InstValue* find_value(ValueId id) const;
+
+    /**
+     * @brief 按 ValueId 回填或更新某个值的调试名；未找到时返回 false。
+     */
+    bool set_value_debug_name(ValueId id, std::string debug_name);
 
     /**
      * @brief 按 ValueId 查找定义该值的指令；未找到时返回 nullptr。

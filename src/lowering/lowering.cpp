@@ -468,11 +468,21 @@ ValueRef require_symbol_value_ref(const LoweringContext& ctx, const std::string&
     return ref;
 }
 
+bool is_internal_debug_name(const std::string& debug_name) {
+    return debug_name.rfind("__", 0) == 0;
+}
+
 void bind_name_value(LoweringContext& ctx, const std::string& name, ValueRef value_ref,
                      std::optional<SourceLocation> location) {
     (void)location;
     if (name.empty() || !value_ref.is_valid()) {
         return;
+    }
+    if (const InstValue* value = ctx.function().find_value(value_ref.id);
+        value != nullptr &&
+        (value->debug_name.empty() || value->debug_name == name ||
+         is_internal_debug_name(value->debug_name))) {
+        ctx.function().set_value_debug_name(value_ref.id, name);
     }
     ctx.bind_symbol_value(name, value_ref);
 }
@@ -556,6 +566,39 @@ LoweringContext::MergeSnapshot make_merge_snapshot(
     return snapshot;
 }
 
+void assign_phi_incoming_debug_names(Function& function, const std::string& name,
+                                     const std::vector<PhiInstruction::Incoming>& incomings) {
+    if (name.empty()) {
+        return;
+    }
+
+    std::unordered_map<ValueId, std::string> assigned_names;
+    std::size_t next_version = 1;
+    for (const PhiInstruction::Incoming& incoming : incomings) {
+        if (!incoming.value_ref.is_valid()) {
+            continue;
+        }
+
+        const InstValue* value = function.find_value(incoming.value_ref.id);
+        if (value == nullptr) {
+            continue;
+        }
+        if (!value->debug_name.empty() && value->debug_name != name &&
+            !is_internal_debug_name(value->debug_name)) {
+            continue;
+        }
+
+        const auto [it, inserted] = assigned_names.emplace(
+            incoming.value_ref.id, name + "." + std::to_string(next_version));
+        if (!inserted) {
+            continue;
+        }
+
+        function.set_value_debug_name(incoming.value_ref.id, it->second);
+        ++next_version;
+    }
+}
+
 // 插入合并赋值；若有多个前驱到达合流点，则创建 phi 节点。
 void append_phi_merge_assignments(LoweringContext& ctx, const std::vector<std::string>& names,
                                   const std::vector<LoweringContext::MergeSnapshot>& snapshots,
@@ -586,8 +629,11 @@ void append_phi_merge_assignments(LoweringContext& ctx, const std::vector<std::s
             continue;
         }
 
+        assign_phi_incoming_debug_names(ctx.function(), names[i], incomings);
+        // merge phi 是 CFG 合流时合成出来的 SSA 节点，不对应某一条具体源码语句。
+        // 若沿用 if/switch/loop 的源码位置，打印 IR 时会错误地把条件行挂到合流块上。
         Instruction* phi =
-            ctx.function().create_instruction<PhiInstruction>(std::move(incomings), location);
+            ctx.function().create_instruction<PhiInstruction>(std::move(incomings), std::nullopt);
         ctx.append_valued_instruction(phi, names[i]);
         merged_values.push_back({names[i], phi->value_ref()});
     }
@@ -615,8 +661,9 @@ std::vector<PhiInstruction*> append_loop_header_phi_bindings(
                 PhiInstruction::Incoming{entry_snapshot->predecessor, entry_snapshot->value_refs[i]});
         }
 
+        // loop header phi 同样是 lowering 过程生成的合成节点，不应伪装成某条源码语句。
         Instruction* phi =
-            ctx.function().create_instruction<PhiInstruction>(std::move(incomings), location);
+            ctx.function().create_instruction<PhiInstruction>(std::move(incomings), std::nullopt);
         ctx.append_valued_instruction(phi, names[i]);
         phis.push_back(static_cast<PhiInstruction*>(phi));
     }
@@ -1534,10 +1581,11 @@ void lower_unit_into_function(const pcdata& unit, Module& module) {
     ast_ptr body = unit.is_mscript() ? script_body_from_unit(unit) : function_body_from_unit(unit);
     lower_stmt(body, ctx);
     if (ctx.current_block != nullptr && ctx.current_block->terminal() == nullptr) {
+        // 这里补的是隐式 return：它表示“函数体自然执行结束”这一 IR 语义，
+        // 不是源码里显式写出的 return 语句，因此不附着源码位置，避免误挂注释。
         ctx.current_block->set_terminal(
-            ctx.create_return_instruction(build_explicit_return_values(*function, ctx,
-                                                                       source_location_from(body)),
-                                          source_location_from(body)));
+            ctx.create_return_instruction(build_explicit_return_values(*function, ctx, std::nullopt),
+                                          std::nullopt));
     }
 }
 

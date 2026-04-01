@@ -355,6 +355,265 @@ SSA 化前应补齐：
 - `dom_frontier`
 - `use_def_analysis`
 
+### 1.1 这 5 个基础 analysis 的输入与输出
+
+下面这 5 个 analysis 可以看成后续 `BuildPrunedSSA` 和第一批中端优化的最小分析层。
+
+设计时建议统一遵守一个原则：
+
+- 输入尽量直接使用当前 `Function / BasicBlock / Instruction / ValueRef`
+- 输出尽量做成稳定的 `Result` 对象
+- `Result` 既要能被 pass 直接查询，也要能被 verifier / 调试打印复用
+
+#### `CFGAnalysis`
+
+基本作用：
+
+- 把函数的控制流骨架整理成可复用的分析结果
+- 为后续 dominator、liveness、可达块清理等 pass 提供统一入口
+
+建议输入：
+
+- 一个已经 basic well-formed 的 `Function`
+- 依赖当前 IR 上已有的：
+  - `entry_block()`
+  - `blocks()`
+  - `predecessors()`
+  - `successors()`
+
+建议输出：
+
+- `reachable_blocks`
+- `reverse_postorder`
+- `postorder`
+- `block_to_rpo_index`
+- 一个统一的 `is_reachable(BasicBlock*)` 查询接口
+
+第一版 `Result` 可以长成：
+
+```cpp
+struct CFGAnalysis {
+    struct Result {
+        std::vector<BasicBlock*> reachable_blocks;
+        std::vector<BasicBlock*> reverse_postorder;
+        std::vector<BasicBlock*> postorder;
+        std::unordered_map<BasicBlock*, std::size_t> rpo_index;
+
+        bool is_reachable(BasicBlock* block) const;
+    };
+};
+```
+
+这里的重点是：
+
+- `reachable_blocks` 给 dead block 清理和 verifier 用
+- `reverse_postorder` 给大多数前向数据流分析用
+- `postorder` 给某些反向分析或构建 dominator 辅助用
+
+#### `DominatorTree`
+
+基本作用：
+
+- 判断某个块是否支配另一个块
+- 为 SSA rename、dominance frontier、代码移动等分析提供基础
+
+建议输入：
+
+- 一个 `Function`
+- `CFGAnalysis::Result`
+
+建议输出：
+
+- 每个块的 `immediate dominator`
+- dominator tree 的 children
+- `dominates(A, B)` 查询
+- 方便支配树遍历的顺序结果
+
+第一版 `Result` 可以长成：
+
+```cpp
+struct DominatorTreeAnalysis {
+    struct Result {
+        std::unordered_map<BasicBlock*, BasicBlock*> idom;
+        std::unordered_map<BasicBlock*, std::vector<BasicBlock*>> children;
+        std::vector<BasicBlock*> preorder;
+        std::vector<BasicBlock*> postorder;
+
+        BasicBlock* immediate_dominator(BasicBlock* block) const;
+        bool dominates(BasicBlock* lhs, BasicBlock* rhs) const;
+    };
+};
+```
+
+这里的重点是：
+
+- `idom` 是所有后续 dominator 相关 analysis 的核心主结果
+- `children` 让 SSA rename 可以直接沿支配树递归
+- `dominates()` 要做成公共查询接口，而不是让每个 pass 自己回溯 `idom`
+
+#### `DominanceFrontier`
+
+基本作用：
+
+- 找出“定义开始不再严格支配下去”的控制流合流边界
+- 这是 `phi` 插入位置分析的直接输入
+
+建议输入：
+
+- 一个 `Function`
+- `CFGAnalysis::Result`
+- `DominatorTreeAnalysis::Result`
+
+建议输出：
+
+- `BasicBlock* -> frontier blocks`
+- 一个统一的 `frontier_of(block)` 查询接口
+
+第一版 `Result` 可以长成：
+
+```cpp
+struct DominanceFrontierAnalysis {
+    struct Result {
+        std::unordered_map<BasicBlock*, std::vector<BasicBlock*>> frontier;
+
+        const std::vector<BasicBlock*>& frontier_of(BasicBlock* block) const;
+    };
+};
+```
+
+这里的重点是：
+
+- `BuildPrunedSSA` 会用“定义块集合 + dominance frontier”决定 `phi` 插入块
+- 第一版不需要做过度复杂的增量维护，只要结果正确即可
+
+#### `Liveness`
+
+基本作用：
+
+- 判断某个名字/值在块入口或块出口是否仍然“活着”
+- 为 `Pruned SSA` 避免插入无意义 `phi`
+- 也为后续 DCE、局部清理和更细粒度优化打基础
+
+建议输入：
+
+- 一个 `Function`
+- `CFGAnalysis::Result`
+- 一个明确的“分析对象域”
+
+这里要特别注意：第一版 `Liveness` 不一定要直接对所有 `ValueId` 做。
+
+对当前项目，更合理的第一版是：
+
+- 对“可提升为 SSA 的局部名字集合”做 liveness
+- 也就是：
+  - 形参名
+  - 局部变量名
+  - 返回值名
+  - lowering 生成的隐藏临时名
+
+建议输出：
+
+- 每个块的 `live_in`
+- 每个块的 `live_out`
+- 可选地保留 `block_use` / `block_def`
+
+第一版 `Result` 可以长成：
+
+```cpp
+struct LivenessAnalysis {
+    using NameSet = std::unordered_set<std::string>;
+
+    struct Result {
+        std::unordered_map<BasicBlock*, NameSet> block_use;
+        std::unordered_map<BasicBlock*, NameSet> block_def;
+        std::unordered_map<BasicBlock*, NameSet> live_in;
+        std::unordered_map<BasicBlock*, NameSet> live_out;
+
+        bool is_live_in(BasicBlock* block, const std::string& name) const;
+        bool is_live_out(BasicBlock* block, const std::string& name) const;
+    };
+};
+```
+
+这里的重点是：
+
+- 在真正 rename 成 SSA 版本之前，`liveness` 更自然地以“源码层局部名字”为域
+- `BuildPrunedSSA` 需要的是“这个名字在该合流块是否 live-in”，而不是先有 SSA 再做 liveness
+
+#### `DefUse`
+
+基本作用：
+
+- 把值定义和使用点之间的关系显式串起来
+- 为 DCE、常量传播、copy propagation、trivial phi elimination 提供直接查询
+
+建议输入：
+
+- 一个 `Function`
+- 当前 IR 中所有显式 `ValueRef` use
+
+这里第一版完全可以不依赖 dominator 或 liveness，直接扫描 IR 建表。
+
+建议输出：
+
+- `ValueId -> 定义者`
+- `ValueId -> uses`
+- `Instruction* -> used ValueRef 列表`
+- `Instruction* -> defined ValueId 列表`
+
+第一版 `Result` 可以长成：
+
+```cpp
+struct DefUseAnalysis {
+    struct UseSite {
+        Instruction* user = nullptr;
+        std::size_t operand_index = 0;
+    };
+
+    struct Result {
+        std::unordered_map<ValueId, Instruction*> def_of;
+        std::unordered_map<ValueId, std::vector<UseSite>> uses_of;
+        std::unordered_map<Instruction*, std::vector<ValueRef>> operands_of;
+        std::unordered_map<Instruction*, std::vector<ValueId>> defs_of_inst;
+
+        Instruction* defining_instruction(ValueId id) const;
+        const std::vector<UseSite>& uses(ValueId id) const;
+    };
+};
+```
+
+这里的重点是：
+
+- `DefUse` 的分析域应优先以 `ValueId / ValueRef` 为主，而不是名字字符串
+- 这样后续大部分 value-based pass 都不需要重新扫描整函数找 use
+
+### 1.2 这 5 个 analysis 的依赖关系
+
+建议依赖关系收敛成下面这样：
+
+- `CFGAnalysis`：无前置分析，直接读 `Function`
+- `DominatorTreeAnalysis`：依赖 `CFGAnalysis`
+- `DominanceFrontierAnalysis`：依赖 `CFGAnalysis + DominatorTreeAnalysis`
+- `LivenessAnalysis`：依赖 `CFGAnalysis`
+- `DefUseAnalysis`：无硬依赖，直接扫描 IR；必要时可读 `CFGAnalysis`
+
+### 1.3 对 `BuildPrunedSSA` 来说真正需要的输入
+
+从 SSA 构建的角度看，真正关键的是这组输入：
+
+- `CFGAnalysis`
+- `DominatorTree`
+- `DominanceFrontier`
+- `Liveness`
+- “可提升的局部名字集合”
+
+其中：
+
+- `DominanceFrontier` 决定 `phi` 插入候选块
+- `Liveness` 决定这些候选块里哪些 `phi` 真正需要保留
+- `DominatorTree` 决定 rename 顺序
+- `DefUse` 更多是 SSA 建好之后给优化 pass 用，但也能帮助 verifier 和调试工具做交叉检查
+
 ## 2. 指令副作用建模
 
 做 DCE 和代码移动前，需要先明确哪些指令可能有副作用。
@@ -779,11 +1038,11 @@ SSA 建好以后，建议先上收益高、风险低、验证相对直接的几�
 如果只看当前仓库，最值得优先推进的是这 6 件事：
 
 1. 新建 `src/optimizer/` 和 `src/analysis/`，并更新构建系统。
-2. 加 `pass manager` 骨架和 `optimize_module()` / `optimize_function()` 入口。
-3. 先写 verifier。
-4. 写可达块分析、逆后序遍历和 dominator tree。
-5. 写 dominance frontier、liveness 和 def-use。
-6. 再开始 `BuildPrunedSSA`。
+2. 先补 `PassManager`、`AnalysisManager` 骨架和 `optimize_module()` / `optimize_function()` 入口。
+3. 先写 `Verifier`，把 CFG / phi / `ValueRef` 这几类错误尽早前置暴露。
+4. 写 `CFGAnalysis`、逆后序遍历和 `DominatorTree`。
+5. 写 `DominanceFrontier`、`Liveness` 和 `DefUse`。
+6. 再开始 `BuildPrunedSSA` 和第一批 SSA pass。
 
 ## 当前不建议立刻做的事情
 
@@ -794,16 +1053,322 @@ SSA 建好以后，建议先上收益高、风险低、验证相对直接的几�
 - 不要继续把更多 SSA 逻辑塞进 lowering
 - 不要在 verifier 还没建立好之前就做 `SCCP`、`LICM` 这类更复杂的 pass
 
-## 适合当前项目的实施顺序
+## 合并后的实施顺序
 
-如果压成最小可执行路线，可以用下面这个顺序：
+如果把前面的建议压成一个可直接开工的路线，建议按下面的顺序推进：
 
-1. `PassManager + Verifier`
-2. `CFGAnalysis + DominatorTree`
-3. `DominanceFrontier + Liveness + DefUse`
-4. `BuildPrunedSSA`
-5. `SimplifyCFG + DCE + ConstantFold`
-6. `RepairSSA`
+### Step 1：搭目录和入口
+
+先补下面这些文件：
+
+- `src/optimizer/pass.h`
+- `src/optimizer/pass_manager.h`
+- `src/optimizer/pass_manager.cpp`
+- `src/optimizer/optimize.h`
+- `src/optimizer/optimize.cpp`
+- `src/analysis/analysis_manager.h`
+- `src/analysis/analysis_manager.cpp`
+- `src/analysis/verifier.h`
+- `src/analysis/verifier.cpp`
+
+这一阶段先不追求任何优化收益，只解决两件事：
+
+- lowering 之后能进入统一的优化入口
+- pass 前后能稳定打印 IR 和跑 verifier
+
+### Step 2：先把 verifier 变成开发主护栏
+
+第一版 verifier 建议覆盖：
+
+- CFG 前驱/后继一致性
+- terminator 合法性
+- `phi` incoming 与前驱集合匹配
+- `ValueId` / `ValueRef` 的定义唯一性和引用合法性
+- use-def 的基本一致性
+
+做到这一步后，后续 analysis 和 SSA pass 出错时，问题会在开发阶段更早暴露。
+
+### Step 3：补 analysis 基础层
+
+建议按依赖顺序实现：
+
+1. `CFGAnalysis`
+2. `DominatorTree`
+3. `DominanceFrontier`
+4. `Liveness`
+5. `DefUse`
+
+这里不要一开始就做复杂缓存策略，先让每种 analysis 都能对单个 `Function` 稳定产出结果。
+
+### Step 4：实现 `BuildPrunedSSA`
+
+第一版只覆盖：
+
+- 形参
+- 局部变量
+- 返回值名
+- lowering 生成的隐藏临时名
+
+并完成：
+
+- 收集定义块
+- 基于 `DominanceFrontier` 插 `phi`
+- 基于支配树做 rename
+- 删除 trivial `phi`
+
+### Step 5：在 SSA 上落第一批优化
+
+建议第一批只做：
+
+- `SimplifyCFG`
+- trivial `phi` elimination
+- `DCE`
+- `ConstantFold`
+
+这些 pass 都比较适合作为“把链路跑通”的第一批目标。
+
+### Step 6：开始有 CFG 改写时再补 `RepairSSA`
+
+只有当中端开始稳定做下面这些事情时，`RepairSSA` 才值得进入主线：
+
+- 拆块
+- 合并块
+- 删边 / 删块
+- critical edge split
+
+在这之前，整函数重建 SSA 往往已经够用。
+
+## analysis 和 optimizer / PassManager 方案
+
+### 1. 目录结构
+
+建议采用两层目录：
+
+- `src/analysis/`
+- `src/optimizer/`
+
+推荐的最小文件布局如下：
+
+- `src/analysis/analysis_manager.h`
+- `src/analysis/analysis_manager.cpp`
+- `src/analysis/cfg_analysis.h`
+- `src/analysis/cfg_analysis.cpp`
+- `src/analysis/dom_tree.h`
+- `src/analysis/dom_tree.cpp`
+- `src/analysis/dom_frontier.h`
+- `src/analysis/dom_frontier.cpp`
+- `src/analysis/liveness.h`
+- `src/analysis/liveness.cpp`
+- `src/analysis/def_use.h`
+- `src/analysis/def_use.cpp`
+- `src/analysis/verifier.h`
+- `src/analysis/verifier.cpp`
+- `src/optimizer/pass.h`
+- `src/optimizer/pass_manager.h`
+- `src/optimizer/pass_manager.cpp`
+- `src/optimizer/optimize.h`
+- `src/optimizer/optimize.cpp`
+- `src/optimizer/passes/build_pruned_ssa.h`
+- `src/optimizer/passes/build_pruned_ssa.cpp`
+- `src/optimizer/passes/simplify_cfg.h`
+- `src/optimizer/passes/simplify_cfg.cpp`
+- `src/optimizer/passes/dce.h`
+- `src/optimizer/passes/dce.cpp`
+- `src/optimizer/passes/constant_fold.h`
+- `src/optimizer/passes/constant_fold.cpp`
+
+第一版只做 `Function` 级别即可，不要急着引入 `ModulePassManager`。
+
+### 2. `analysis` 层职责
+
+`analysis` 层只做“读 IR、产出结果、不给 IR 施加副作用”的事情。
+
+建议把它和 `optimizer` 明确分开：
+
+- `analysis` 负责缓存和提供分析结果
+- `optimizer` 负责改 IR
+- `verifier` 负责判定 IR 是否仍然合法
+
+这样 `BuildPrunedSSA`、`DCE`、`SimplifyCFG` 等 pass 都只通过统一接口取分析结果，不直接自己散落实现一份 CFG / dominator 逻辑。
+
+### 3. `AnalysisManager` 方案
+
+第一版建议只做 `FunctionAnalysisManager`，按函数缓存分析结果。
+
+最小接口可以是：
+
+```cpp
+class FunctionAnalysisManager {
+public:
+    template <typename AnalysisT>
+    const typename AnalysisT::Result& get(Function& function);
+
+    template <typename AnalysisT>
+    void invalidate(Function& function);
+
+    void invalidate_all(Function& function);
+    void clear();
+};
+```
+
+每个 analysis 约定提供：
+
+```cpp
+struct CFGAnalysis {
+    struct Result {
+        std::vector<BasicBlock*> reverse_postorder;
+        std::vector<BasicBlock*> reachable_blocks;
+    };
+
+    Result run(Function& function, FunctionAnalysisManager& am);
+};
+```
+
+后续其他 analysis 也用同样模式：
+
+- `DominatorTreeAnalysis`
+- `DominanceFrontierAnalysis`
+- `LivenessAnalysis`
+- `DefUseAnalysis`
+
+建议依赖关系如下：
+
+- `DominatorTreeAnalysis` 依赖 `CFGAnalysis`
+- `DominanceFrontierAnalysis` 依赖 `DominatorTreeAnalysis`
+- `LivenessAnalysis` 依赖 `CFGAnalysis`
+- `DefUseAnalysis` 直接扫描 IR，必要时可读 `CFGAnalysis`
+
+第一版缓存策略可以非常保守：
+
+- 任何会改 CFG 的 pass，直接 `invalidate_all(function)`
+- 任何只改局部指令、不改 CFG 的 pass，至少失效 `DefUse` / `Liveness`
+
+不要一开始就追求细粒度 preserved-analysis 逻辑。
+
+### 4. `Pass` 接口方案
+
+第一版建议只定义函数级 pass：
+
+```cpp
+struct PreservedAnalyses {
+    bool preserve_all = false;
+    bool preserve_cfg = false;
+    bool preserve_dom_tree = false;
+    bool preserve_dom_frontier = false;
+    bool preserve_liveness = false;
+    bool preserve_def_use = false;
+
+    static PreservedAnalyses none();
+    static PreservedAnalyses all();
+};
+
+class FunctionPass {
+public:
+    virtual ~FunctionPass() = default;
+    virtual const char* name() const = 0;
+    virtual PreservedAnalyses run(Function& function, FunctionAnalysisManager& am) = 0;
+};
+```
+
+这样 pass 的责任边界很明确：
+
+- 需要分析就从 `FunctionAnalysisManager` 取
+- 改完 IR 后返回自己保留了哪些 analysis
+- `PassManager` 负责据此做失效处理
+
+### 5. `PassManager` 方案
+
+第一版建议保守实现 `FunctionPassManager`：
+
+```cpp
+struct PassManagerOptions {
+    bool verify_before_pipeline = true;
+    bool verify_after_each_pass = true;
+    bool print_before_each_pass = false;
+    bool print_after_each_pass = false;
+};
+
+class FunctionPassManager {
+public:
+    void add_pass(std::unique_ptr<FunctionPass> pass);
+    void run(Function& function, FunctionAnalysisManager& am,
+             const PassManagerOptions& options = {});
+};
+```
+
+推荐行为：
+
+- pipeline 开始前先跑一次 verifier
+- 每个 pass 前后可选打印 IR
+- 每个 mutating pass 后按 `PreservedAnalyses` 失效 analysis
+- 如果开启 `verify_after_each_pass`，每个 pass 后都重新 verifier
+
+第一版可以进一步简化：
+
+- mutating pass 一律 `invalidate_all(function)`
+- 只有 `VerifierPass` 这类纯检查 pass 返回 `PreservedAnalyses::all()`
+
+等 pass 数量和分析成本上来之后，再做细粒度 preserved-analysis。
+
+### 6. `optimize_function()` 和 pipeline 方案
+
+建议对外只先暴露两个入口：
+
+```cpp
+void optimize_function(Function& function);
+void optimize_module(Module& module);
+```
+
+其中：
+
+- `optimize_module()` 只负责遍历模块里的函数并调用 `optimize_function()`
+- 真正的 pipeline 先收敛在 `optimize_function()` 内部
+
+第一版 pipeline 建议如下：
+
+1. `VerifyIRPass`
+2. `CanonicalizeCFGPass` 或最小版 `SimplifyCFGPass`
+3. `VerifyIRPass`
+4. `BuildPrunedSSAPass`
+5. `VerifyIRPass`
+6. `TrivialPhiEliminationPass`
+7. `DCEPass`
+8. `ConstantFoldPass`
+9. `SimplifyCFGPass`
+10. `VerifyIRPass`
+
+如果想再保守一点，第一版甚至可以只上：
+
+1. `VerifyIRPass`
+2. `BuildPrunedSSAPass`
+3. `VerifyIRPass`
+
+先把 SSA 主链打通，再逐步加优化 pass。
+
+### 7. `Verifier` 在体系里的位置
+
+建议不要把 verifier 设计成普通分析缓存结果，而是设计成一个独立工具：
+
+- `analysis::verify_function(function)` 返回诊断列表或抛异常
+- `optimizer::VerifyIRPass` 只是对这个工具的包装
+
+这样既可以在 `PassManager` 内自动调用，也可以在 lowering 之后、调试脚本里、单元测试里直接调用。
+
+### 8. 适合当前项目的最小落地版本
+
+如果只做一个最小但方向正确的版本，建议收敛成下面这组组件：
+
+- `FunctionAnalysisManager`
+- `FunctionPass`
+- `FunctionPassManager`
+- `Verifier`
+- `CFGAnalysis`
+- `DominatorTreeAnalysis`
+- `BuildPrunedSSAPass`
+
+也就是说，当前最现实的最小链路是：
+
+`lowering -> verify -> optimize_function -> BuildPrunedSSA -> verify`
 
 这样推进的好处是：
 

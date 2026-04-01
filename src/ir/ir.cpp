@@ -424,6 +424,32 @@ const InstValue* Function::find_value(ValueId id) const {
     return nullptr;
 }
 
+bool Function::set_value_debug_name(ValueId id, std::string debug_name) {
+    if (id == InvalidValueId || debug_name.empty()) {
+        return false;
+    }
+
+    for (InstValue& value : input_values_) {
+        if (value.id == id) {
+            value.debug_name = std::move(debug_name);
+            return true;
+        }
+    }
+
+    for (const std::unique_ptr<Instruction>& instruction : instruction_storage_) {
+        std::vector<InstValue> values = instruction->value_defs();
+        for (InstValue& value : values) {
+            if (value.id == id) {
+                value.debug_name = std::move(debug_name);
+                instruction->set_value_defs(std::move(values));
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 Instruction* Function::find_value_owner(ValueId id) {
     if (id == InvalidValueId) {
         return nullptr;
