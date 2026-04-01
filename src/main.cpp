@@ -11,10 +11,8 @@
 #include <string_view>
 #include <vector>
 
-#include "ba_obj/ba_obj.h"
 #include "bt_ast_interface.h"
-#include "interpreter/interpreter.h"
-#include "ir/ir.h"
+#include "ir/ir_printer.h"
 #include "lowering/lowering.h"
 
 using namespace baltam;
@@ -48,34 +46,6 @@ std::string resolve_script_argument(const std::string& arg) {
     return arg;
 }
 
-void print_frame_state(const Frame& frame) {
-    std::cout << "Interpreter outputs:" << std::endl;
-    if (frame.function() != nullptr) {
-        const auto& output_names = frame.function()->output_names();
-        const auto& outputs = frame.outputs();
-        for (std::size_t i = 0; i < output_names.size(); ++i) {
-            std::cout << "  " << output_names[i] << " = ";
-            if (i < outputs.size()) {
-                std::cout << value_text(outputs[i]);
-            } else {
-                std::cout << "<missing>";
-            }
-            std::cout << std::endl;
-        }
-    }
-
-    bool has_initialized_binding = false;
-    for (const auto& [name, binding] : frame.symbols()) {
-        if (binding.initialized) {
-            if (!has_initialized_binding) {
-                std::cout << "Interpreter bindings:" << std::endl;
-                has_initialized_binding = true;
-            }
-            std::cout << "  " << name << " = " << value_text(binding.value) << std::endl;
-        }
-    }
-}
-
 int run_m_file(const std::string& script_path) {
     int exit_code = 0;
     std::string msg;
@@ -91,26 +61,11 @@ int run_m_file(const std::string& script_path) {
     }
 
     try {
-        const Module module = lower_parsed_units_to_ir(parsed_units);
-        std::cout << "Lowered IR for " << script_path << ":" << std::endl;
-        print_ir(std::cout, module);
+        const Module non_ssa_module = lower_parsed_units_to_ir(parsed_units);
+        print_ir(std::cout, non_ssa_module);
         std::cout << std::endl;
-
-        if (module.entry_function() != nullptr) {
-            std::vector<Value> args;
-            // 直接调试函数文件时，main 没有额外的实参输入渠道。
-            // 这里按函数签名补齐数值 1，便于像 test1 这样的用例直接以 test1(1, 1) 形式运行。
-            args.reserve(module.entry_function()->input_names().size());
-            for (std::size_t i = 0; i < module.entry_function()->input_names().size(); ++i) {
-                args.push_back(std::make_shared<ba_obj>(1.0));
-            }
-
-            const Frame frame = execute_function(*module.entry_function(), args);
-            print_frame_state(frame);
-            std::cout << std::endl;
-        }
     } catch (const std::exception& ex) {
-        std::cerr << "文件的 IR lower 或解释执行失败: " << script_path << "，原因: "
+        std::cerr << "文件的 non-SSA IR lower 失败: " << script_path << "，原因: "
                   << ex.what()
                   << std::endl;
         exit_code = 1;

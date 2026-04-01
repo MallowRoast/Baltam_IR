@@ -10,9 +10,7 @@ add_executable(main
     src/analysis/verifier.cpp
     src/ir/ir.cpp
     src/ir/ir_printer.cpp
-    src/lowering/lowering_context.cpp
     src/lowering/lowering.cpp
-    src/interpreter/interpreter.cpp
     src/optimizer/pass_manager.cpp
     src/optimizer/optimize.cpp
 )

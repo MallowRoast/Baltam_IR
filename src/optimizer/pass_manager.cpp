@@ -9,15 +9,9 @@ namespace optimizer {
 namespace {
 
 void print_function_ir_context(const Function& function) {
-    const Module* module = function.parent();
-    if (module == nullptr) {
-        std::cout << "; Function `" << function.name()
-                  << "` 尚未挂接到 Module，当前无法输出完整 IR。\n";
-        return;
-    }
-
-    print_ir(std::cout, *module);
-    std::cout << '\n';
+    (void)function;
+    // Legacy value-based IR printing has been removed. Keep this hook as a
+    // no-op until the optimizer pipeline is migrated to non-SSA / SSA IR.
 }
 
 }  // namespace

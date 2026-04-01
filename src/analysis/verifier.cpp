@@ -2,193 +2,47 @@
 
 #include <sstream>
 #include <stdexcept>
-#include <unordered_map>
 #include <unordered_set>
 
 namespace baltam {
 namespace analysis {
 namespace {
 
-const char* instruction_type_name(Instruction::Type type) {
+const char* node_type_name(NonSSANode::Type type) {
     switch (type) {
-        case Instruction::Text:
-            return "Text";
-        case Instruction::Binding:
-            return "Binding";
-        case Instruction::Number:
+        case NonSSANode::Number:
             return "Number";
-        case Instruction::Undef:
-            return "Undef";
-        case Instruction::UnaryOp:
+        case NonSSANode::Text:
+            return "Text";
+        case NonSSANode::Assign:
+            return "Assign";
+        case NonSSANode::UnaryOp:
             return "UnaryOp";
-        case Instruction::BinOp:
+        case NonSSANode::BinOp:
             return "BinOp";
-        case Instruction::Phi:
-            return "Phi";
-        case Instruction::Asgn:
-            return "Asgn";
-        case Instruction::Call:
+        case NonSSANode::Call:
             return "Call";
-        case Instruction::CondJump:
+        case NonSSANode::CondJump:
             return "CondJump";
-        case Instruction::Jump:
+        case NonSSANode::Jump:
             return "Jump";
-        case Instruction::Return:
+        case NonSSANode::Return:
             return "Return";
     }
 
     return "Unknown";
 }
 
+bool is_terminator_type(NonSSANode::Type type) {
+    return type == NonSSANode::CondJump || type == NonSSANode::Jump || type == NonSSANode::Return;
+}
+
 std::string block_name(const BasicBlock* block) {
     return block != nullptr ? block->name() : "<null>";
 }
 
-bool is_terminator_type(Instruction::Type type) {
-    return type == Instruction::CondJump || type == Instruction::Jump || type == Instruction::Return;
-}
-
 void add_error(VerificationResult& result, std::string message) {
     result.add_error(std::move(message));
-}
-
-void verify_value_def(VerificationResult& result, const Function& function, const Instruction& instruction,
-                      const InstValue& value, std::unordered_map<ValueId, std::string>& owners) {
-    if (!value.is_valid()) {
-        add_error(result, "函数 `" + function.name() + "` 中的指令 `" +
-                              instruction_type_name(instruction.type()) +
-                              "` 挂接了非法 ValueId。");
-        return;
-    }
-
-    const std::string owner_text =
-        "instruction " + std::string(instruction_type_name(instruction.type()));
-    const auto [it, inserted] = owners.emplace(value.id, owner_text);
-    if (!inserted) {
-        add_error(result, "函数 `" + function.name() + "` 中的 ValueId `" +
-                              std::to_string(value.id) + "` 被重复定义：`" + it->second +
-                              "` 和 `" + owner_text + "`。");
-    }
-}
-
-void collect_value_defs(VerificationResult& result, const Function& function,
-                        std::unordered_map<ValueId, std::string>& owners) {
-    if (function.input_names().size() != function.input_values().size()) {
-        add_error(result, "函数 `" + function.name() +
-                              "` 的 input_names 与 input_values 个数不一致。");
-    }
-
-    for (std::size_t i = 0; i < function.input_values().size(); ++i) {
-        const InstValue& value = function.input_values()[i];
-        if (!value.is_valid()) {
-            add_error(result, "函数 `" + function.name() + "` 的输入参数 #" +
-                                  std::to_string(i) + " 没有合法 ValueId。");
-            continue;
-        }
-
-        const std::string owner_text = "function input";
-        const auto [it, inserted] = owners.emplace(value.id, owner_text);
-        if (!inserted) {
-            add_error(result, "函数 `" + function.name() + "` 的输入参数 ValueId `" +
-                                  std::to_string(value.id) + "` 与 `" + it->second +
-                                  "` 重复。");
-        }
-    }
-
-    for (const auto& block : function.blocks()) {
-        for (Instruction* instruction : block->instructions()) {
-            if (instruction == nullptr) {
-                add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block->name() +
-                                      "` 含有空指令指针。");
-                continue;
-            }
-            for (const InstValue& value : instruction->value_defs()) {
-                verify_value_def(result, function, *instruction, value, owners);
-            }
-        }
-
-        if (Instruction* terminal = block->terminal(); terminal != nullptr) {
-            for (const InstValue& value : terminal->value_defs()) {
-                verify_value_def(result, function, *terminal, value, owners);
-            }
-        }
-    }
-}
-
-void verify_value_ref(VerificationResult& result, const Function& function, ValueRef ref,
-                      const std::string& context) {
-    if (!ref.is_valid()) {
-        add_error(result, "函数 `" + function.name() + "` 中 `" + context + "` 使用了非法 ValueRef。");
-        return;
-    }
-
-    if (function.find_value(ref.id) == nullptr) {
-        add_error(result, "函数 `" + function.name() + "` 中 `" + context + "` 引用了不存在的 ValueId `" +
-                              std::to_string(ref.id) + "`。");
-    }
-}
-
-void verify_instruction_uses(VerificationResult& result, const Function& function,
-                             const Instruction& instruction, const std::string& context) {
-    switch (instruction.type()) {
-        case Instruction::Text:
-        case Instruction::Binding:
-        case Instruction::Number:
-        case Instruction::Undef:
-        case Instruction::Jump:
-            return;
-        case Instruction::UnaryOp:
-            verify_value_ref(result, function,
-                             static_cast<const UnaryOpInstruction&>(instruction).operand_ref(), context);
-            return;
-        case Instruction::BinOp: {
-            const auto& binop = static_cast<const BinOpInstruction&>(instruction);
-            verify_value_ref(result, function, binop.lhs_ref(), context + " 的 lhs");
-            verify_value_ref(result, function, binop.rhs_ref(), context + " 的 rhs");
-            return;
-        }
-        case Instruction::Phi: {
-            const auto& phi = static_cast<const PhiInstruction&>(instruction);
-            for (std::size_t i = 0; i < phi.incoming_count(); ++i) {
-                const PhiInstruction::Incoming* incoming = phi.incoming(i);
-                if (incoming == nullptr) {
-                    add_error(result, "函数 `" + function.name() + "` 中 `" + context +
-                                          "` 含有空的 phi incoming。");
-                    continue;
-                }
-                verify_value_ref(result, function, incoming->value_ref,
-                                 context + " 的 incoming #" + std::to_string(i));
-            }
-            return;
-        }
-        case Instruction::Asgn:
-            verify_value_ref(result, function,
-                             static_cast<const AssignInstruction&>(instruction).value_ref(), context);
-            return;
-        case Instruction::Call: {
-            const auto& call = static_cast<const CallInstruction&>(instruction);
-            if (call.is_indirect()) {
-                verify_value_ref(result, function, call.callee_ref(), context + " 的 callee");
-            }
-            for (std::size_t i = 0; i < call.input_count(); ++i) {
-                verify_value_ref(result, function, call.input_ref(i),
-                                 context + " 的 input #" + std::to_string(i));
-            }
-            return;
-        }
-        case Instruction::CondJump:
-            verify_value_ref(result, function,
-                             static_cast<const CondJumpInstruction&>(instruction).cond_ref(), context);
-            return;
-        case Instruction::Return: {
-            const auto& ret = static_cast<const ReturnInstruction&>(instruction);
-            for (std::size_t i = 0; i < ret.return_value_count(); ++i) {
-                verify_value_ref(result, function, ret.return_value_ref(i),
-                                 context + " 的 return value #" + std::to_string(i));
-            }
-            return;
-        }
-    }
 }
 
 void verify_cfg_edges(VerificationResult& result, const Function& function,
@@ -206,9 +60,9 @@ void verify_cfg_edges(VerificationResult& result, const Function& function,
                                       block_name(successor) + "`。");
             }
             if (!BasicBlock::contains_block(successor->predecessors(), block.get())) {
-                add_error(result, "函数 `" + function.name() + "` 中 CFG 不一致：块 `" + block->name() +
-                                      "` 声明 successor `" + successor->name() +
-                                      "`，但对方前驱列表中缺少该块。");
+                add_error(result, "函数 `" + function.name() + "` 中 CFG 不一致：块 `" +
+                                      block->name() + "` 声明 successor `" +
+                                      successor->name() + "`，但对方前驱列表中缺少该块。");
             }
         }
 
@@ -224,216 +78,115 @@ void verify_cfg_edges(VerificationResult& result, const Function& function,
                                       block_name(predecessor) + "`。");
             }
             if (!BasicBlock::contains_block(predecessor->successors(), block.get())) {
-                add_error(result, "函数 `" + function.name() + "` 中 CFG 不一致：块 `" + block->name() +
-                                      "` 声明 predecessor `" + predecessor->name() +
-                                      "`，但对方后继列表中缺少该块。");
+                add_error(result, "函数 `" + function.name() + "` 中 CFG 不一致：块 `" +
+                                      block->name() + "` 声明 predecessor `" +
+                                      predecessor->name() + "`，但对方后继列表中缺少该块。");
             }
         }
-    }
-}
-
-void verify_phi_nodes(VerificationResult& result, const Function& function, const BasicBlock& block) {
-    std::unordered_set<const BasicBlock*> predecessor_set;
-    for (BasicBlock* predecessor : block.predecessors()) {
-        if (predecessor != nullptr) {
-            predecessor_set.insert(predecessor);
-        }
-    }
-
-    bool seen_non_phi = false;
-    for (Instruction* instruction : block.instructions()) {
-        if (instruction == nullptr) {
-            continue;
-        }
-
-        if (instruction->type() == Instruction::Phi) {
-            if (seen_non_phi) {
-                add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
-                                      "` 在非 phi 指令之后出现了 phi。");
-            }
-
-            if (!instruction->has_values() || instruction->value_count() != 1) {
-                add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
-                                      "` 中 phi 节点必须且只能定义一个结果值。");
-            }
-
-            const auto* phi = static_cast<const PhiInstruction*>(instruction);
-            if (phi->incoming_count() != predecessor_set.size()) {
-                add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
-                                      "` 中 phi incoming 数量与前驱数量不匹配。");
-            }
-
-            std::unordered_set<const BasicBlock*> seen_predecessors;
-            for (const PhiInstruction::Incoming& incoming : phi->incomings()) {
-                if (incoming.predecessor == nullptr) {
-                    add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
-                                          "` 中 phi 含有空 predecessor。");
-                    continue;
-                }
-                if (predecessor_set.find(incoming.predecessor) == predecessor_set.end()) {
-                    add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
-                                          "` 中 phi 引用了非前驱块 `" +
-                                          incoming.predecessor->name() + "`。");
-                }
-                if (!seen_predecessors.insert(incoming.predecessor).second) {
-                    add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
-                                          "` 中 phi 对前驱块 `" +
-                                          incoming.predecessor->name() + "` 重复建边。");
-                }
-            }
-            continue;
-        }
-
-        seen_non_phi = true;
     }
 }
 
 void verify_block(VerificationResult& result, const Function& function, const BasicBlock& block,
                   const std::unordered_set<const BasicBlock*>& known_blocks,
-                  std::unordered_set<const Instruction*>& seen_instructions) {
+                  std::unordered_set<const NonSSANode*>& seen_nodes) {
     if (block.parent() != &function) {
         add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
                               "` 没有正确回指到所属函数。");
     }
 
-    verify_phi_nodes(result, function, block);
-
-    bool seen_non_phi = false;
-    for (Instruction* instruction : block.instructions()) {
-        if (instruction == nullptr) {
+    for (NonSSANode* node : block.instructions()) {
+        if (node == nullptr) {
             add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
                                   "` 含有空指令。");
             continue;
         }
-
-        if (instruction->parent() != &block) {
+        if (node->parent() != &block) {
             add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
-                                  "` 中存在 parent 不一致的指令。");
+                                  "` 中存在 parent 不一致的节点。");
         }
-        if (!seen_instructions.insert(instruction).second) {
+        if (!seen_nodes.insert(node).second) {
             add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
-                                  "` 重复引用了同一条指令。");
+                                  "` 重复引用了同一条节点。");
         }
-        if (is_terminator_type(instruction->type())) {
+        if (is_terminator_type(node->type())) {
             add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
-                                  "` 在正文中包含终结指令 `" +
-                                  instruction_type_name(instruction->type()) + "`。");
+                                  "` 在正文中包含终结节点 `" + node_type_name(node->type()) +
+                                  "`。");
         }
-        if (instruction->type() != Instruction::Phi) {
-            seen_non_phi = true;
-        } else if (seen_non_phi) {
-            add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
-                                  "` 在普通指令之后出现了 phi。");
-        }
-
-        verify_instruction_uses(
-            result, function, *instruction,
-            "基本块 `" + block.name() + "` 的指令 `" + instruction_type_name(instruction->type()) + "`");
     }
 
-    Instruction* terminal = block.terminal();
+    NonSSANode* terminal = block.terminal();
     if (terminal == nullptr) {
         add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
-                              "` 缺少终结指令。");
-        if (!block.successors().empty()) {
-            add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
-                                  "` 缺少终结指令，但仍声明了 successor。");
-        }
+                              "` 缺少终结节点。");
         return;
     }
-
     if (terminal->parent() != &block) {
         add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
-                              "` 的 terminal parent 不一致。");
+                              "` 的终结节点 parent 不一致。");
     }
-    if (!seen_instructions.insert(terminal).second) {
+    if (!seen_nodes.insert(terminal).second) {
         add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
-                              "` 的 terminal 指令被重复挂接。");
+                              "` 重复引用了终结节点。");
     }
     if (!is_terminator_type(terminal->type())) {
         add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
-                              "` 的 terminal 不是合法终结指令，而是 `" +
-                              instruction_type_name(terminal->type()) + "`。");
+                              "` 的终结节点类型非法：`" + node_type_name(terminal->type()) + "`。");
+        return;
     }
 
-    verify_instruction_uses(
-        result, function, *terminal,
-        "基本块 `" + block.name() + "` 的 terminal `" + instruction_type_name(terminal->type()) + "`");
-
     switch (terminal->type()) {
-        case Instruction::CondJump: {
-            const auto* cond_jump = static_cast<const CondJumpInstruction*>(terminal);
+        case NonSSANode::CondJump: {
+            const auto* cond_jump = static_cast<const CondJumpNode*>(terminal);
             BasicBlock* true_block = cond_jump->true_block();
             BasicBlock* false_block = cond_jump->false_block();
             if (true_block == nullptr || false_block == nullptr) {
                 add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
                                       "` 的条件跳转缺少目标块。");
-                break;
+                return;
             }
             if (known_blocks.find(true_block) == known_blocks.end() ||
                 known_blocks.find(false_block) == known_blocks.end()) {
                 add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
-                                      "` 的条件跳转指向了本函数之外的块。");
+                                      "` 的条件跳转目标不属于当前函数。");
             }
             if (!BasicBlock::contains_block(block.successors(), true_block)) {
                 add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
-                                      "` 的条件跳转 true 目标不在 successor 列表里。");
+                                      "` 的 true 目标未出现在 successor 列表中。");
             }
             if (!BasicBlock::contains_block(block.successors(), false_block)) {
                 add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
-                                      "` 的条件跳转 false 目标不在 successor 列表里。");
+                                      "` 的 false 目标未出现在 successor 列表中。");
             }
-            break;
+            return;
         }
-        case Instruction::Jump: {
-            BasicBlock* target = static_cast<const JumpInstruction*>(terminal)->target();
+        case NonSSANode::Jump: {
+            BasicBlock* target = static_cast<const JumpNode*>(terminal)->target();
             if (target == nullptr) {
                 add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
-                                      "` 的无条件跳转缺少目标块。");
-                break;
+                                      "` 的跳转缺少目标块。");
+                return;
             }
             if (known_blocks.find(target) == known_blocks.end()) {
                 add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
-                                      "` 的无条件跳转指向了本函数之外的块。");
+                                      "` 的跳转目标不属于当前函数。");
             }
             if (!BasicBlock::contains_block(block.successors(), target)) {
                 add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
-                                      "` 的跳转目标不在 successor 列表里。");
+                                      "` 的跳转目标未出现在 successor 列表中。");
             }
-            break;
+            return;
         }
-        case Instruction::Return:
-            if (!block.successors().empty()) {
-                add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
-                                      "` 是 return 块，但 successor 列表非空。");
-            }
-            break;
-        case Instruction::Text:
-        case Instruction::Binding:
-        case Instruction::Number:
-        case Instruction::Undef:
-        case Instruction::UnaryOp:
-        case Instruction::BinOp:
-        case Instruction::Phi:
-        case Instruction::Asgn:
-        case Instruction::Call:
-            break;
+        case NonSSANode::Return:
+            return;
+        case NonSSANode::Number:
+        case NonSSANode::Text:
+        case NonSSANode::Assign:
+        case NonSSANode::UnaryOp:
+        case NonSSANode::BinOp:
+        case NonSSANode::Call:
+            return;
     }
-}
-
-std::string prefix_lines(const std::string& prefix, const std::string& text) {
-    std::ostringstream oss;
-    std::istringstream iss(text);
-    std::string line;
-    bool first = true;
-    while (std::getline(iss, line)) {
-        if (!first) {
-            oss << '\n';
-        }
-        first = false;
-        oss << prefix << line;
-    }
-    return oss.str();
 }
 
 }  // namespace
@@ -465,35 +218,27 @@ VerificationResult verify_function(const Function& function) {
     }
 
     std::unordered_set<const BasicBlock*> known_blocks;
-    std::unordered_set<std::string> block_names;
     for (const auto& block : function.blocks()) {
         if (block == nullptr) {
             add_error(result, "函数 `" + function.name() + "` 含有空基本块。");
             continue;
         }
         known_blocks.insert(block.get());
-        if (!block_names.insert(block->name()).second) {
-            add_error(result, "函数 `" + function.name() + "` 中出现了重复基本块名 `" +
-                                  block->name() + "`。");
-        }
     }
 
     if (function.entry_block() != nullptr &&
         known_blocks.find(function.entry_block()) == known_blocks.end()) {
-        add_error(result, "函数 `" + function.name() + "` 的入口基本块不属于该函数。");
+        add_error(result, "函数 `" + function.name() + "` 的入口块不属于该函数。");
     }
-
-    std::unordered_map<ValueId, std::string> value_owners;
-    collect_value_defs(result, function, value_owners);
 
     verify_cfg_edges(result, function, known_blocks);
 
-    std::unordered_set<const Instruction*> seen_instructions;
+    std::unordered_set<const NonSSANode*> seen_nodes;
     for (const auto& block : function.blocks()) {
         if (block == nullptr) {
             continue;
         }
-        verify_block(result, function, *block, known_blocks, seen_instructions);
+        verify_block(result, function, *block, known_blocks, seen_nodes);
     }
 
     return result;
@@ -503,27 +248,20 @@ VerificationResult verify_module(const Module& module) {
     VerificationResult result;
 
     std::unordered_set<const Function*> known_functions;
-    std::unordered_set<std::string> function_names;
     for (const auto& function : module.functions()) {
         if (function == nullptr) {
             add_error(result, "模块 `" + module.name() + "` 含有空函数。");
             continue;
         }
-
         known_functions.insert(function.get());
-        if (!function_names.insert(function->name()).second) {
-            add_error(result, "模块 `" + module.name() + "` 中出现了重复函数名 `" +
-                                  function->name() + "`。");
-        }
         if (function->parent() != &module) {
             add_error(result, "模块 `" + module.name() + "` 中函数 `" + function->name() +
                                   "` 没有正确回指到所属模块。");
         }
 
         VerificationResult function_result = verify_function(*function);
-        for (VerificationDiagnostic& diagnostic : function_result.diagnostics) {
-            add_error(result, "在函数 `" + function->name() + "` 中：" + diagnostic.message);
-        }
+        result.diagnostics.insert(result.diagnostics.end(), function_result.diagnostics.begin(),
+                                  function_result.diagnostics.end());
     }
 
     if (module.entry_function() == nullptr) {
@@ -538,14 +276,14 @@ VerificationResult verify_module(const Module& module) {
 void verify_function_or_throw(const Function& function) {
     VerificationResult result = verify_function(function);
     if (!result.ok()) {
-        throw std::runtime_error("IR verifier 失败：\n" + prefix_lines("  ", result.format()));
+        throw std::runtime_error(result.format());
     }
 }
 
 void verify_module_or_throw(const Module& module) {
     VerificationResult result = verify_module(module);
     if (!result.ok()) {
-        throw std::runtime_error("IR verifier 失败：\n" + prefix_lines("  ", result.format()));
+        throw std::runtime_error(result.format());
     }
 }
 

@@ -17,7 +17,7 @@ namespace optimizer {
  *
  * - pipeline 前是否先跑 verifier
  * - 每个 pass 后是否跑 verifier
- * - pass 前后是否打印 IR
+ * - pass 前后是否尝试打印 IR
  */
 struct PassManagerOptions {
     /**
@@ -32,11 +32,15 @@ struct PassManagerOptions {
 
     /**
      * @brief 是否在每个 pass 执行前打印当前函数所在模块的 IR。
+     *
+     * 旧 value-based IR printer 已移除，这个开关当前不会产生输出。
      */
     bool print_before_each_pass = false;
 
     /**
      * @brief 是否在每个 pass 执行后打印当前函数所在模块的 IR。
+     *
+     * 旧 value-based IR printer 已移除，这个开关当前不会产生输出。
      */
     bool print_after_each_pass = false;
 };

@@ -1,4 +1,4 @@
-#include "ir/ir.h"
+#include "ir/ir_printer.h"
 
 #include <algorithm>
 #include <cctype>
@@ -7,7 +7,6 @@
 #include <sstream>
 #include <type_traits>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 
 namespace baltam {
@@ -29,7 +28,7 @@ std::string format_complex(const std::complex<double>& value) {
     return oss.str();
 }
 
-std::string format_number(const NumberInstruction::NumberValue& value) {
+std::string format_number(const NumberNode::NumberValue& value) {
     return std::visit(
         [](const auto& item) -> std::string {
             using T = std::decay_t<decltype(item)>;
@@ -86,40 +85,8 @@ std::string format_quoted_string(const std::string& text) {
     return oss.str();
 }
 
-std::string binop_opcode(BinOpInstruction::Type op) {
-    switch (op) {
-        case BinOpInstruction::Add:
-            return "add";
-        case BinOpInstruction::Subtract:
-            return "sub";
-        case BinOpInstruction::Eq:
-            return "cmp.eq";
-        case BinOpInstruction::Gt:
-            return "cmp.gt";
-        case BinOpInstruction::Lt:
-            return "cmp.lt";
-        case BinOpInstruction::Ne:
-            return "cmp.ne";
-        case BinOpInstruction::Or:
-            return "or";
-        case BinOpInstruction::MPower:
-            return "pow";
-        case BinOpInstruction::Multiply:
-            return "mul";
-    }
-
-    return "unknown.binop";
-}
-
-std::string unaryop_opcode(UnaryOpInstruction::Type op) {
-    switch (op) {
-        case UnaryOpInstruction::Logic_Not:
-            return "not";
-        case UnaryOpInstruction::UMinus:
-            return "neg";
-    }
-
-    return "unknown.unaryop";
+std::string format_named_value(const NamedValue& value) {
+    return "%" + value.name;
 }
 
 const char* function_type_name(Function::Type type) {
@@ -146,334 +113,11 @@ const char* module_type_name(Module::Type type) {
     return "unknown_module_type";
 }
 
-using DisplayNameMap = std::unordered_map<ValueId, std::string>;
-
-const DisplayNameMap* current_display_names = nullptr;
-
-struct DisplayValueInfo {
-    ValueId id = InvalidValueId;
-    std::string debug_name;
-    bool is_phi = false;
-};
-
-std::string format_value_ref(const Instruction* context, ValueRef ref);
-std::string format_inst_values(const std::vector<InstValue>& values);
-std::string format_argument_list(const std::vector<InstValue>& values);
-std::string format_output_list(const std::vector<std::string>& names);
-std::string format_block_ref_list(const std::vector<BasicBlock*>& blocks);
-std::string format_function_ref(const std::string& name);
-std::string format_block_ref(const BasicBlock* block);
-std::string format_instruction_text(const Instruction& instruction);
-
-struct SourceComment {
-    std::string filename;
-    int line = 0;
-    std::string text;
-};
-
-std::optional<SourceComment> source_comment_from_location(
-    const std::optional<SourceLocation>& location);
-
-void collect_display_value_infos(std::vector<DisplayValueInfo>& infos,
-                                 const std::vector<InstValue>& values, bool is_phi) {
-    for (const InstValue& value : values) {
-        if (!value.is_valid()) {
-            continue;
-        }
-        infos.push_back(DisplayValueInfo{value.id, value.debug_name, is_phi});
-    }
-}
-
-DisplayNameMap build_display_names(const Function& function) {
-    std::vector<DisplayValueInfo> infos;
-    collect_display_value_infos(infos, function.input_values(), false);
-
-    for (const auto& block : function.blocks()) {
-        for (Instruction* instruction : block->instructions()) {
-            if (instruction == nullptr) {
-                continue;
-            }
-            collect_display_value_infos(infos, instruction->value_defs(),
-                                        instruction->type() == Instruction::Phi);
-        }
-        if (block->terminal() != nullptr) {
-            collect_display_value_infos(infos, block->terminal()->value_defs(),
-                                        block->terminal()->type() == Instruction::Phi);
-        }
-    }
-
-    std::unordered_map<std::string, std::size_t> name_counts;
-    std::unordered_map<std::string, std::size_t> first_indices;
-    std::unordered_map<std::string, std::size_t> first_phi_indices;
-    for (std::size_t i = 0; i < infos.size(); ++i) {
-        if (infos[i].debug_name.empty()) {
-            continue;
-        }
-        ++name_counts[infos[i].debug_name];
-        first_indices.emplace(infos[i].debug_name, i);
-        if (infos[i].is_phi) {
-            first_phi_indices.emplace(infos[i].debug_name, i);
-        }
-    }
-
-    std::unordered_map<std::string, std::size_t> canonical_indices;
-    for (const auto& [name, count] : name_counts) {
-        if (count <= 1) {
-            continue;
-        }
-        const auto phi_it = first_phi_indices.find(name);
-        canonical_indices[name] =
-            phi_it != first_phi_indices.end() ? phi_it->second : first_indices.at(name);
-    }
-
-    DisplayNameMap display_names;
-    std::unordered_map<std::string, std::size_t> next_versions;
-    std::unordered_set<std::string> used_display_names;
-    std::size_t next_anonymous_id = 1;
-
-    for (std::size_t i = 0; i < infos.size(); ++i) {
-        const DisplayValueInfo& info = infos[i];
-        if (info.debug_name.empty()) {
-            std::string display_name;
-            do {
-                display_name = "%" + std::to_string(next_anonymous_id++);
-            } while (used_display_names.find(display_name) != used_display_names.end());
-            display_names[info.id] = display_name;
-            used_display_names.insert(display_name);
-            continue;
-        }
-
-        const auto count_it = name_counts.find(info.debug_name);
-        const bool has_conflict = count_it != name_counts.end() && count_it->second > 1;
-        const auto canonical_it = canonical_indices.find(info.debug_name);
-        if (!has_conflict || (canonical_it != canonical_indices.end() && canonical_it->second == i)) {
-            const std::string display_name = "%" + info.debug_name;
-            display_names[info.id] = display_name;
-            used_display_names.insert(display_name);
-            continue;
-        }
-
-        std::size_t& next_version = next_versions[info.debug_name];
-        if (next_version == 0) {
-            next_version = 1;
-        }
-        std::string display_name;
-        do {
-            display_name = "%" + info.debug_name + "." + std::to_string(next_version++);
-        } while (used_display_names.find(display_name) != used_display_names.end());
-        display_names[info.id] = display_name;
-        used_display_names.insert(display_name);
-    }
-
-    return display_names;
-}
-
-std::string expr_text(const Instruction* instruction) {
-    if (instruction == nullptr) {
-        return "<null>";
-    }
-
-    switch (instruction->type()) {
-        case Instruction::Text:
-            return "const.text " +
-                   format_quoted_string(static_cast<const TextInstruction*>(instruction)->text());
-        case Instruction::Binding:
-            return "load.binding " +
-                   format_quoted_string(static_cast<const BindingInstruction*>(instruction)->name());
-        case Instruction::Number: {
-            const auto* number = static_cast<const NumberInstruction*>(instruction);
-            return "const " + format_number(number->value());
-        }
-        case Instruction::Undef:
-            return "undef";
-        case Instruction::UnaryOp: {
-            const auto* unaryop = static_cast<const UnaryOpInstruction*>(instruction);
-            const ValueRef operand_ref = unaryop->operand_ref();
-            return unaryop_opcode(unaryop->op()) + " " +
-                   (operand_ref.is_valid() ? format_value_ref(instruction, operand_ref) : "<null>");
-        }
-        case Instruction::BinOp: {
-            const auto* binop = static_cast<const BinOpInstruction*>(instruction);
-            const ValueRef lhs_ref = binop->lhs_ref();
-            const ValueRef rhs_ref = binop->rhs_ref();
-            const std::string lhs_text =
-                lhs_ref.is_valid() ? format_value_ref(instruction, lhs_ref) : "<null>";
-            const std::string rhs_text =
-                rhs_ref.is_valid() ? format_value_ref(instruction, rhs_ref) : "<null>";
-            return binop_opcode(binop->op()) + " " + lhs_text + ", " + rhs_text;
-        }
-        case Instruction::Phi: {
-            const auto* phi = static_cast<const PhiInstruction*>(instruction);
-            std::string text = "phi ";
-            for (std::size_t i = 0; i < phi->incoming_count(); ++i) {
-                if (i != 0) {
-                    text += ", ";
-                }
-                const PhiInstruction::Incoming* incoming = phi->incoming(i);
-                if (incoming == nullptr) {
-                    text += "[ <null>, %<null> ]";
-                    continue;
-                }
-                text += "[ ";
-                text += incoming->value_ref.is_valid()
-                            ? format_value_ref(instruction, incoming->value_ref)
-                            : "<null>";
-                text += ", ";
-                text += format_block_ref(incoming->predecessor);
-                text += " ]";
-            }
-            return text;
-        }
-        case Instruction::Asgn: {
-            const auto* asgn = static_cast<const AssignInstruction*>(instruction);
-            const ValueRef value_ref = asgn->value_ref();
-            return "store.binding " +
-                   (value_ref.is_valid() ? format_value_ref(instruction, value_ref) : "<null>") +
-                   ", " + format_quoted_string(asgn->name());
-        }
-        case Instruction::Call: {
-            const auto* call = static_cast<const CallInstruction*>(instruction);
-            std::string text = "call ";
-            if (call->is_indirect()) {
-                text += format_value_ref(instruction, call->callee_ref());
-            } else {
-                text += format_function_ref(call->name());
-            }
-            text += "(";
-            const std::size_t in_arg_count = call->input_count();
-            for (std::size_t i = 0; i < in_arg_count; ++i) {
-                if (i != 0) {
-                    text += ", ";
-                }
-                const ValueRef in_arg_ref = call->input_ref(i);
-                text += in_arg_ref.is_valid() ? format_value_ref(instruction, in_arg_ref) : "<null>";
-            }
-            text += ")";
-            return text;
-        }
-        case Instruction::CondJump: {
-            const auto* cond_jump = static_cast<const CondJumpInstruction*>(instruction);
-            const ValueRef cond_ref = cond_jump->cond_ref();
-            return "br " +
-                   (cond_ref.is_valid() ? format_value_ref(instruction, cond_ref) : "<null>") +
-                   ", label " + format_block_ref(cond_jump->true_block()) + ", label " +
-                   format_block_ref(cond_jump->false_block());
-        }
-        case Instruction::Jump: {
-            const auto* jump = static_cast<const JumpInstruction*>(instruction);
-            return "br label " + format_block_ref(jump->target());
-        }
-        case Instruction::Return: {
-            const auto* ret = static_cast<const ReturnInstruction*>(instruction);
-            std::string text = "ret";
-            const std::size_t value_count = ret->return_value_count();
-            if (value_count == 0) {
-                text += " void";
-                return text;
-            }
-            text += " ";
-            for (std::size_t i = 0; i < value_count; ++i) {
-                if (i != 0) {
-                    text += ", ";
-                }
-                const ValueRef value_ref = ret->return_value_ref(i);
-                text += value_ref.is_valid() ? format_value_ref(instruction, value_ref) : "<null>";
-            }
-            return text;
-        }
-    }
-
-    return "<inst>";
-}
-
-std::string format_inst_value(const InstValue& value) {
-    if (current_display_names != nullptr) {
-        const auto it = current_display_names->find(value.id);
-        if (it != current_display_names->end()) {
-            return it->second;
-        }
-    }
-    if (!value.debug_name.empty()) {
-        return "%" + value.debug_name;
-    }
-    return "%" + std::to_string(value.id);
-}
-
-const Function* parent_function_from_instruction(const Instruction* instruction) {
-    if (instruction == nullptr || instruction->parent() == nullptr) {
-        return nullptr;
-    }
-    return instruction->parent()->parent();
-}
-
-std::string format_value_ref(const Instruction* context, ValueRef ref) {
-    if (!ref.is_valid()) {
-        return "<invalid>";
-    }
-    if (current_display_names != nullptr) {
-        const auto it = current_display_names->find(ref.id);
-        if (it != current_display_names->end()) {
-            return it->second;
-        }
-    }
-    if (const Function* function = parent_function_from_instruction(context)) {
-        if (const InstValue* value = function->find_value(ref.id)) {
-            return format_inst_value(*value);
-        }
-    }
-    return "%" + std::to_string(ref.id);
-}
-
-std::string format_inst_values(const std::vector<InstValue>& values) {
-    std::ostringstream oss;
-    for (std::size_t i = 0; i < values.size(); ++i) {
-        if (i != 0) {
-            oss << ", ";
-        }
-        oss << format_inst_value(values[i]);
-    }
-    return oss.str();
-}
-
-std::string format_argument_list(const std::vector<InstValue>& values) {
-    std::ostringstream oss;
-    oss << "(";
-    for (std::size_t i = 0; i < values.size(); ++i) {
-        if (i != 0) {
-            oss << ", ";
-        }
-        oss << format_inst_value(values[i]);
-    }
-    oss << ")";
-    return oss.str();
-}
-
-std::string format_output_list(const std::vector<std::string>& names) {
-    std::ostringstream oss;
-    oss << "(";
-    for (std::size_t i = 0; i < names.size(); ++i) {
-        if (i != 0) {
-            oss << ", ";
-        }
-        oss << names[i];
-    }
-    oss << ")";
-    return oss.str();
-}
-
-std::string format_function_ref(const std::string& name) {
-    return "@" + name;
-}
-
 std::string format_block_ref(const BasicBlock* block) {
     return "%" + std::string(block != nullptr ? block->name() : "<null>");
 }
 
 std::string format_block_ref_list(const std::vector<BasicBlock*>& blocks) {
-    if (blocks.empty()) {
-        return {};
-    }
-
     std::ostringstream oss;
     for (std::size_t i = 0; i < blocks.size(); ++i) {
         if (i != 0) {
@@ -484,39 +128,159 @@ std::string format_block_ref_list(const std::vector<BasicBlock*>& blocks) {
     return oss.str();
 }
 
-std::string format_display_filename(const std::string& filename) {
-    if (filename.empty()) {
-        return {};
+std::string format_function_ref(const std::string& name) {
+    return "@" + name;
+}
+
+std::string format_value_list(const std::vector<NamedValue>& values) {
+    std::ostringstream oss;
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) {
+            oss << ", ";
+        }
+        oss << format_named_value(values[i]);
+    }
+    return oss.str();
+}
+
+std::string format_argument_list(const std::vector<NamedValue>& values) {
+    std::ostringstream oss;
+    oss << "(";
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) {
+            oss << ", ";
+        }
+        oss << format_named_value(values[i]);
+    }
+    oss << ")";
+    return oss.str();
+}
+
+std::string unary_opcode(UnaryOpNode::Op op) {
+    switch (op) {
+        case UnaryOpNode::Logic_Not:
+            return "not";
+        case UnaryOpNode::UMinus:
+            return "neg";
     }
 
-    const std::filesystem::path path(filename);
-    if (!path.is_absolute()) {
-        return path.generic_string();
+    return "unknown.unaryop";
+}
+
+std::string binop_opcode(BinOpNode::Op op) {
+    switch (op) {
+        case BinOpNode::Add:
+            return "add";
+        case BinOpNode::Subtract:
+            return "sub";
+        case BinOpNode::Eq:
+            return "icmp eq";
+        case BinOpNode::Gt:
+            return "icmp sgt";
+        case BinOpNode::Lt:
+            return "icmp slt";
+        case BinOpNode::Ne:
+            return "icmp ne";
+        case BinOpNode::Or:
+            return "or";
+        case BinOpNode::MPower:
+            return "pow";
+        case BinOpNode::Multiply:
+            return "mul";
     }
 
-    std::error_code error;
-    const std::filesystem::path cwd = std::filesystem::current_path(error);
-    if (!error) {
-        const std::filesystem::path relative = path.lexically_relative(cwd);
-        if (!relative.empty()) {
-            const std::string relative_text = relative.generic_string();
-            if (!relative_text.empty() && relative_text.rfind("..", 0) != 0) {
-                return relative_text;
+    return "unknown.binop";
+}
+
+std::string expr_text(const NonSSANode& node) {
+    switch (node.type()) {
+        case NonSSANode::Number: {
+            const auto& number = static_cast<const NumberNode&>(node);
+            return "const " + format_number(number.value());
+        }
+        case NonSSANode::Text: {
+            const auto& text = static_cast<const TextNode&>(node);
+            return "const.text " + format_quoted_string(text.text());
+        }
+        case NonSSANode::Assign: {
+            const auto& assign = static_cast<const AssignNode&>(node);
+            return "copy " + format_named_value(assign.src());
+        }
+        case NonSSANode::UnaryOp: {
+            const auto& unary = static_cast<const UnaryOpNode&>(node);
+            return unary_opcode(unary.op()) + " " + format_named_value(unary.operand());
+        }
+        case NonSSANode::BinOp: {
+            const auto& binop = static_cast<const BinOpNode&>(node);
+            return binop_opcode(binop.op()) + " " + format_named_value(binop.lhs()) + ", " +
+                   format_named_value(binop.rhs());
+        }
+        case NonSSANode::Call: {
+            const auto& call = static_cast<const CallNode&>(node);
+            std::ostringstream oss;
+            oss << "call ";
+            if (call.callee_type() == CallNode::Direct) {
+                oss << format_function_ref(call.callee());
+            } else {
+                oss << "%" << call.callee();
             }
+            oss << "(" << format_value_list(call.inputs()) << ")";
+            return oss.str();
+        }
+        case NonSSANode::CondJump: {
+            const auto& jump = static_cast<const CondJumpNode&>(node);
+            return "br " + format_named_value(jump.cond()) + ", label " +
+                   format_block_ref(jump.true_block()) + ", label " +
+                   format_block_ref(jump.false_block());
+        }
+        case NonSSANode::Jump: {
+            const auto& jump = static_cast<const JumpNode&>(node);
+            return "br label " + format_block_ref(jump.target());
+        }
+        case NonSSANode::Return: {
+            const auto& ret = static_cast<const ReturnNode&>(node);
+            if (ret.values().empty()) {
+                return "ret void";
+            }
+            return "ret " + format_value_list(ret.values());
         }
     }
 
-    const std::filesystem::path basename = path.filename();
-    return basename.empty() ? path.generic_string() : basename.generic_string();
+    return "<node>";
 }
 
-std::string format_instruction_text(const Instruction& instruction) {
+std::string format_node_text(const NonSSANode& node) {
     std::string text;
-    if (instruction.has_values()) {
-        text += format_inst_values(instruction.value_defs());
-        text += " = ";
+    switch (node.type()) {
+        case NonSSANode::Number:
+            text = format_named_value(static_cast<const NumberNode&>(node).result()) + " = ";
+            break;
+        case NonSSANode::Text:
+            text = format_named_value(static_cast<const TextNode&>(node).result()) + " = ";
+            break;
+        case NonSSANode::Assign:
+            text = format_named_value(static_cast<const AssignNode&>(node).dst()) + " = ";
+            break;
+        case NonSSANode::UnaryOp:
+            text = format_named_value(static_cast<const UnaryOpNode&>(node).result()) + " = ";
+            break;
+        case NonSSANode::BinOp:
+            text = format_named_value(static_cast<const BinOpNode&>(node).result()) + " = ";
+            break;
+        case NonSSANode::Call: {
+            const auto& call = static_cast<const CallNode&>(node);
+            if (!call.outputs().empty()) {
+                text = format_value_list(call.outputs()) + " = ";
+            }
+            break;
+        }
+        case NonSSANode::CondJump:
+        case NonSSANode::Jump:
+        case NonSSANode::Return:
+            break;
     }
-    text += expr_text(&instruction);
+
+    text += expr_text(node);
     return text;
 }
 
@@ -548,13 +312,41 @@ const std::vector<std::string>& source_file_lines(const std::string& filename) {
     return cache.emplace(filename, std::move(lines)).first->second;
 }
 
-std::optional<SourceComment> source_comment_from_location(
-    const std::optional<SourceLocation>& location) {
-    if (!location.has_value()) {
-        return std::nullopt;
+std::string format_display_filename(const std::string& filename) {
+    if (filename.empty()) {
+        return {};
     }
 
-    if (location->begin_line <= 0 || location->filename.empty()) {
+    const std::filesystem::path path(filename);
+    if (!path.is_absolute()) {
+        return path.generic_string();
+    }
+
+    std::error_code error;
+    const std::filesystem::path cwd = std::filesystem::current_path(error);
+    if (!error) {
+        const std::filesystem::path relative = path.lexically_relative(cwd);
+        if (!relative.empty()) {
+            const std::string text = relative.generic_string();
+            if (!text.empty() && text.rfind("..", 0) != 0) {
+                return text;
+            }
+        }
+    }
+
+    const std::filesystem::path basename = path.filename();
+    return basename.empty() ? path.generic_string() : basename.generic_string();
+}
+
+struct SourceComment {
+    std::string filename;
+    int line = 0;
+    std::string text;
+};
+
+std::optional<SourceComment> source_comment_from_location(
+    const std::optional<SourceLocation>& location) {
+    if (!location.has_value() || location->begin_line <= 0 || location->filename.empty()) {
         return std::nullopt;
     }
 
@@ -569,48 +361,47 @@ std::optional<SourceComment> source_comment_from_location(
         return std::nullopt;
     }
 
-    return SourceComment{location->filename, location->begin_line, source_line};
+    return SourceComment{format_display_filename(location->filename), location->begin_line, source_line};
 }
 
 std::size_t source_comment_column(const Function& function) {
     std::size_t max_width = 0;
     for (const auto& block : function.blocks()) {
-        for (Instruction* instruction : block->instructions()) {
-            if (instruction == nullptr) {
-                continue;
+        for (NonSSANode* node : block->instructions()) {
+            if (node != nullptr) {
+                max_width = std::max(max_width, format_node_text(*node).size());
             }
-            max_width = std::max(max_width, format_instruction_text(*instruction).size());
         }
         if (block->terminal() != nullptr) {
-            max_width = std::max(max_width, format_instruction_text(*block->terminal()).size());
+            max_width = std::max(max_width, format_node_text(*block->terminal()).size());
         }
     }
     return max_width == 0 ? 0 : max_width + 2;
 }
 
-void print_instruction(std::ostream& os, const Instruction& instruction, std::size_t comment_column,
-                       std::optional<SourceComment>& last_source_comment) {
-    std::optional<SourceComment> current_source_comment =
-        source_comment_from_location(instruction.source_location());
-    bool emit_source_comment = false;
-    if (current_source_comment.has_value()) {
-        if (!last_source_comment.has_value() ||
-            last_source_comment->filename != current_source_comment->filename ||
-            last_source_comment->line != current_source_comment->line) {
-            emit_source_comment = true;
-            last_source_comment = current_source_comment;
+void print_node(std::ostream& os, const NonSSANode& node, std::size_t comment_column,
+                std::optional<SourceComment>& last_comment) {
+    const std::string text = format_node_text(node);
+    const std::optional<SourceComment> source = source_comment_from_location(node.source_location());
+
+    bool emit_comment = false;
+    if (source.has_value()) {
+        if (!last_comment.has_value() || last_comment->filename != source->filename ||
+            last_comment->line != source->line) {
+            emit_comment = true;
+            last_comment = source;
         }
     }
 
-    os << "  " << format_instruction_text(instruction);
-    if (emit_source_comment && last_source_comment.has_value()) {
-        const std::string text = format_instruction_text(instruction);
+    os << "  " << text;
+    if (emit_comment && last_comment.has_value()) {
         if (comment_column > text.size()) {
             os << std::string(comment_column - text.size(), ' ');
         } else {
             os << "  ";
         }
-        os << "; " << last_source_comment->text;
+        os << "; " << last_comment->filename << ":" << last_comment->line << "  "
+           << last_comment->text;
     }
     os << "\n";
 }
@@ -621,6 +412,7 @@ void print_ir(std::ostream& os, const Module& module) {
     os << "; ModuleID = " << format_quoted_string(module.name()) << "\n";
     os << "source_filename = " << format_quoted_string(format_display_filename(module.source_path()))
        << "\n";
+    os << "; stage = \"non-ssa\"\n";
     os << "; module_type = " << format_quoted_string(module_type_name(module.type())) << "\n";
     os << "; entry = "
        << (module.entry_function() != nullptr ? format_function_ref(module.entry_function()->name())
@@ -628,21 +420,19 @@ void print_ir(std::ostream& os, const Module& module) {
        << "\n";
 
     for (const auto& function : module.functions()) {
-        const DisplayNameMap display_names = build_display_names(*function);
-        current_display_names = &display_names;
-        os << "\ndefine " << format_function_ref(function->name())
-           << format_argument_list(function->input_values()) << " {\n";
-        os << "  ; kind = " << function_type_name(function->type()) << "\n";
-        os << "  ; outputs = " << format_output_list(function->output_names()) << "\n";
+        os << "\ndefine " << function_type_name(function->type()) << " "
+           << format_function_ref(function->name()) << format_argument_list(function->inputs())
+           << " {\n";
+        os << "  ; outputs = " << format_argument_list(function->outputs()) << "\n";
         os << "  ; entry = "
            << (function->entry_block() != nullptr ? format_block_ref(function->entry_block())
                                                   : "%<null>")
            << "\n";
+
         const std::size_t comment_column = source_comment_column(*function);
-        std::optional<SourceComment> last_source_comment;
+        std::optional<SourceComment> last_comment;
         for (const auto& block : function->blocks()) {
-            os << "\n";
-            os << block->name() << ":";
+            os << "\n" << block->name() << ":";
             const std::string preds = format_block_ref_list(block->predecessors());
             const std::string succs = format_block_ref_list(block->successors());
             if (!preds.empty() || !succs.empty()) {
@@ -658,19 +448,18 @@ void print_ir(std::ostream& os, const Module& module) {
                 }
             }
             os << "\n";
-            for (Instruction* instruction : block->instructions()) {
-                if (instruction != nullptr) {
-                    print_instruction(os, *instruction, comment_column, last_source_comment);
+
+            for (NonSSANode* node : block->instructions()) {
+                if (node != nullptr) {
+                    print_node(os, *node, comment_column, last_comment);
                 }
             }
             if (block->terminal() != nullptr) {
-                print_instruction(os, *block->terminal(), comment_column, last_source_comment);
+                print_node(os, *block->terminal(), comment_column, last_comment);
             }
         }
 
-        os << "\n";
-        os << "}\n";
-        current_display_names = nullptr;
+        os << "\n}\n";
     }
 }
 
