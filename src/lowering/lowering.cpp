@@ -2,32 +2,39 @@
 
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
 #include <memory>
 #include <optional>
-#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
-#include "ast/ast_base.h"
 #include "ast/flow_control.h"
 #include "ast/mfile_func.h"
 #include "ast/multi_func_call.h"
 #include "ast/numval.h"
 #include "ast/symref.h"
-#include "ba_obj/ba_obj.h"
-#include "ba_obj/matrix.h"
+#include "ast/text_node.h"
 
 namespace baltam {
 namespace {
 
-std::optional<SourceSpan> source_span_from(const ast_ptr& node) {
+const char* ast_node_type_name(nodeType type) {
+    const char** names = ast::nodeTypeString();
+    if (names == nullptr) {
+        return "<unknown>";
+    }
+    return names[type];
+}
+
+std::optional<SourceLocation> source_location_from(const ast_ptr& node) {
     if (!node) {
         return std::nullopt;
     }
 
-    return SourceSpan{
+    return SourceLocation{
         node->loc.begin.filename,
         node->loc.begin.line,
         node->loc.begin.column,
@@ -46,14 +53,32 @@ std::string function_name_from_unit(const pcdata& unit) {
     return "__unnamed_function__";
 }
 
-Function::Type function_type_from_unit(const pcdata& unit, bool is_first) {
+std::string module_stem_from_path(const std::string& path) {
+    if (path.empty()) {
+        return {};
+    }
+    return std::filesystem::path(path).stem().string();
+}
+
+std::string module_name_from_unit(const pcdata& unit) {
+    const std::string stem = module_stem_from_path(unit.filename);
+    if (!stem.empty()) {
+        return stem;
+    }
+    return function_name_from_unit(unit);
+}
+
+Function::Type function_type_from_unit(const pcdata& unit) {
     if (unit.is_mscript()) {
         return Function::Script;
     }
-    return is_first ? Function::PrimaryFunction : Function::LocalFunction;
+    return function_name_from_unit(unit) == module_stem_from_path(unit.filename)
+               ? Function::PrimaryFunction
+               : Function::LocalFunction;
 }
 
-Module::Type module_type_from_units(const std::vector<std::shared_ptr<pcdata>>& parsed_units) {
+Module::Type module_type_from_units(
+    const std::vector<std::shared_ptr<pcdata>>& parsed_units) {
     if (!parsed_units.empty() && parsed_units.front() != nullptr && parsed_units.front()->is_mscript()) {
         return Module::M_Script;
     }
@@ -85,198 +110,7 @@ std::vector<std::string> collect_name_list(const ast_ptr& node) {
             break;
     }
 
-    const std::string name = get_ast_sym_name(node, 0);
-    if (name.empty()) {
-        throw std::runtime_error("Unsupported name list node in IR lowering.");
-    }
-    return {name};
-}
-
-struct LoweringContext {
-    Module* module = nullptr;
-    Function* function = nullptr;
-    BasicBlock* current_block = nullptr;
-    int next_block_id = 0;
-};
-
-BasicBlock* create_block(LoweringContext& ctx, const std::string& prefix) {
-    std::ostringstream oss;
-    oss << prefix << "_" << ctx.next_block_id++;
-    return ctx.function->create_block(oss.str());
-}
-
-Instruction* lower_expr(const ast_ptr& node, LoweringContext& ctx);
-void lower_stmt(const ast_ptr& node, LoweringContext& ctx);
-
-void append_instruction(LoweringContext& ctx, Instruction* instruction) {
-    if (ctx.current_block == nullptr) {
-        throw std::runtime_error("No current basic block while lowering instruction.");
-    }
-    ctx.current_block->append_instruction(instruction);
-}
-
-Instruction* lower_number(const std::shared_ptr<numval>& number_node, LoweringContext& ctx) {
-    std::string text = number_node->str;
-    text.erase(std::remove_if(text.begin(), text.end(),
-                              [](unsigned char ch) { return std::isspace(ch) != 0; }),
-               text.end());
-    if (text.empty()) {
-        throw std::runtime_error("Empty numeric literal in IR lowering.");
-    }
-
-    if (text.find('i') != std::string::npos || text.find('j') != std::string::npos ||
-        text.find('I') != std::string::npos || text.find('J') != std::string::npos) {
-        throw std::runtime_error("Complex numeric literals are not supported yet in IR lowering.");
-    }
-
-    Instruction* instruction = ctx.function->create_instruction<NumberInstruction>(
-        std::stod(text), source_span_from(number_node));
-    append_instruction(ctx, instruction);
-    return instruction;
-}
-
-Instruction* lower_call(const std::shared_ptr<multipleFuncCall>& call_node, LoweringContext& ctx) {
-    std::vector<Instruction*> out_args;
-    for (const std::string& name : collect_name_list(call_node->out_args())) {
-        Instruction* out_arg =
-            ctx.function->create_instruction<NameInstruction>(name, source_span_from(call_node->out_args()));
-        append_instruction(ctx, out_arg);
-        out_args.push_back(out_arg);
-    }
-
-    std::vector<Instruction*> in_args;
-    if (call_node->in_args()) {
-        if (call_node->in_args()->nodetype == node_list || call_node->in_args()->nodetype == node_horz_list) {
-            for (const ast_ptr& branch : call_node->in_args()->branch) {
-                in_args.push_back(lower_expr(branch, ctx));
-            }
-        } else {
-            in_args.push_back(lower_expr(call_node->in_args(), ctx));
-        }
-    }
-
-    Instruction* instruction = ctx.function->create_instruction<CallInstruction>(
-        call_node->name(), std::move(out_args), std::move(in_args), source_span_from(call_node));
-    append_instruction(ctx, instruction);
-    return instruction;
-}
-
-Instruction* lower_expr(const ast_ptr& node, LoweringContext& ctx) {
-    if (!node) {
-        throw std::runtime_error("Cannot lower a null expression node.");
-    }
-
-    switch (node->nodetype) {
-        case node_name: {
-            const auto sym = std::static_pointer_cast<symref>(node);
-            Instruction* instruction = ctx.function->create_instruction<NameInstruction>(
-                sym->name(), source_span_from(node));
-            append_instruction(ctx, instruction);
-            return instruction;
-        }
-        case node_number:
-            return lower_number(std::static_pointer_cast<numval>(node), ctx);
-        case node_add:
-        case node_multiply:
-        case node_greater_than: {
-            BinOpInstruction::Type op = BinOpInstruction::Add;
-            if (node->nodetype == node_multiply) {
-                op = BinOpInstruction::Multiply;
-            } else if (node->nodetype == node_greater_than) {
-                op = BinOpInstruction::Gt;
-            }
-
-            Instruction* lhs = lower_expr(node->branch[0], ctx);
-            Instruction* rhs = lower_expr(node->branch[1], ctx);
-            Instruction* instruction = ctx.function->create_instruction<BinOpInstruction>(
-                op, lhs, rhs, source_span_from(node));
-            append_instruction(ctx, instruction);
-            return instruction;
-        }
-        case node_multiple_func:
-            return lower_call(std::static_pointer_cast<multipleFuncCall>(node), ctx);
-        default:
-            break;
-    }
-
-    throw std::runtime_error("Unsupported expression node in IR lowering.");
-}
-
-void ensure_fallthrough_to(LoweringContext& ctx, BasicBlock* target, const ast_ptr& node) {
-    if (ctx.current_block != nullptr && ctx.current_block->terminal() == nullptr) {
-        ctx.current_block->add_successor(target);
-        ctx.current_block->set_terminal(
-            ctx.function->create_instruction<JumpInstruction>(target, source_span_from(node)));
-    }
-}
-
-void lower_stmt_list(const ast_ptr& node, LoweringContext& ctx) {
-    if (!node) {
-        return;
-    }
-    for (const ast_ptr& branch : node->branch) {
-        lower_stmt(branch, ctx);
-    }
-}
-
-void lower_if_stmt(const std::shared_ptr<if_flow>& if_node, LoweringContext& ctx) {
-    Instruction* cond = lower_expr(if_node->cond(), ctx);
-
-    BasicBlock* then_block = create_block(ctx, "if_true");
-    BasicBlock* else_block = create_block(ctx, "if_false");
-    BasicBlock* exit_block = create_block(ctx, "if_exit");
-
-    ctx.current_block->add_successor(then_block);
-    ctx.current_block->add_successor(else_block);
-    ctx.current_block->set_terminal(ctx.function->create_instruction<CondJumpInstruction>(
-        cond, then_block, else_block, source_span_from(if_node)));
-
-    ctx.current_block = then_block;
-    lower_stmt(if_node->tl(), ctx);
-    ensure_fallthrough_to(ctx, exit_block, if_node->tl());
-
-    ctx.current_block = else_block;
-    if (if_node->el() && if_node->el()->nodetype != node_nop) {
-        lower_stmt(if_node->el(), ctx);
-    }
-    ensure_fallthrough_to(ctx, exit_block, if_node->el());
-
-    ctx.current_block = exit_block;
-}
-
-void lower_assignment(const std::shared_ptr<symasgn>& assign_node, LoweringContext& ctx) {
-    Instruction* value = lower_expr(assign_node->v(), ctx);
-    append_instruction(ctx, ctx.function->create_instruction<AssignInstruction>(
-                                assign_node->name(), value, source_span_from(assign_node)));
-}
-
-void lower_stmt(const ast_ptr& node, LoweringContext& ctx) {
-    if (!node) {
-        return;
-    }
-
-    switch (node->nodetype) {
-        case node_runlist:
-        case node_cmdlist:
-            lower_stmt_list(node, ctx);
-            return;
-        case node_asgn:
-            lower_assignment(std::static_pointer_cast<symasgn>(node), ctx);
-            return;
-        case node_multiple_func:
-            (void)lower_call(std::static_pointer_cast<multipleFuncCall>(node), ctx);
-            return;
-        case node_flow_if:
-            lower_if_stmt(std::static_pointer_cast<if_flow>(node), ctx);
-            return;
-        case node_nop:
-        case node_andy_end_of_string:
-            return;
-        default:
-            break;
-    }
-
-    throw std::runtime_error("Unsupported statement node in IR lowering.");
+    throw std::runtime_error("non-SSA lower 遇到了无法收集名字的 AST 节点。");
 }
 
 ast_ptr script_body_from_unit(const pcdata& unit) {
@@ -291,19 +125,684 @@ ast_ptr function_body_from_unit(const pcdata& unit) {
 }
 
 void populate_function_signature(Function& function, const pcdata& unit) {
-    if (unit.m_in_arg_names != nullptr) {
+    if (unit.m_in_arg_names != nullptr && !unit.m_in_arg_names->empty()) {
         function.set_input_names(*unit.m_in_arg_names);
+    } else if (unit.ast && unit.ast->nodetype == node_mfile_func) {
+        const auto func_ast = std::static_pointer_cast<mFileFunc>(unit.ast);
+        function.set_input_names(collect_name_list(func_ast->in_args()));
     }
-    if (unit.m_out_arg_names != nullptr) {
+
+    if (unit.m_out_arg_names != nullptr && !unit.m_out_arg_names->empty()) {
         function.set_output_names(*unit.m_out_arg_names);
+    } else if (unit.ast && unit.ast->nodetype == node_mfile_func) {
+        const auto func_ast = std::static_pointer_cast<mFileFunc>(unit.ast);
+        function.set_output_names(collect_name_list(func_ast->out_args()));
     }
 }
 
-void lower_unit_into_function(const pcdata& unit, bool is_first, Module& module) {
-    Function* function = module.create_function(function_name_from_unit(unit),
-                                                function_type_from_unit(unit, is_first));
+struct LoweringContext {
+    struct LoopContext {
+        BasicBlock* break_target = nullptr;
+        BasicBlock* continue_target = nullptr;
+    };
+
+    Function* function = nullptr;
+    BasicBlock* current_block = nullptr;
+    std::size_t next_temp_id = 0;
+    std::size_t next_block_id = 0;
+    std::vector<LoopContext> loop_stack;
+    std::unordered_set<std::string> defined_user_names;
+
+    NamedValue classify_name(const std::string& name) const {
+        return NamedValue{name, NamedValue::UserVariable};
+    }
+
+    bool is_known_user_name(const std::string& name) const {
+        return defined_user_names.find(name) != defined_user_names.end();
+    }
+
+    void mark_defined(const NamedValue& value) {
+        if (value.type == NamedValue::UserVariable) {
+            defined_user_names.insert(value.name);
+        }
+    }
+
+    void mark_defined(const std::vector<NamedValue>& values) {
+        for (const NamedValue& value : values) {
+            mark_defined(value);
+        }
+    }
+
+    NamedValue create_temp(std::string prefix = "__t") {
+        return NamedValue{prefix + std::to_string(next_temp_id++), NamedValue::Temporary};
+    }
+
+    NamedValue create_hidden_name(const std::string& prefix) {
+        return create_temp("__" + prefix + ".");
+    }
+
+    std::string create_hidden_symbol(const std::string& prefix) {
+        return "__" + prefix + "." + std::to_string(next_temp_id++);
+    }
+
+    BasicBlock* create_block(const std::string& base_name) {
+        if (function == nullptr) {
+            throw std::runtime_error("non-SSA lower 当前没有激活函数。");
+        }
+
+        std::string name = base_name;
+        if (base_name != "entry") {
+            name += "." + std::to_string(next_block_id++);
+        }
+        return function->create_block(std::move(name));
+    }
+
+    template <typename T, typename... Args>
+    T* append_node(Args&&... args) {
+        if (function == nullptr || current_block == nullptr) {
+            throw std::runtime_error("non-SSA lower 当前没有激活基本块。");
+        }
+
+        T* node = function->create_node<T>(std::forward<Args>(args)...);
+        current_block->append_instruction(node);
+        return node;
+    }
+
+    template <typename T, typename... Args>
+    T* set_terminal(Args&&... args) {
+        if (function == nullptr || current_block == nullptr) {
+            throw std::runtime_error("non-SSA lower 当前没有激活基本块。");
+        }
+
+        T* node = function->create_node<T>(std::forward<Args>(args)...);
+        current_block->set_terminal(node);
+        return node;
+    }
+};
+
+BinOpNode::Op lower_binop_type(nodeType type) {
+    switch (type) {
+        case node_add:
+            return BinOpNode::Add;
+        case node_subtract:
+            return BinOpNode::Subtract;
+        case node_eq:
+            return BinOpNode::Eq;
+        case node_greater_than:
+            return BinOpNode::Gt;
+        case node_less_than:
+            return BinOpNode::Lt;
+        case node_noteq:
+            return BinOpNode::Ne;
+        case node_logic_or:
+            return BinOpNode::Or;
+        case node_power:
+            return BinOpNode::MPower;
+        case node_multiply:
+            return BinOpNode::Multiply;
+        default:
+            break;
+    }
+
+    throw std::runtime_error("non-SSA lower 遇到了暂不支持的二元运算。");
+}
+
+NumberNode::NumberValue parse_number_value(const std::shared_ptr<numval>& number_node) {
+    std::string text = number_node->str;
+    text.erase(std::remove_if(text.begin(), text.end(),
+                              [](unsigned char ch) { return std::isspace(ch) != 0; }),
+               text.end());
+    if (text.empty()) {
+        throw std::runtime_error("non-SSA lower 遇到了空数字字面量。");
+    }
+
+    const char suffix = text.back();
+    if (suffix == 'i' || suffix == 'j' || suffix == 'I' || suffix == 'J') {
+        const std::string imag_text = text.substr(0, text.size() - 1);
+        double imag_value = 0.0;
+        if (imag_text.empty() || imag_text == "+") {
+            imag_value = 1.0;
+        } else if (imag_text == "-") {
+            imag_value = -1.0;
+        } else {
+            imag_value = std::stod(imag_text);
+        }
+        return std::complex<double>{0.0, imag_value};
+    }
+
+    return std::stod(text);
+}
+
+NamedValue lower_expr_to_operand(const ast_ptr& node, LoweringContext& ctx);
+void lower_expr_into(const ast_ptr& node, const NamedValue& target, LoweringContext& ctx);
+void lower_stmt(const ast_ptr& node, LoweringContext& ctx);
+std::vector<ast_ptr> collect_cell_elements(const ast_ptr& node);
+
+Function* create_anonymous_function(const ast_ptr& node, LoweringContext& ctx) {
+    if (!node || node->branch.size() < 2) {
+        throw std::runtime_error("non-SSA lower 暂不支持空体匿名函数。");
+    }
+    if (ctx.function == nullptr || ctx.function->parent() == nullptr) {
+        throw std::runtime_error("non-SSA lower 匿名函数时找不到模块。");
+    }
+
+    Module* module = ctx.function->parent();
+    Function* function =
+        module->create_function(ctx.create_hidden_symbol("anonymous"), Function::LocalFunction);
+    function->set_input_names(collect_name_list(node->branch[0]));
+    function->set_output_names({"__anon_result"});
+
+    BasicBlock* entry = function->create_block("entry");
+    function->set_entry_block(entry);
+
+    LoweringContext anon_ctx;
+    anon_ctx.function = function;
+    anon_ctx.current_block = entry;
+    anon_ctx.next_temp_id = ctx.next_temp_id;
+    anon_ctx.mark_defined(function->inputs());
+    anon_ctx.mark_defined(function->outputs());
+
+    lower_expr_into(node->branch[1], anon_ctx.classify_name("__anon_result"), anon_ctx);
+    anon_ctx.set_terminal<ReturnNode>(function->outputs(), source_location_from(node));
+
+    ctx.next_temp_id = anon_ctx.next_temp_id;
+    return function;
+}
+
+void lower_name_expr_into(const std::shared_ptr<symref>& sym, const NamedValue& target,
+                          LoweringContext& ctx, const ast_ptr& node) {
+    if (ctx.is_known_user_name(sym->name()) || sym->get_symbol_type() == symbol_variable) {
+        const NamedValue source = ctx.classify_name(sym->name());
+        if (source.name != target.name || source.type != target.type) {
+            ctx.append_node<AssignNode>(target, source, source_location_from(node));
+        }
+        ctx.mark_defined(target);
+        return;
+    }
+
+    ctx.append_node<CallNode>(CallNode::Direct, sym->name(), std::vector<NamedValue>{target},
+                              std::vector<NamedValue>{}, source_location_from(node));
+    ctx.mark_defined(target);
+}
+
+void lower_call_stmt(const std::shared_ptr<multipleFuncCall>& call, LoweringContext& ctx) {
+    std::vector<NamedValue> outputs;
+    for (const std::string& name : collect_name_list(call->out_args())) {
+        outputs.push_back(ctx.classify_name(name));
+    }
+
+    std::vector<NamedValue> inputs;
+    if (call->in_args()) {
+        if (call->in_args()->nodetype == node_list || call->in_args()->nodetype == node_horz_list) {
+            for (const ast_ptr& branch : call->in_args()->branch) {
+                inputs.push_back(lower_expr_to_operand(branch, ctx));
+            }
+        } else {
+            inputs.push_back(lower_expr_to_operand(call->in_args(), ctx));
+        }
+    }
+
+    const CallNode::CalleeType callee_type =
+        call->type() == symbol_variable ? CallNode::Indirect : CallNode::Direct;
+    const std::vector<NamedValue> defined_outputs = outputs;
+    ctx.append_node<CallNode>(callee_type, call->name(), std::move(outputs), std::move(inputs),
+                              source_location_from(call));
+    ctx.mark_defined(defined_outputs);
+}
+
+void lower_expr_into(const ast_ptr& node, const NamedValue& target, LoweringContext& ctx) {
+    if (!node) {
+        throw std::runtime_error("non-SSA lower 不能处理空表达式。");
+    }
+
+    switch (node->nodetype) {
+        case node_name: {
+            const auto sym = std::static_pointer_cast<symref>(node);
+            lower_name_expr_into(sym, target, ctx, node);
+            return;
+        }
+        case node_number:
+            ctx.append_node<NumberNode>(target, parse_number_value(std::static_pointer_cast<numval>(node)),
+                                        source_location_from(node));
+            ctx.mark_defined(target);
+            return;
+        case node_horz_list:
+        case node_vert_list: {
+            std::vector<NamedValue> inputs;
+            inputs.reserve(node->branch.size());
+            for (const ast_ptr& branch : node->branch) {
+                inputs.push_back(lower_expr_to_operand(branch, ctx));
+            }
+
+            ctx.append_node<CallNode>(CallNode::Direct,
+                                      node->nodetype == node_horz_list ? "horzcat" : "vertcat",
+                                      std::vector<NamedValue>{target}, std::move(inputs),
+                                      source_location_from(node));
+            ctx.mark_defined(target);
+            return;
+        }
+        case node_cell: {
+            std::vector<NamedValue> inputs;
+            for (const ast_ptr& item : collect_cell_elements(node)) {
+                inputs.push_back(lower_expr_to_operand(item, ctx));
+            }
+
+            ctx.append_node<CallNode>(CallNode::Direct, "__ir_make_cell__",
+                                      std::vector<NamedValue>{target}, std::move(inputs),
+                                      source_location_from(node));
+            ctx.mark_defined(target);
+            return;
+        }
+        case node_text:
+        case node_char_mat: {
+            const auto text = std::static_pointer_cast<textNode>(node);
+            ctx.append_node<TextNode>(target, text->str, source_location_from(node));
+            ctx.mark_defined(target);
+            return;
+        }
+        case node_negative:
+        case node_logic_not: {
+            const NamedValue operand = lower_expr_to_operand(node->branch[0], ctx);
+            const UnaryOpNode::Op op = node->nodetype == node_negative ? UnaryOpNode::UMinus
+                                                                       : UnaryOpNode::Logic_Not;
+            ctx.append_node<UnaryOpNode>(op, target, operand, source_location_from(node));
+            ctx.mark_defined(target);
+            return;
+        }
+        case node_add:
+        case node_subtract:
+        case node_multiply:
+        case node_power:
+        case node_eq:
+        case node_greater_than:
+        case node_less_than:
+        case node_noteq:
+        case node_logic_or: {
+            const NamedValue lhs = lower_expr_to_operand(node->branch[0], ctx);
+            const NamedValue rhs = lower_expr_to_operand(node->branch[1], ctx);
+            ctx.append_node<BinOpNode>(lower_binop_type(node->nodetype), target, lhs, rhs,
+                                       source_location_from(node));
+            ctx.mark_defined(target);
+            return;
+        }
+        case node_multiple_func: {
+            const auto call = std::static_pointer_cast<multipleFuncCall>(node);
+            std::vector<NamedValue> inputs;
+            if (call->in_args()) {
+                if (call->in_args()->nodetype == node_list || call->in_args()->nodetype == node_horz_list) {
+                    for (const ast_ptr& branch : call->in_args()->branch) {
+                        inputs.push_back(lower_expr_to_operand(branch, ctx));
+                    }
+                } else {
+                    inputs.push_back(lower_expr_to_operand(call->in_args(), ctx));
+                }
+            }
+
+            const CallNode::CalleeType callee_type =
+                call->type() == symbol_variable ? CallNode::Indirect : CallNode::Direct;
+            ctx.append_node<CallNode>(callee_type, call->name(), std::vector<NamedValue>{target},
+                                      std::move(inputs), source_location_from(node));
+            ctx.mark_defined(target);
+            return;
+        }
+        case node_anonymous_func: {
+            Function* function = create_anonymous_function(node, ctx);
+            const NamedValue function_name = ctx.create_temp("__anon.name");
+            ctx.append_node<TextNode>(function_name, function->name(), source_location_from(node));
+            ctx.mark_defined(function_name);
+            ctx.append_node<CallNode>(CallNode::Direct, "__ir_make_function_handle__",
+                                      std::vector<NamedValue>{target},
+                                      std::vector<NamedValue>{function_name},
+                                      source_location_from(node));
+            ctx.mark_defined(target);
+            return;
+        }
+        case node_colon: {
+            if (node->branch.size() != 2 && node->branch.size() != 3) {
+                throw std::runtime_error("non-SSA lower 暂不支持该冒号表达式。");
+            }
+
+            std::vector<NamedValue> inputs;
+            inputs.reserve(node->branch.size());
+            for (const ast_ptr& branch : node->branch) {
+                inputs.push_back(lower_expr_to_operand(branch, ctx));
+            }
+
+            ctx.append_node<CallNode>(CallNode::Direct, "colon", std::vector<NamedValue>{target},
+                                      std::move(inputs), source_location_from(node));
+            ctx.mark_defined(target);
+            return;
+        }
+        default:
+            break;
+    }
+
+    throw std::runtime_error(std::string("non-SSA lower 暂不支持该表达式节点: ") +
+                             ast_node_type_name(node->nodetype));
+}
+
+NamedValue lower_expr_to_operand(const ast_ptr& node, LoweringContext& ctx) {
+    if (!node) {
+        throw std::runtime_error("non-SSA lower 不能处理空操作数表达式。");
+    }
+
+    if (node->nodetype == node_name) {
+        const auto sym = std::static_pointer_cast<symref>(node);
+        if (ctx.is_known_user_name(sym->name()) || sym->get_symbol_type() == symbol_variable) {
+            return ctx.classify_name(sym->name());
+        }
+
+        const NamedValue temp = ctx.create_temp();
+        lower_name_expr_into(sym, temp, ctx, node);
+        return temp;
+    }
+
+    const NamedValue temp = ctx.create_temp();
+    lower_expr_into(node, temp, ctx);
+    return temp;
+}
+
+void ensure_fallthrough_to(LoweringContext& ctx, BasicBlock* target, const ast_ptr& node) {
+    if (ctx.current_block != nullptr && ctx.current_block->terminal() == nullptr) {
+        ctx.current_block->add_successor(target);
+        ctx.set_terminal<JumpNode>(target, std::nullopt);
+    }
+}
+
+std::vector<ast_ptr> collect_cell_elements(const ast_ptr& node) {
+    std::vector<ast_ptr> items;
+    if (!node) {
+        return items;
+    }
+
+    if (node->nodetype == node_cell || node->nodetype == node_list || node->nodetype == node_horz_list) {
+        for (const ast_ptr& branch : node->branch) {
+            std::vector<ast_ptr> nested = collect_cell_elements(branch);
+            items.insert(items.end(), nested.begin(), nested.end());
+        }
+        return items;
+    }
+
+    items.push_back(node);
+    return items;
+}
+
+NamedValue build_switch_match_cond(const NamedValue& switch_value, const ast_ptr& match_node,
+                                   LoweringContext& ctx) {
+    std::vector<ast_ptr> match_items;
+    if (match_node != nullptr && match_node->nodetype == node_cell) {
+        match_items = collect_cell_elements(match_node);
+    } else if (match_node != nullptr) {
+        match_items.push_back(match_node);
+    }
+
+    if (match_items.empty()) {
+        throw std::runtime_error("switch case 缺少匹配值。");
+    }
+
+    NamedValue combined_cond;
+    bool has_combined = false;
+    for (const ast_ptr& item : match_items) {
+        const NamedValue rhs = lower_expr_to_operand(item, ctx);
+        const NamedValue eq = ctx.create_temp("__switch.match");
+        ctx.append_node<CallNode>(CallNode::Direct, "__ir_switch_match__", std::vector<NamedValue>{eq},
+                                  std::vector<NamedValue>{switch_value, rhs}, source_location_from(item));
+        ctx.mark_defined(eq);
+
+        if (!has_combined) {
+            combined_cond = eq;
+            has_combined = true;
+            continue;
+        }
+
+        const NamedValue merged = ctx.create_temp("__switch.or");
+        ctx.append_node<BinOpNode>(BinOpNode::Or, merged, combined_cond, eq, source_location_from(item));
+        ctx.mark_defined(merged);
+        combined_cond = merged;
+    }
+
+    return combined_cond;
+}
+
+void lower_switch_stmt(const std::shared_ptr<switch_flow>& switch_node, LoweringContext& ctx) {
+    if (switch_node->expr() == nullptr || switch_node->cases() == nullptr) {
+        throw std::runtime_error("non-SSA lower 不能处理空的 switch 语句。");
+    }
+
+    const NamedValue switch_value = lower_expr_to_operand(switch_node->expr(), ctx);
+    BasicBlock* exit_block = ctx.create_block("switch.end");
+    BasicBlock* dispatch_block = ctx.current_block;
+    ast_ptr otherwise_node = nullptr;
+
+    for (const ast_ptr& case_node : switch_node->cases()->branch) {
+        if (!case_node) {
+            continue;
+        }
+        if (case_node->nodetype == node_otherwise) {
+            otherwise_node = case_node;
+            continue;
+        }
+        if (case_node->nodetype != node_case || case_node->branch.size() < 2) {
+            throw std::runtime_error("non-SSA lower 暂不支持该 switch 分支节点。");
+        }
+
+        ctx.current_block = dispatch_block;
+        const NamedValue cond = build_switch_match_cond(switch_value, case_node->branch[0], ctx);
+        BasicBlock* body_block = ctx.create_block("switch.case");
+        BasicBlock* next_block = ctx.create_block("switch.next");
+        ctx.current_block->add_successor(body_block);
+        ctx.current_block->add_successor(next_block);
+        ctx.set_terminal<CondJumpNode>(cond, body_block, next_block, std::nullopt);
+
+        ctx.current_block = body_block;
+        lower_stmt(case_node->branch[1], ctx);
+        ensure_fallthrough_to(ctx, exit_block, case_node->branch[1]);
+
+        dispatch_block = next_block;
+    }
+
+    ctx.current_block = dispatch_block;
+    if (otherwise_node != nullptr && !otherwise_node->branch.empty()) {
+        lower_stmt(otherwise_node->branch.back(), ctx);
+    }
+    ensure_fallthrough_to(ctx, exit_block, otherwise_node ? otherwise_node : switch_node);
+
+    ctx.current_block = exit_block;
+}
+
+void lower_stmt_list(const ast_ptr& node, LoweringContext& ctx) {
+    if (!node) {
+        return;
+    }
+
+    for (const ast_ptr& branch : node->branch) {
+        if (ctx.current_block == nullptr) {
+            return;
+        }
+        lower_stmt(branch, ctx);
+    }
+}
+
+void lower_if_stmt(const std::shared_ptr<if_flow>& if_node, LoweringContext& ctx) {
+    const NamedValue cond = lower_expr_to_operand(if_node->cond(), ctx);
+    BasicBlock* then_block = ctx.create_block("if.then");
+    BasicBlock* else_block = ctx.create_block("if.else");
+    BasicBlock* merge_block = ctx.create_block("if.end");
+
+    ctx.current_block->add_successor(then_block);
+    ctx.current_block->add_successor(else_block);
+    ctx.set_terminal<CondJumpNode>(cond, then_block, else_block, std::nullopt);
+
+    ctx.current_block = then_block;
+    lower_stmt(if_node->tl(), ctx);
+    ensure_fallthrough_to(ctx, merge_block, if_node->tl());
+
+    ctx.current_block = else_block;
+    if (if_node->el() && if_node->el()->nodetype != node_nop) {
+        lower_stmt(if_node->el(), ctx);
+        ensure_fallthrough_to(ctx, merge_block, if_node->el());
+    } else {
+        ensure_fallthrough_to(ctx, merge_block, if_node);
+    }
+
+    ctx.current_block = merge_block;
+}
+
+void lower_for_stmt(const std::shared_ptr<flow>& for_node, LoweringContext& ctx) {
+    if (for_node->var_ref() == nullptr || for_node->var_ref()->nodetype != node_name) {
+        throw std::runtime_error("non-SSA lower 目前只支持名字形式的 for 循环变量。");
+    }
+    if (!for_node->cond()) {
+        throw std::runtime_error("non-SSA lower 不能处理空的 for 迭代表达式。");
+    }
+
+    const NamedValue loop_var =
+        ctx.classify_name(std::static_pointer_cast<symref>(for_node->var_ref())->name());
+
+    BasicBlock* preheader_block = ctx.create_block("for.preheader");
+    BasicBlock* header_block = ctx.create_block("for.header");
+    BasicBlock* body_block = ctx.create_block("for.body");
+    BasicBlock* latch_block = ctx.create_block("for.latch");
+    BasicBlock* exit_block = ctx.create_block("for.end");
+
+    ensure_fallthrough_to(ctx, preheader_block, for_node);
+
+    const NamedValue state_name = ctx.create_hidden_name("foreach_state");
+    const NamedValue max_iter_name = ctx.create_hidden_name("foreach_max_iter");
+    const NamedValue iter_index_name = ctx.create_hidden_name("foreach_iter_index");
+    const NamedValue current_value_name = ctx.create_hidden_name("foreach_value");
+
+    ctx.current_block = preheader_block;
+    const NamedValue iterable = lower_expr_to_operand(for_node->cond(), ctx);
+    ctx.append_node<CallNode>(CallNode::Direct, "foreach_init",
+                              std::vector<NamedValue>{state_name, max_iter_name},
+                              std::vector<NamedValue>{iterable}, source_location_from(for_node));
+    ctx.append_node<NumberNode>(iter_index_name, std::int64_t{1}, source_location_from(for_node));
+    ensure_fallthrough_to(ctx, header_block, for_node);
+
+    ctx.current_block = header_block;
+    const NamedValue done_name = ctx.create_hidden_name("foreach_done");
+    ctx.append_node<BinOpNode>(BinOpNode::Lt, done_name, max_iter_name, iter_index_name,
+                               source_location_from(for_node));
+    header_block->add_successor(exit_block);
+    header_block->add_successor(body_block);
+    ctx.set_terminal<CondJumpNode>(done_name, exit_block, body_block, std::nullopt);
+
+    ctx.current_block = body_block;
+    ctx.append_node<CallNode>(CallNode::Direct, "foreach_iterate",
+                              std::vector<NamedValue>{current_value_name},
+                              std::vector<NamedValue>{state_name}, source_location_from(for_node));
+    ctx.append_node<AssignNode>(loop_var, current_value_name, source_location_from(for_node->var_ref()));
+    ctx.loop_stack.push_back({exit_block, latch_block});
+    lower_stmt(for_node->tl(), ctx);
+    ctx.loop_stack.pop_back();
+    ensure_fallthrough_to(ctx, latch_block, for_node->tl());
+
+    ctx.current_block = latch_block;
+    const NamedValue one_name = ctx.create_hidden_name("foreach_one");
+    ctx.append_node<NumberNode>(one_name, std::int64_t{1}, source_location_from(for_node));
+    ctx.append_node<BinOpNode>(BinOpNode::Add, iter_index_name, iter_index_name, one_name,
+                               source_location_from(for_node));
+    ensure_fallthrough_to(ctx, header_block, for_node);
+
+    ctx.current_block = exit_block;
+}
+
+void lower_while_stmt(const std::shared_ptr<if_flow>& while_node, LoweringContext& ctx) {
+    if (while_node->cond() == nullptr) {
+        throw std::runtime_error("non-SSA lower 不能处理空的 while 条件。");
+    }
+
+    BasicBlock* header_block = ctx.create_block("while.header");
+    BasicBlock* body_block = ctx.create_block("while.body");
+    BasicBlock* exit_block = ctx.create_block("while.end");
+
+    ensure_fallthrough_to(ctx, header_block, while_node);
+
+    ctx.current_block = header_block;
+    const NamedValue cond = lower_expr_to_operand(while_node->cond(), ctx);
+    header_block->add_successor(body_block);
+    header_block->add_successor(exit_block);
+    ctx.set_terminal<CondJumpNode>(cond, body_block, exit_block, std::nullopt);
+
+    ctx.current_block = body_block;
+    ctx.loop_stack.push_back({exit_block, header_block});
+    lower_stmt(while_node->tl(), ctx);
+    ctx.loop_stack.pop_back();
+    ensure_fallthrough_to(ctx, header_block, while_node->tl());
+
+    ctx.current_block = exit_block;
+}
+
+void lower_stmt(const ast_ptr& node, LoweringContext& ctx) {
+    if (!node) {
+        return;
+    }
+
+    switch (node->nodetype) {
+        case node_runlist:
+        case node_cmdlist:
+        case node_list:
+            lower_stmt_list(node, ctx);
+            return;
+        case node_asgn: {
+            const auto assign = std::static_pointer_cast<symasgn>(node);
+            if (assign->s() == nullptr || assign->s()->nodetype != node_name) {
+                throw std::runtime_error("non-SSA lower 目前只支持名字左值赋值。");
+            }
+            lower_expr_into(assign->v(), ctx.classify_name(assign->name()), ctx);
+            return;
+        }
+        case node_flow_if:
+            lower_if_stmt(std::static_pointer_cast<if_flow>(node), ctx);
+            return;
+        case node_flow_switch:
+            lower_switch_stmt(std::static_pointer_cast<switch_flow>(node), ctx);
+            return;
+        case node_for:
+            lower_for_stmt(std::static_pointer_cast<flow>(node), ctx);
+            return;
+        case node_flow_while:
+            lower_while_stmt(std::static_pointer_cast<if_flow>(node), ctx);
+            return;
+        case node_break:
+            if (ctx.loop_stack.empty()) {
+                throw std::runtime_error("break 只能出现在循环内部。");
+            }
+            ctx.current_block->add_successor(ctx.loop_stack.back().break_target);
+            ctx.set_terminal<JumpNode>(ctx.loop_stack.back().break_target, std::nullopt);
+            ctx.current_block = nullptr;
+            return;
+        case node_continue:
+            if (ctx.loop_stack.empty()) {
+                throw std::runtime_error("continue 只能出现在循环内部。");
+            }
+            ctx.current_block->add_successor(ctx.loop_stack.back().continue_target);
+            ctx.set_terminal<JumpNode>(ctx.loop_stack.back().continue_target, std::nullopt);
+            ctx.current_block = nullptr;
+            return;
+        case node_multiple_func:
+            lower_call_stmt(std::static_pointer_cast<multipleFuncCall>(node), ctx);
+            return;
+        case node_nop:
+        case node_empty:
+        case node_comment:
+        case node_andy_end_of_string:
+            return;
+        default:
+            break;
+    }
+
+    throw std::runtime_error(std::string("non-SSA lower 暂不支持该语句节点: ") +
+                             ast_node_type_name(node->nodetype));
+}
+
+void lower_unit_into_function(const pcdata& unit, Module& module) {
+    Function* function =
+        module.create_function(function_name_from_unit(unit), function_type_from_unit(unit));
     populate_function_signature(*function, unit);
-    if (is_first) {
+    if (function->type() == Function::Script ||
+        function->type() == Function::PrimaryFunction) {
         module.set_entry_function(function);
     }
 
@@ -311,42 +810,41 @@ void lower_unit_into_function(const pcdata& unit, bool is_first, Module& module)
     function->set_entry_block(entry);
 
     LoweringContext ctx;
-    ctx.module = &module;
     ctx.function = function;
     ctx.current_block = entry;
-    ctx.next_block_id = 0;
+    ctx.mark_defined(function->inputs());
+    ctx.mark_defined(function->outputs());
 
-    ast_ptr body = unit.is_mscript() ? script_body_from_unit(unit) : function_body_from_unit(unit);
+    const ast_ptr body = unit.is_mscript() ? script_body_from_unit(unit) : function_body_from_unit(unit);
     lower_stmt(body, ctx);
     if (ctx.current_block != nullptr && ctx.current_block->terminal() == nullptr) {
-        ctx.current_block->set_terminal(
-            function->create_instruction<ReturnInstruction>(source_span_from(body)));
+        ctx.set_terminal<ReturnNode>(function->outputs(), std::nullopt);
     }
 }
 
 }  // namespace
 
-Module lower_parsed_units_to_ir(const std::vector<std::shared_ptr<pcdata>>& parsed_units) {
+Module lower_parsed_units_to_ir(
+    const std::vector<std::shared_ptr<pcdata>>& parsed_units) {
     if (parsed_units.empty() || parsed_units.front() == nullptr) {
-        throw std::runtime_error("No parsed units available for IR lowering.");
+        throw std::runtime_error("non-SSA lower 没有可用的解析单元。");
     }
 
     const pcdata& first_unit = *parsed_units.front();
-    Module module(function_name_from_unit(first_unit), first_unit.filename,
-                  module_type_from_units(parsed_units));
+    Module module(module_name_from_unit(first_unit), first_unit.filename,
+                        module_type_from_units(parsed_units));
 
-    bool first_function = true;
     for (const std::shared_ptr<pcdata>& unit : parsed_units) {
         if (unit == nullptr || !unit->ast) {
             continue;
         }
-        lower_unit_into_function(*unit, first_function, module);
-        first_function = false;
+        lower_unit_into_function(*unit, module);
     }
 
     if (module.entry_function() == nullptr) {
-        throw std::runtime_error("Failed to lower any function into IR.");
+        throw std::runtime_error("non-SSA lower 失败：没有成功生成任何函数。");
     }
+
     return module;
 }
 

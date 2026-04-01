@@ -37,6 +37,7 @@ public:
      * @brief 运行时符号表类型。
      */
     using SymbolTable = std::unordered_map<std::string, Binding>;
+    using ValueTable = std::unordered_map<ValueId, Value>;
 
     /**
      * @brief 构造一个执行帧。
@@ -79,6 +80,11 @@ public:
     const SymbolTable& symbols() const;
 
     /**
+     * @brief 返回只读 value 槽表。
+     */
+    const ValueTable& values() const;
+
+    /**
      * @brief 返回当前帧已经收集好的输出值列表。
      */
     const std::vector<Value>& outputs() const;
@@ -94,11 +100,31 @@ public:
     void store(const std::string& name, Value value);
 
     /**
+     * @brief 向指定 ValueId 写入一个运行时值。
+     */
+    void store_value(ValueId id, Value value);
+
+    /**
+     * @brief 将一组运行时值写入对应指令的 value 定义槽位。
+     */
+    void store_instruction_values(const Instruction& instruction, const std::vector<Value>& values);
+
+    /**
      * @brief 读取一个名字对应的值。
      *
      * 若名字不存在或尚未初始化，会抛出异常。
      */
     Value load(const std::string& name) const;
+
+    /**
+     * @brief 读取一个 ValueId 对应的运行时值。
+     */
+    Value load_value(ValueId id) const;
+
+    /**
+     * @brief 读取一个 ValueRef 对应的运行时值。
+     */
+    Value load_value(const ValueRef& ref) const;
 
     /**
      * @brief 判断符号表中是否存在指定名字。
@@ -109,6 +135,11 @@ public:
      * @brief 判断指定名字是否已经初始化。
      */
     bool is_initialized(const std::string& name) const;
+
+    /**
+     * @brief 判断指定 ValueId 是否已写入。
+     */
+    bool has_value(ValueId id) const;
 
     /**
      * @brief 更新 return 标记。
@@ -127,6 +158,7 @@ private:
     int nargout_ = 0;
     bool returned_ = false;
     SymbolTable symbols_;
+    ValueTable values_;
     std::vector<Value> outputs_;
 };
 

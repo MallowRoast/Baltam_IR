@@ -1,177 +1,146 @@
 # Baltam_IR
 
-`Baltam_IR` 目前处于 IR 设计和原型阶段。
+`Baltam_IR` 当前处于 IR 前端和中端基础设施搭建阶段。
 
-当前仓库已经具备：
+当前仓库的实际主线是：
 
-- 读取并打印 `test/simple_demo.m` 对应的最小 IR
-- 基础 IR 对象模型：
+`M 源码 -> AST -> non-SSA IR -> print`
+
+目前已经落地的部分：
+
+- 统一的 IR 头文件：[src/ir/ir.h](/home/zj/Desktop/Baltam_IR/src/ir/ir.h)
+- 显式 CFG 容器：
   - `Module`
   - `Function`
   - `BasicBlock`
-  - `Instruction`
-- 一组最小指令节点：
-  - `NameInstruction`
-  - `NumberInstruction`
-  - `BinOpInstruction`
-  - `AssignInstruction`
-  - `CallInstruction`
-  - `IfInstruction`
-  - `JumpInstruction`
-  - `ReturnInstruction`
+- non-SSA 节点体系：
+  - `IRNode`
+  - `NonSSANode`
+  - `SSANode` 占位基类
+  - `NumberNode`
+  - `TextNode`
+  - `AssignNode`
+  - `UnaryOpNode`
+  - `BinOpNode`
+  - `CallNode`
+  - `CondJumpNode`
+  - `JumpNode`
+  - `ReturnNode`
+- AST lowering：
+  - [src/lowering/lowering.cpp](/home/zj/Desktop/Baltam_IR/src/lowering/lowering.cpp)
+- LLVM 风格文本打印：
+  - [src/ir/ir_printer.cpp](/home/zj/Desktop/Baltam_IR/src/ir/ir_printer.cpp)
+- 最小 verifier：
+  - [src/analysis/verifier.cpp](/home/zj/Desktop/Baltam_IR/src/analysis/verifier.cpp)
+- AnalysisManager / PassManager 骨架：
+  - [src/analysis/analysis_manager.h](/home/zj/Desktop/Baltam_IR/src/analysis/analysis_manager.h)
+  - [src/optimizer/pass_manager.h](/home/zj/Desktop/Baltam_IR/src/optimizer/pass_manager.h)
 
-## 下一步：实现 IR 解释器
+当前没有启用的主线：
 
-下一步建议直接实现一版最小 IR 解释器，并复用现有运行时能力。
+- 旧 hybrid/value-based IR
+- 旧 IR 解释器
+- 任何正式优化 pass
+- SSA 构建
+- LLVM IR lowering
 
-### 目标
+## 当前 IR
 
-目标不是重新设计运行时，而是让当前 IR 可以直接执行。
+当前 IR 是显式 CFG 的 non-SSA IR。
 
-执行时应尽量复用已有基础设施：
+它的特点是：
 
-- 运行时值统一使用 `std::shared_ptr<ba_obj>`
-- 运算符如 `+`、`*`、`>` 复用已有实现
-- 内建函数如 `sin` 复用已有实现
+- 值以 `NamedValue` 传递
+- 一个源码名字可以被多次定义
+- `BasicBlock` 里是线性节点序列
+- `terminal` 只允许：
+  - `CondJumpNode`
+  - `JumpNode`
+  - `ReturnNode`
+- 节点保留 `SourceLocation`
 
-### 建议的最小组件
+这层 IR 的定位是：
 
-#### 1. Frame
+- 承接 AST lowering
+- 作为后续 analysis 和 SSA 构建的输入
+- 作为调试和验证的第一层中间表示
 
-每次执行一个 `Function`，创建一个执行帧。
+## 构建
 
-第一版可以直接使用名字表：
-
-```cpp
-std::unordered_map<std::string, std::shared_ptr<ba_obj>> locals;
+```bash
+cmake -S . -B build
+cmake --build build
 ```
 
-理由：
+## 运行
 
-- `NameInstruction` 通过变量名读取值
-- `AssignInstruction` 通过变量名写值
-- `CallInstruction` 的 `out_args` 也可以先通过名字绑定结果
+当前 `main` 只做一件事：解析 `.m` 文件并打印 non-SSA IR。
 
-#### 2. 表达式求值
-
-准备一个统一入口：
-
-```cpp
-std::shared_ptr<ba_obj> eval_expr(Instruction* inst, Frame& frame);
+```bash
+./build/main simple_demo
+./build/main test1
+./build/main test1_2
+./build/main test1_3
+./build/main test1_4
+./build/main test1_5
 ```
 
-第一版重点支持：
+如果需要运行时库路径，当前常用方式是：
 
-- `NameInstruction`
-- `NumberInstruction`
-- `BinOpInstruction`
-- `CallInstruction`
-
-#### 3. 语句执行
-
-准备一个语句执行入口：
-
-```cpp
-void exec_inst(Instruction* inst, Frame& frame);
+```bash
+LD_LIBRARY_PATH="$PWD/deps/core/lib:/opt/Baltamatica/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ./build/main simple_demo
 ```
 
-第一版重点支持：
+## 当前支持的 lowering 范围
 
-- `AssignInstruction`
-- `CallInstruction`
+当前 non-SSA lowering 已覆盖一批基础语法：
 
-#### 4. Terminal 调度
+- 赋值
+- 一元和二元表达式
+- 直接调用和间接调用
+- `if / elseif / else`
+- `switch / case / otherwise`
+- `for`
+- `while`
+- `break`
+- `continue`
+- 匿名函数
+- 横向/纵向列表
+- 元胞字面量
 
-准备一个终结指令执行入口：
+当前 `for` 语义通过运行时 helper 表达：
 
-```cpp
-BasicBlock* exec_terminal(Instruction* term, Frame& frame);
-```
+- `foreach_init`
+- `foreach_iterate`
 
-第一版重点支持：
+## 当前仓库布局
 
-- `IfInstruction`
-- `JumpInstruction`
-- `ReturnInstruction`
+- [src/ir/ir.h](/home/zj/Desktop/Baltam_IR/src/ir/ir.h)
+  当前唯一正式 IR 定义
+- [src/ir/ir.cpp](/home/zj/Desktop/Baltam_IR/src/ir/ir.cpp)
+  IR 实现
+- [src/ir/ir_printer.cpp](/home/zj/Desktop/Baltam_IR/src/ir/ir_printer.cpp)
+  IR 文本打印
+- [src/lowering/lowering.cpp](/home/zj/Desktop/Baltam_IR/src/lowering/lowering.cpp)
+  AST 到 non-SSA IR 的 lowering
+- [src/analysis/verifier.cpp](/home/zj/Desktop/Baltam_IR/src/analysis/verifier.cpp)
+  当前 verifier
+- [src/analysis/analysis_manager.h](/home/zj/Desktop/Baltam_IR/src/analysis/analysis_manager.h)
+  analysis 缓存框架
+- [src/optimizer/pass_manager.h](/home/zj/Desktop/Baltam_IR/src/optimizer/pass_manager.h)
+  pass manager 骨架
 
-#### 5. Block 调度循环
+## 下一步
 
-从 `Function::entry_block()` 开始：
+当前最合理的路线是：
 
-1. 顺序执行普通指令
-2. 执行 `terminal`
-3. 跳转到下一个 block 或返回
-
-### 运行时桥接
-
-为了让 IR 层保持简单，建议准备两个桥接入口：
-
-#### 二元运算桥接
-
-```cpp
-std::shared_ptr<ba_obj> eval_binop(BinOpInstruction::Type op,
-                                   std::shared_ptr<ba_obj> lhs,
-                                   std::shared_ptr<ba_obj> rhs);
-```
-
-#### 函数调用桥接
-
-```cpp
-std::vector<std::shared_ptr<ba_obj>> eval_call(
-    const std::string& name,
-    const std::vector<std::shared_ptr<ba_obj>>& in_args);
-```
-
-### 为什么值得做
-
-第一版 IR 解释器在“执行动作”上会和 AST 解释器相似，但它的载体已经不同：
-
-- AST 解释器执行的是语法树
-- IR 解释器执行的是显式 `BasicBlock + terminal + CFG`
-
-这会为后续能力打基础：
-
-- profile
-- 热点识别
-- block 级优化
-- JIT
-- deopt / fallback
-
-### 推荐实现顺序
-
-1. 定义 `Frame`
-2. 实现 `eval_expr`
-3. 实现 `exec_inst`
-4. 实现 `exec_terminal`
-5. 跑通 `test/simple_demo.m`
-
-## TODO
-
-### 近期重点
-
-1. 设计最小 `SymbolTable`
-   - 第一版先按名字管理变量和函数符号
-   - 先支持局部变量查找，再逐步接入 builtin/函数名查找
-2. 设计最小 `Frame`
-   - 绑定当前 `Function`
-   - 保存局部变量、输入参数、返回值和执行上下文
-   - 作为一次函数调用的运行时栈帧
-3. 实现最小 IR 解释器骨架
-   - 顺序执行 `BasicBlock` 内的普通指令
-   - 调度 `terminal`
-   - 能跑通当前 `simple_demo.m`
-4. 逐步补齐 IR 节点的执行支持
-   - `NameInstruction`
-   - `NumberInstruction`
-   - `BinOpInstruction`
-   - `AssignInstruction`
-   - `CallInstruction`
-   - `IfInstruction`
-   - `JumpInstruction`
-   - `ReturnInstruction`
-
-### 运行时对接
-
-1. 复用 `ba_obj` 作为统一运行时值类型
-2. 对接 `/opt/Baltamatica/lib` 下的运行时库
-3. 建立二元运算和函数调用的桥接层
+1. 稳定 non-SSA IR 和 verifier
+2. 增加 5 个基础 analysis：
+   - CFGAnalysis
+   - DominatorTree
+   - DominanceFrontier
+   - Liveness
+   - DefUse
+3. 从 non-SSA IR 构建 untyped SSA IR
+4. 在 SSA IR 上接优化和 profile
+5. 再考虑 typed SSA IR 和 LLVM IR lowering

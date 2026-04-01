@@ -3,103 +3,99 @@
 //
 
 #include <cstdlib>
+#include <algorithm>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "bt_ast_interface.h"
-#include "interpreter/interpreter.h"
-#include "ir/ir.h"
+#include "ir/ir_printer.h"
 #include "lowering/lowering.h"
 
 using namespace baltam;
 
 namespace {
 
-constexpr const char* kScriptRelativePath = "/test/simple_demo.m";
 
-void print_parsed_ast(const std::shared_ptr<pcdata>& parsed_unit, std::size_t index) {
-    if (parsed_unit == nullptr) {
-        std::cout << "pcdata[" << index << "] is null" << std::endl;
-        return;
-    }
-
-    std::cout << "pcdata[" << index << "]" << std::endl;
-    std::cout << "  filename: " << parsed_unit->filename << std::endl;
-    std::cout << "  is_mscript: " << std::boolalpha << parsed_unit->is_mscript() << std::endl;
-    std::cout << "  is_mfun: " << std::boolalpha << parsed_unit->is_mfun() << std::endl;
-
-    if (parsed_unit->ast == nullptr) {
-        std::cout << "  ast: null" << std::endl;
-        return;
-    }
-
-    std::cout << "  ast2str:" << std::endl;
-    std::cout << ast2str(parsed_unit->ast) << std::endl;
-
-    std::cout << "  ast tree:" << std::endl;
-    printAst(parsed_unit->ast, nullptr, false);
-    std::cout << std::endl;
+std::string source_path_from_relative(std::string_view relative_path) {
+    return std::string(BALTAM_IR_SOURCE_DIR) + std::string(relative_path);
 }
 
-void print_frame_symbols(const Frame& frame) {
-    std::cout << "Interpreter frame:" << std::endl;
-    for (const auto& [name, binding] : frame.symbols()) {
-        std::cout << "  " << name << " = ";
-        if (!binding.initialized) {
-            std::cout << "<uninitialized>";
-        } else {
-            std::cout << value_text(binding.value);
-        }
-        std::cout << std::endl;
+std::string resolve_script_argument(const std::string& arg) {
+    if (arg == "simple_demo" || arg == "simple_demo.m") {
+        return source_path_from_relative("/test/simple_demo.m");
     }
+    else if (arg == "test1" || arg == "test1.m") {
+        return source_path_from_relative("/test/test1/test1.m");
+    }
+    else if (arg == "test1_2" || arg == "test1_2.m") {
+        return source_path_from_relative("/test/test1_2/test1_2.m");
+    }
+    else if (arg == "test1_3" || arg == "test1_3.m") {
+        return source_path_from_relative("/test/test1_3/test1_3.m");
+    }
+    else if (arg == "test1_4" || arg == "test1_4.m") {
+        return source_path_from_relative("/test/test1_4/test1_4.m");
+    }
+    else if (arg == "test1_5" || arg == "test1_5.m") {
+        return source_path_from_relative("/test/test1_5/test1_5.m");
+    }
+    return arg;
 }
 
-}  // namespace
-
-int main() {
-    const std::string script_path = std::string(BALTAM_IR_SOURCE_DIR) + kScriptRelativePath;
-
+int run_m_file(const std::string& script_path) {
     int exit_code = 0;
-    const int init_ret = bt_ast_interface::initialize();
-    if (init_ret != 0) {
-        std::cerr << "bt_ast_interface::initialize failed, code = " << init_ret << std::endl;
-        return 1;
-    }
-
     std::string msg;
     const auto parsed_units = bt_ast_interface::parse_mfile(script_path, msg);
 
     if (!msg.empty()) {
-        std::cout << "parser message: " << msg << std::endl;
+        std::cout << "解析器消息: " << msg << std::endl;
     }
 
     if (parsed_units.empty()) {
-        std::cerr << "No AST generated for file: " << script_path << std::endl;
+        std::cerr << "文件未生成 AST: " << script_path << std::endl;
+        return 1;
+    }
+
+    try {
+        const Module non_ssa_module = lower_parsed_units_to_ir(parsed_units);
+        print_ir(std::cout, non_ssa_module);
+        std::cout << std::endl;
+    } catch (const std::exception& ex) {
+        std::cerr << "文件的 non-SSA IR lower 失败: " << script_path << "，原因: "
+                  << ex.what()
+                  << std::endl;
         exit_code = 1;
-    } else {
-        std::cout << "Parsed file: " << script_path << std::endl;
-        for (std::size_t i = 0; i < parsed_units.size(); ++i) {
-            print_parsed_ast(parsed_units[i], i);
-        }
+    }
 
-        try {
-            const Module module = lower_parsed_units_to_ir(parsed_units);
-            std::cout << "Lowered IR for " << script_path << ":" << std::endl;
-            print_ir(std::cout, module);
-            std::cout << std::endl;
+    return exit_code;
+}
 
-            if (module.entry_function() != nullptr) {
-                const Frame frame = execute_function(*module.entry_function());
-                print_frame_symbols(frame);
-                std::cout << std::endl;
-            }
-        } catch (const std::exception& ex) {
-            std::cerr << "IR lowering/interpreter failed: " << ex.what() << std::endl;
-            exit_code = 1;
+}  // namespace
+
+int main(int argc, char** argv) {
+    int exit_code = 0;
+    const int init_ret = bt_ast_interface::initialize();
+    if (init_ret != 0) {
+        std::cerr << "bt_ast_interface::initialize 失败，返回码 = " << init_ret << std::endl;
+        return 1;
+    }
+
+    std::vector<std::string> script_paths;
+    script_paths.reserve(static_cast<std::size_t>(std::max(argc - 1, 0)));
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        script_paths.push_back(resolve_script_argument(arg));
+    }
+
+    for (std::size_t i = 0; i < script_paths.size(); ++i) {
+        if (i != 0) {
+            std::cout << std::string(72, '=') << std::endl;
         }
+        exit_code = std::max(exit_code, run_m_file(script_paths[i]));
     }
 
     std::cout << std::flush;

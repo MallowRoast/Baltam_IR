@@ -1,0 +1,30 @@
+name: M File Suite
+
+on:
+  push:
+    branches:
+      - dev
+      - main
+  pull_request:
+
+jobs:
+  parse-and-execute-mfiles:
+    name: Parse and Execute test/*.m
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: cmake -S . -B build
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Parse and execute all test m-files
+        run: ./ci/run_all_mfiles.sh
