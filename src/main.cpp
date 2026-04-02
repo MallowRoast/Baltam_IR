@@ -11,6 +11,7 @@
 #include <string_view>
 #include <vector>
 
+#include "analysis/verifier.h"
 #include "bt_ast_interface.h"
 #include "ir/ir_printer.h"
 #include "lowering/lowering.h"
@@ -62,10 +63,11 @@ int run_m_file(const std::string& script_path) {
 
     try {
         const Module non_ssa_module = lower_parsed_units_to_ir(parsed_units);
+        analysis::verify_module_or_throw(non_ssa_module);
         print_ir(std::cout, non_ssa_module);
         std::cout << std::endl;
     } catch (const std::exception& ex) {
-        std::cerr << "文件的 non-SSA IR lower 失败: " << script_path << "，原因: "
+        std::cerr << "文件的 non-SSA IR 处理失败: " << script_path << "，原因: "
                   << ex.what()
                   << std::endl;
         exit_code = 1;

@@ -20,13 +20,9 @@
 
 当前 CLI 主线是：
 
-`parse -> lower(non-SSA) -> print`
-
-当前 verifier 已具备独立入口，但还没有默认接进 `main.cpp`。
-
-后续更合理的主线应是：
-
 `parse -> lower(non-SSA) -> verify -> print`
+
+当前 verifier 已默认接进 `main.cpp`，lower 成功后会先做结构校验，再打印 IR。
 
 ## 当前 verifier 覆盖的检查
 
