@@ -2,11 +2,16 @@ cmake_minimum_required(VERSION 3.11)
 
 project(TEST_KERNEL)
 
+option(BUILD_TEST "Build unit tests." ON)
+
 # cmake_policy(SET CMP0167 OLD)
 
 add_executable(main
     src/main.cpp
     src/analysis/analysis_manager.cpp
+    src/analysis/cfg_analysis.cpp
+    src/analysis/dominance_frontier.cpp
+    src/analysis/dominator_tree.cpp
     src/analysis/verifier.cpp
     src/ir/ir.cpp
     src/ir/ir_printer.cpp
@@ -42,3 +47,8 @@ target_link_options(main PRIVATE
 set_target_properties(main PROPERTIES
     BUILD_RPATH "/home/zj/Desktop/Baltam_IR/deps/core/lib;/opt/Baltamatica/lib"
 )
+
+if(BUILD_TEST)
+    enable_testing()
+    add_subdirectory(test)
+endif()

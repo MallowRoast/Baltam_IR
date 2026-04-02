@@ -8,6 +8,7 @@ namespace baltam {
 namespace analysis {
 namespace {
 
+// 统一把枚举值格式化成人类可读文本，避免各个报错分支重复拼接。
 const char* node_type_name(NonSSANode::Type type) {
     switch (type) {
         case NonSSANode::Number:
@@ -33,6 +34,19 @@ const char* node_type_name(NonSSANode::Type type) {
     return "Unknown";
 }
 
+const char* stage_name(IRNode::Stage stage) {
+    switch (stage) {
+        case IRNode::NonSSA:
+            return "NonSSA";
+        case IRNode::UntypedSSA:
+            return "UntypedSSA";
+        case IRNode::TypedSSA:
+            return "TypedSSA";
+    }
+
+    return "Unknown";
+}
+
 bool is_terminator_type(NonSSANode::Type type) {
     return type == NonSSANode::CondJump || type == NonSSANode::Jump || type == NonSSANode::Return;
 }
@@ -45,6 +59,8 @@ void add_error(VerificationResult& result, std::string message) {
     result.add_error(std::move(message));
 }
 
+// CFG 的 predecessor / successor 必须形成双向一致的边关系，并且边目标
+// 必须属于当前函数；这是后续所有 analysis 的基本前提。
 void verify_cfg_edges(VerificationResult& result, const Function& function,
                       const std::unordered_set<const BasicBlock*>& known_blocks) {
     for (const auto& block : function.blocks()) {
@@ -86,9 +102,29 @@ void verify_cfg_edges(VerificationResult& result, const Function& function,
     }
 }
 
+void verify_node_stage(VerificationResult& result, const Function& function, const BasicBlock& block,
+                       const NonSSANode& node, std::optional<IRNode::Stage>& function_stage,
+                       const char* position) {
+    const IRNode::Stage actual_stage = node.stage();
+    if (!function_stage.has_value()) {
+        function_stage = actual_stage;
+        return;
+    }
+
+    if (actual_stage != *function_stage) {
+        add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
+                              "` 中 " + position + " 节点 `" + node_type_name(node.type()) +
+                              "` 的 stage 不一致：期望 `" + stage_name(*function_stage) +
+                              "`，实际为 `" + stage_name(actual_stage) + "`。");
+    }
+}
+
+// block 级检查负责兜住局部结构不变量：parent、正文/terminator 分区、
+// terminator 合法性，以及 terminator 与 CFG 元数据的一致性。
 void verify_block(VerificationResult& result, const Function& function, const BasicBlock& block,
                   const std::unordered_set<const BasicBlock*>& known_blocks,
-                  std::unordered_set<const NonSSANode*>& seen_nodes) {
+                  std::unordered_set<const NonSSANode*>& seen_nodes,
+                  std::optional<IRNode::Stage>& function_stage) {
     if (block.parent() != &function) {
         add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
                               "` 没有正确回指到所属函数。");
@@ -104,6 +140,7 @@ void verify_block(VerificationResult& result, const Function& function, const Ba
             add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
                                   "` 中存在 parent 不一致的节点。");
         }
+        verify_node_stage(result, function, block, *node, function_stage, "正文");
         if (!seen_nodes.insert(node).second) {
             add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
                                   "` 重复引用了同一条节点。");
@@ -125,6 +162,7 @@ void verify_block(VerificationResult& result, const Function& function, const Ba
         add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
                               "` 的终结节点 parent 不一致。");
     }
+    verify_node_stage(result, function, block, *terminal, function_stage, "终结");
     if (!seen_nodes.insert(terminal).second) {
         add_error(result, "函数 `" + function.name() + "` 的基本块 `" + block.name() +
                               "` 重复引用了终结节点。");
@@ -217,6 +255,8 @@ VerificationResult verify_function(const Function& function) {
         add_error(result, "函数 `" + function.name() + "` 缺少入口基本块。");
     }
 
+    // 先冻结“本函数有哪些 block 是合法成员”，后续入口归属、CFG 边归属、
+    // terminator 目标归属都基于这张集合来判断。
     std::unordered_set<const BasicBlock*> known_blocks;
     for (const auto& block : function.blocks()) {
         if (block == nullptr) {
@@ -233,12 +273,22 @@ VerificationResult verify_function(const Function& function) {
 
     verify_cfg_edges(result, function, known_blocks);
 
+    // `seen_nodes` 用来防止同一条 IR 节点被多个位置复用。
     std::unordered_set<const NonSSANode*> seen_nodes;
+    // 当前 verifier 面向 non-SSA IR；这里额外要求同一个函数中的所有节点
+    // stage 保持一致，避免混入未来 SSA 阶段的节点。
+    std::optional<IRNode::Stage> function_stage;
     for (const auto& block : function.blocks()) {
         if (block == nullptr) {
             continue;
         }
-        verify_block(result, function, *block, known_blocks, seen_nodes);
+        verify_block(result, function, *block, known_blocks, seen_nodes, function_stage);
+    }
+
+    if (function_stage.has_value() && *function_stage != IRNode::NonSSA) {
+        add_error(result, "函数 `" + function.name() + "` 的所有节点 stage 为 `" +
+                              std::string(stage_name(*function_stage)) +
+                              "`，当前 verifier 只接受 `NonSSA`。");
     }
 
     return result;
@@ -247,6 +297,8 @@ VerificationResult verify_function(const Function& function) {
 VerificationResult verify_module(const Module& module) {
     VerificationResult result;
 
+    // 模块级只关心“函数容器是否自洽”和“入口函数是否真属于本模块”，
+    // 具体函数内部结构仍下沉到 verify_function。
     std::unordered_set<const Function*> known_functions;
     for (const auto& function : module.functions()) {
         if (function == nullptr) {
