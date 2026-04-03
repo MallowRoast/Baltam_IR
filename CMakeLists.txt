@@ -10,8 +10,10 @@ add_executable(main
     src/main.cpp
     src/analysis/analysis_manager.cpp
     src/analysis/cfg_analysis.cpp
+    src/analysis/def_use.cpp
     src/analysis/dominance_frontier.cpp
     src/analysis/dominator_tree.cpp
+    src/analysis/liveness.cpp
     src/analysis/verifier.cpp
     src/ir/ir.cpp
     src/ir/ir_printer.cpp
