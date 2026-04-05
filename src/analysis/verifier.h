@@ -31,12 +31,14 @@ struct VerificationResult {
 };
 
 /**
- * @brief 验证单个 non-SSA 函数 IR 的结构合法性。
+ * @brief 验证单个函数 IR 的结构合法性。
+ *
+ * 当前支持 `NonSSA` 与 `UntypedSSA` 两个阶段。
  */
 VerificationResult verify_function(const Function& function);
 
 /**
- * @brief 验证整个 non-SSA 模块 IR 的结构合法性。
+ * @brief 验证整个模块 IR 的结构合法性。
  */
 VerificationResult verify_module(const Module& module);
 

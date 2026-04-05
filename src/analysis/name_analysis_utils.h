@@ -1,22 +1,32 @@
 #ifndef BALTAM_IR_ANALYSIS_NAME_ANALYSIS_UTILS_H
 #define BALTAM_IR_ANALYSIS_NAME_ANALYSIS_UTILS_H
 
+#include <stdexcept>
+
 #include "ir/ir.h"
 
 namespace baltam {
 namespace analysis {
 namespace detail {
 
+inline const NonSSANode& require_non_ssa_node(const IRNode& node) {
+    const auto* non_ssa = dynamic_cast<const NonSSANode*>(&node);
+    if (non_ssa == nullptr) {
+        throw std::runtime_error("当前名字级 analysis 只支持 `NonSSANode`。");
+    }
+    return *non_ssa;
+}
+
 template <typename Callback>
 void for_each_block_node(const BasicBlock& block, Callback&& callback) {
-    for (NonSSANode* node : block.instructions()) {
+    for (IRNode* node : block.instructions()) {
         if (node != nullptr) {
-            callback(*node);
+            callback(require_non_ssa_node(*node));
         }
     }
 
     if (block.terminal() != nullptr) {
-        callback(*block.terminal());
+        callback(require_non_ssa_node(*block.terminal()));
     }
 }
 

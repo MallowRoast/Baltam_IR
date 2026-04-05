@@ -72,3 +72,28 @@ target_include_directories(def_use_test PRIVATE
 )
 
 add_test(NAME def_use_test COMMAND def_use_test)
+
+add_executable(verifier_test
+    verifier_test.cpp
+    ../src/analysis/verifier.cpp
+    ../src/ir/ir.cpp
+)
+
+target_include_directories(verifier_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME verifier_test COMMAND verifier_test)
+
+add_executable(ir_printer_test
+    ir_printer_test.cpp
+    ../src/analysis/verifier.cpp
+    ../src/ir/ir.cpp
+    ../src/ir/ir_printer.cpp
+)
+
+target_include_directories(ir_printer_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME ir_printer_test COMMAND ir_printer_test)
