@@ -2,9 +2,9 @@
 
 ## 当前背景
 
-当前仓库的正式 IR 主线是：
+当前仓库的实际 IR 主线已经是：
 
-`AST -> non-SSA IR -> verify -> print`
+`AST -> non-SSA IR -> verify -> analyses -> untyped SSA IR -> verify -> print / execute`
 
 当前已经落地的相关基础设施包括：
 
@@ -12,6 +12,8 @@
 - CFGAnalysis 定义在 [src/analysis/cfg_analysis.h](/home/zj/Desktop/Baltam_IR/src/analysis/cfg_analysis.h)
 - DefUse 定义在 [src/analysis/def_use.h](/home/zj/Desktop/Baltam_IR/src/analysis/def_use.h)
 - 名字级 def/use 提取辅助定义在 [src/analysis/name_analysis_utils.h](/home/zj/Desktop/Baltam_IR/src/analysis/name_analysis_utils.h)
+
+本文描述的 DefUse analysis 仍然运行在 `NonSSA` 上；当前 SSA 构建器会消费它的结果。
 
 也就是说，当前 DefUse analysis 不是在 SSA use-def 链上工作，而是建立在：
 
@@ -79,7 +81,7 @@ z = x + y
 这层信息对于后续：
 
 - iterated dominance frontier
-- `BuildPrunedSSA`
+- `construct_untyped_ssa_module(...)`
 
 都很直接，因为它们更关心：
 
@@ -105,7 +107,7 @@ z = x + y
 DefUse 在当前仓库里最直接的用途是：
 
 - 统计某个名字的定义点集合
-- 作为后续 `BuildPrunedSSA` 的输入
+- 作为当前 SSA 构建器的输入
 
 例如，若名字 `x` 在块：
 
@@ -420,7 +422,7 @@ public:
 
 对于当前仓库阶段，DefUse 的首要目标是：
 
-- 给 `BuildPrunedSSA` 提供定义点集合和使用点索引
+- 给 `construct_untyped_ssa_module(...)` 提供定义点集合和使用点索引
 
 这并不要求它一开始就支持：
 
@@ -516,7 +518,7 @@ public:
 
 当前 DefUse 是后续这些步骤的直接前置之一：
 
-- `BuildPrunedSSA`
+- `construct_untyped_ssa_module(...)`
 - iterated dominance frontier 的名字级驱动
 - 简单 DCE
 - 简单复制传播
@@ -543,6 +545,6 @@ public:
 - 分析域：
   - `NamedValue.name`
 - 作用：
-  - 为后续 `BuildPrunedSSA` 和名字级优化提供定义/使用索引
+  - 为当前 SSA 构建器和后续名字级优化提供定义/使用索引
 
 它是从块级结构 analysis 过渡到名字级 SSA 构建时的另一块核心基础设施。

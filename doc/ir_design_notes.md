@@ -7,7 +7,12 @@
 - [src/ir/ir.h](/home/zj/Desktop/Baltam_IR/src/ir/ir.h)
 - [src/ir/ir.cpp](/home/zj/Desktop/Baltam_IR/src/ir/ir.cpp)
 
-这套 IR 当前是 non-SSA IR，不再是旧的 hybrid/value-based IR。
+这套 IR 已经同时承载：
+
+- `NonSSA`
+- `UntypedSSA`
+
+旧 hybrid/value-based IR 已不再参与当前主线。
 
 ## IR 分层
 
@@ -16,46 +21,43 @@
 - `IRNode`
   - 所有阶段共享的公共基类
 - `NonSSANode`
-  - 当前实际使用的节点基类
+  - non-SSA 节点基类
 - `SSANode`
-  - 预留给后续 `untyped SSA` / `typed SSA`
+  - SSA 节点公共基类
+- `UntypedSSANode`
+  - 当前已落地的 SSA 节点基类
 
-`IRNode` 当前保留的公共信息只有：
+`IRNode` 当前保留的公共信息是：
 
 - `stage`
 - `parent`
 - `source_location`
 
-这里的 `stage` 目前可能取值：
+当前 `stage` 可能取值：
 
 - `NonSSA`
 - `UntypedSSA`
 - `TypedSSA`
 
-但当前实际只使用 `NonSSA`。
+其中当前实际启用的是前两种。
 
-## NamedValue
+## 当前两个已启用的 stage
 
-当前 non-SSA IR 用 `NamedValue` 表示具名值。
+### 1. `NonSSA`
 
-`NamedValue` 持有：
+当前 `NonSSA` 使用：
 
-- `name`
-- `type`
+- `NamedValue`
 
-其中 `type` 当前只有两类：
+来表示源码变量和 lowering 临时量。
 
-- `UserVariable`
-- `Temporary`
+它的特点是：
 
-它的定位是：
+- 同一个名字可以多次定义
+- 节点是线性语句式的
+- 是 AST lowering 的直接输出
 
-- 在 non-SSA IR 中表达源程序变量和 lowering 临时量
-- 为后续 analysis 和 SSA rename 保留最小名字元数据
-
-## 节点集合
-
-当前 non-SSA IR 节点集合是：
+当前 non-SSA 节点集合包括：
 
 - `NumberNode`
 - `TextNode`
@@ -67,40 +69,59 @@
 - `JumpNode`
 - `ReturnNode`
 
-这里有一个重要约束：
+### 2. `UntypedSSA`
 
-- 当前 IR 是线性语句 IR
-- 不是表达式树 IR
+当前 `UntypedSSA` 使用：
 
-例如：
+- `ValueId`
+- `ValueRef`
 
-`a = x + y`
+来表示显式值流。
 
-在 IR 中应表示为一条 `BinOpNode(result=a, lhs=x, rhs=y)`，而不是在 `AssignNode` 里再嵌一个 rhs 子节点。
+它的特点是：
+
+- 每个 SSA 结果有独立定义点
+- `phi` 独立放在块头
+- 是当前统一的 SSA 打印和执行对象
+
+当前 untyped SSA 节点集合包括：
+
+- `SSANumberNode`
+- `SSATextNode`
+- `SSAUndefNode`
+- `SSAPhiNode`
+- `SSACopyNode`
+- `SSAUnaryOpNode`
+- `SSABinOpNode`
+- `SSACallNode`
+- `SSACondJumpNode`
+- `SSAJumpNode`
+- `SSAReturnNode`
 
 ## CFG 容器
 
-当前 CFG 容器仍然是：
+当前容器层仍然统一为：
 
 - `Module`
 - `Function`
 - `BasicBlock`
 
-这三层是后续所有阶段都应尽量复用的结构层。
+这三层在 `NonSSA` 和 `UntypedSSA` 之间直接复用。
 
 ### `BasicBlock`
 
 当前 `BasicBlock` 持有：
 
-- 线性 `instructions`
-- 一个 `terminal`
+- `phi_nodes`
+- `instructions`
+- `terminal`
 - `predecessors`
 - `successors`
 
 约束：
 
-- `terminal` 必须在块尾
-- 正文里不能混入 terminator 节点
+- `phi` 只能出现在 `phi_nodes()`
+- terminator 只能出现在 `terminal()`
 - CFG 边必须双向一致
 
 ### `Function`
@@ -109,8 +130,9 @@
 
 - 名字
 - 类型
-- 输入列表
-- 输出列表
+- 输入和输出签名
+- `stage`
+- SSA 参数槽位与 value table
 - 基本块存储
 - 节点存储
 - 入口块
@@ -127,49 +149,53 @@
 
 ## 当前打印语义
 
-当前 IR 打印器是：
+当前打印器位于：
 
 - [src/ir/ir_printer.cpp](/home/zj/Desktop/Baltam_IR/src/ir/ir_printer.cpp)
 
-打印风格接近 LLVM IR，但打印对象仍然是 non-SSA IR。
+打印风格仍然接近 LLVM IR，但现在已经同时支持：
 
-当前打印会输出：
+- non-SSA IR
+- untyped SSA IR
 
-- module 头
-- function 头
+当前会输出：
+
+- module / function 头
 - block label
 - predecessor / successor 注释
-- 对齐的源码注释
+- 对齐后的源码注释
+- SSA 值名和 `phi` 信息
 
-## 当前 lowering 目标
+## 当前阶段边界
 
-当前 lowering 的职责很明确：
+当前职责划分已经明确：
 
-- AST lower 到 non-SSA IR
-- 构建正确 CFG
-- 不生成 SSA
-- 不生成 `phi`
-- 不引入旧 hybrid/value-based 语义
+- [src/lowering/lowering.cpp](/home/zj/Desktop/Baltam_IR/src/lowering/lowering.cpp)
+  - 只负责 `AST -> NonSSA`
+- [src/optimizer/construct_untyped_ssa.cpp](/home/zj/Desktop/Baltam_IR/src/optimizer/construct_untyped_ssa.cpp)
+  - 负责 `NonSSA -> UntypedSSA`
+- [src/interpreter/interpreter.cpp](/home/zj/Desktop/Baltam_IR/src/interpreter/interpreter.cpp)
+  - 当前只执行 `UntypedSSA`
 
-这意味着当前 lowering 应只负责：
-
-- `AST -> Module/Function/BasicBlock/NonSSANode`
-
-而不负责：
+这意味着当前 lowering 不负责：
 
 - SSA rename
-- dominance frontier 插入
+- `phi` 插入
 - type specialization
 - LLVM lowering
 
 ## 后续设计边界
 
-后续路线应明确分成三层：
+后续路线仍然应明确分成三层：
 
-1. `non-SSA IR`
-2. `untyped SSA IR`
-3. `typed SSA IR`
+1. `NonSSA`
+2. `UntypedSSA`
+3. `TypedSSA`
 
-当前这份文档只讨论第 1 层。
+其中当前第 1 层和第 2 层已经落地，第 3 层仍待设计。
 
-第 2 层和第 3 层不应继续复用当前 `NonSSANode` 语义，而应在 `SSANode` 之下重新定义节点集合。
+后续如果进入 `TypedSSA`，应继续保持：
+
+- 容器层尽量复用
+- 节点语义单独定义
+- verifier / printer / interpreter / optimizer 按 stage 明确分层

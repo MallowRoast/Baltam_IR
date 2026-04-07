@@ -1,92 +1,90 @@
-# Baltam_IR 执行链规划
+# Baltam_IR 执行链说明
 
 ## 当前状态
 
-当前仓库的 CLI 主线是：
+当前仓库已经有两条实际存在的链路。
 
-`parse -> lower(non-SSA) -> print`
+CLI 主线：
 
-当前没有启用的解释执行主链。
+`parse -> lower(non-SSA) -> verify -> analyses -> construct_untyped_ssa -> verify -> print`
 
-也就是说，这份文档不再描述旧的：
+测试执行链：
 
-- `lower -> execute`
-- hybrid IR interpreter
+`parse -> lower(non-SSA) -> verify -> construct_untyped_ssa -> verify -> execute(UntypedSSA)`
 
-这些路径已经不再是当前仓库的正式主线。
+也就是说，仓库已经不再是“只有 IR、不具备执行能力”的状态；只是执行入口目前主要在测试侧，而不是 `main.cpp`。
 
-## 当前主线
+## 当前主线包含什么
 
-当前最重要的事情是先稳定：
+当前正式主线已经包含：
 
-`AST -> non-SSA IR`
+- non-SSA lowering
+- CFG / Dominator / DominanceFrontier / Liveness / DefUse
+- untyped SSA 构建
+- 分阶段 verifier
+- non-SSA / untyped SSA 打印
 
-具体包括：
+对应实现分别位于：
 
-- lowering
-- IR 结构
-- verifier
-- 打印器
+- [src/lowering/lowering.cpp](/home/zj/Desktop/Baltam_IR/src/lowering/lowering.cpp)
+- [src/analysis](/home/zj/Desktop/Baltam_IR/src/analysis): 目录中的 5 个基础 analysis 与 verifier
+- [src/optimizer/construct_untyped_ssa.cpp](/home/zj/Desktop/Baltam_IR/src/optimizer/construct_untyped_ssa.cpp)
+- [src/ir/ir_printer.cpp](/home/zj/Desktop/Baltam_IR/src/ir/ir_printer.cpp)
 
-## 后续执行链应如何恢复
+## 当前执行链的定位
 
-后续如果要重新建立执行链，更合理的目标不是回到旧 hybrid 解释器，而是：
+当前执行链已经恢复，但恢复的位置是在：
 
-`AST -> non-SSA IR -> analysis -> untyped SSA IR -> optimize(optional) -> SSA interpreter`
+- `UntypedSSA`
 
-也就是说，执行链的恢复应该建立在 SSA IR 之上，而不是旧 value-based/hybrid IR 之上。
+而不是回退到旧 hybrid/value-based IR。
 
-## 为什么不直接恢复旧解释器
+当前解释器位于：
 
-因为当前仓库已经完成了这些重构：
+- [src/interpreter/interpreter.cpp](/home/zj/Desktop/Baltam_IR/src/interpreter/interpreter.cpp)
 
-- 旧 IR 已移除
-- 当前 IR 已统一成 non-SSA IR
-- CFG 容器和节点语义已经和旧解释器不匹配
+它的价值主要有三类：
 
-如果现在重新接旧解释器，只会重新引入过时语义。
+- 验证 SSA 构建后的语义
+- 给优化 pass 提供回归基线
+- 给端到端样例提供最小可执行通路
 
-## 推荐阶段
+## 为什么不回到旧解释器
+
+原因仍然很直接：
+
+- 旧 IR 已不再是当前主线
+- 当前容器和节点语义已经统一到 `NonSSA / UntypedSSA`
+- verifier、analysis、printer、SSA 构建器都围绕这条链路组织
+
+如果重新接旧 hybrid 解释器，只会把已经收敛下来的阶段边界再次打散。
+
+## 当前更值得推进的阶段
+
+当前执行链已经具备最小闭环，因此下一阶段更值得做的是：
 
 ### Phase 1
 
-稳定 non-SSA IR：
-
-- 增加测试样例
-- 扩大 lowering 覆盖
-- 增强 verifier
+扩大 `UntypedSSA` 解释器的覆盖范围和回归测试。
 
 ### Phase 2
 
-完成 analysis 和 SSA 构建：
-
-- CFGAnalysis
-- DominatorTree
-- DominanceFrontier
-- Liveness
-- DefUse
-- BuildPrunedSSA
+在 `UntypedSSA` 上增加正式优化 pass。
 
 ### Phase 3
 
-建立 untyped SSA IR 解释器。
+决定是否在 `main.cpp` 上增加可选的执行模式，而不是只打印 IR。
 
 ### Phase 4
 
-在 SSA IR 上增加 profile 和基础优化。
-
-### Phase 5
-
-再进入 typed SSA 和 LLVM IR。
+再进入 `TypedSSA`、profile 和 LLVM IR lowering。
 
 ## 当前结论
 
-当前仓库已经不是“先做解释器”的阶段，而是“先做 IR 和中端地基”的阶段。
+当前仓库的近期目标已经不是“恢复执行链”，因为这件事在 SSA 层已经完成了第一版。
 
-因此执行链的近期目标应是：
+现在真正需要推进的是：
 
-- `lower -> verify -> print`
+- 把 SSA 执行链从“可用”推进到“可回归、可扩展、可优化”
 
-而不是：
-
-- `lower -> execute`
+而不是重新讨论旧 hybrid 执行模型。

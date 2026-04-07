@@ -2,9 +2,9 @@
 
 ## 当前背景
 
-当前仓库的正式 IR 主线是：
+当前仓库的实际 IR 主线已经是：
 
-`AST -> non-SSA IR -> verify -> print`
+`AST -> non-SSA IR -> verify -> analyses -> untyped SSA IR -> verify -> print / execute`
 
 其中：
 
@@ -18,6 +18,8 @@
 - `Function` 持有 `entry_block()` 和 `blocks()`
 - `BasicBlock` 持有 `predecessors()` 和 `successors()`
 - verifier 已负责检查 CFG 结构是否 basic well-formed
+
+本文讨论的 CFGAnalysis 仍运行在 `NonSSA` 函数上，并作为当前 untyped SSA 构建链路的前置 analysis。
 
 因此，CFGAnalysis 不应重新“推导 CFG”，而应在已验证的显式 CFG 之上，提取后续 analysis 复用的遍历信息和索引信息。
 
@@ -44,7 +46,7 @@ CFGAnalysis 应该是当前 non-SSA 阶段第一个正式的函数级 analysis�
 
 CFGAnalysis 的输入是单个 `Function`。
 
-建议依赖的最小前置条件为：
+当前实现依赖的最小前置条件为：
 
 - `function.entry_block()` 非空
 - `entry_block()` 属于 `function.blocks()`
@@ -60,13 +62,13 @@ CFGAnalysis 的输入是单个 `Function`。
 - 没有入口块时直接抛错
 - 入口块不属于当前函数时直接抛错
 
-建议实现上直接假定：
+当前实现直接假定：
 
 `CFGAnalysis::run(...)` 的输入函数已经通过 verifier。
 
-## 建议文件布局
+## 当前文件布局
 
-建议新增：
+当前实现位于：
 
 - [src/analysis/cfg_analysis.h](/home/zj/Desktop/Baltam_IR/src/analysis/cfg_analysis.h)
 - [src/analysis/cfg_analysis.cpp](/home/zj/Desktop/Baltam_IR/src/analysis/cfg_analysis.cpp)
@@ -76,9 +78,9 @@ CFGAnalysis 的输入是单个 `Function`。
 - analysis 自身定义 `Result`
 - 由 `FunctionAnalysisManager::get<CFGAnalysis>(function)` 统一缓存和复用
 
-## 建议接口
+## 当前接口
 
-建议接口如下：
+当前接口如下：
 
 ```cpp
 class CFGAnalysis {
@@ -147,7 +149,7 @@ public:
 
 - 输入块是否出现在 RPO 结果中
 
-建议行为：
+当前行为：
 
 - `nullptr` 返回 `false`
 - 通过 `rpo_index.contains(...)` 或等价逻辑判断

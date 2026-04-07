@@ -15,6 +15,7 @@ add_executable(main
     src/analysis/dominator_tree.cpp
     src/analysis/liveness.cpp
     src/analysis/verifier.cpp
+    src/interpreter/interpreter.cpp
     src/ir/ir.cpp
     src/ir/ir_printer.cpp
     src/lowering/lowering.cpp

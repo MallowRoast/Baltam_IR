@@ -2,9 +2,9 @@
 
 ## 当前背景
 
-当前仓库的正式 IR 主线是：
+当前仓库的实际 IR 主线已经是：
 
-`AST -> non-SSA IR -> verify -> print`
+`AST -> non-SSA IR -> verify -> analyses -> untyped SSA IR -> verify -> print / execute`
 
 当前已经落地的相关基础设施包括：
 
@@ -12,6 +12,8 @@
 - CFGAnalysis 定义在 [src/analysis/cfg_analysis.h](/home/zj/Desktop/Baltam_IR/src/analysis/cfg_analysis.h)
 - DominatorTree 定义在 [src/analysis/dominator_tree.h](/home/zj/Desktop/Baltam_IR/src/analysis/dominator_tree.h)
 - DominanceFrontier 定义在 [src/analysis/dominance_frontier.h](/home/zj/Desktop/Baltam_IR/src/analysis/dominance_frontier.h)
+
+本文描述的 DominanceFrontier 仍然运行在 `NonSSA` CFG 上，并直接服务于当前 untyped SSA 构建器。
 
 也就是说，当前 dominance frontier analysis 不是孤立计算的，而是建立在：
 
@@ -113,7 +115,7 @@ DominanceFrontier 的最直接用途是：
 
 - iterated dominance frontier
 
-但那已经属于后续 `BuildPrunedSSA` 的工作，不属于当前这个 analysis。
+但那已经属于当前 SSA 构建器的工作，不属于这个 analysis 本身。
 
 ## 当前 DominanceFrontier 的定位
 
@@ -347,7 +349,7 @@ public:
 当前 DominanceFrontier 是后续这些步骤的直接前置：
 
 - iterated dominance frontier
-- `BuildPrunedSSA`
+- `construct_untyped_ssa_module(...)`
 - `phi` 插入
 
 但它自己仍然保持块级、结构级，不掺入名字级语义。
@@ -367,4 +369,4 @@ public:
 - 作用：
   - 为后续 `phi` 插入和 SSA 构建提供 frontier 信息
 
-它是从 `DominatorTree` 走向 `BuildPrunedSSA` 的下一个关键 analysis。
+它是从 `DominatorTree` 走向当前 SSA 构建器的下一个关键 analysis。

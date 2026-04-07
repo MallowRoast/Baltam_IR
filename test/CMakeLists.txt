@@ -117,3 +117,74 @@ target_include_directories(construct_untyped_ssa_test PRIVATE
 )
 
 add_test(NAME construct_untyped_ssa_test COMMAND construct_untyped_ssa_test)
+
+add_executable(interpreter_test
+    interpreter_test.cpp
+    ../src/analysis/verifier.cpp
+    ../src/interpreter/interpreter.cpp
+    ../src/ir/ir.cpp
+)
+
+target_include_directories(interpreter_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(interpreter_test PRIVATE
+    baltam_core::baltam_core
+    baltam_worker::ba_worker
+    ${BALTAM_LOGGER_LIBRARY}
+)
+
+target_link_options(interpreter_test PRIVATE
+    "-Wl,--disable-new-dtags"
+    "-Wl,--no-as-needed"
+)
+
+set_target_properties(interpreter_test PROPERTIES
+    BUILD_RPATH "/home/zj/Desktop/Baltam_IR/deps/core/lib;/opt/Baltamatica/lib"
+)
+
+add_test(NAME interpreter_test COMMAND interpreter_test)
+
+add_executable(simple_demo_test
+    simple_demo_test.cpp
+    ../src/analysis/analysis_manager.cpp
+    ../src/analysis/cfg_analysis.cpp
+    ../src/analysis/def_use.cpp
+    ../src/analysis/dominance_frontier.cpp
+    ../src/analysis/dominator_tree.cpp
+    ../src/analysis/liveness.cpp
+    ../src/analysis/verifier.cpp
+    ../src/interpreter/interpreter.cpp
+    ../src/ir/ir.cpp
+    ../src/lowering/lowering.cpp
+    ../src/optimizer/construct_untyped_ssa.cpp
+)
+
+target_compile_definitions(simple_demo_test PRIVATE
+    BALTAM_IR_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
+target_include_directories(simple_demo_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(simple_demo_test PRIVATE
+    baltam_kernel::bt_ast
+    baltam_worker::ba_worker
+    ${BALTAM_LOGGER_LIBRARY}
+)
+
+target_link_options(simple_demo_test PRIVATE
+    "-Wl,--disable-new-dtags"
+    "-Wl,--no-as-needed"
+)
+
+set_target_properties(simple_demo_test PROPERTIES
+    BUILD_RPATH "/home/zj/Desktop/Baltam_IR/deps/core/lib;/opt/Baltamatica/lib"
+)
+
+add_test(NAME simple_demo_test COMMAND simple_demo_test)
+set_tests_properties(simple_demo_test PROPERTIES
+    ENVIRONMENT "LD_LIBRARY_PATH=/opt/Baltamatica/lib:${CMAKE_SOURCE_DIR}/deps/core/lib"
+)

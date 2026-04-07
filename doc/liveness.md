@@ -2,9 +2,9 @@
 
 ## 当前背景
 
-当前仓库的正式 IR 主线是：
+当前仓库的实际 IR 主线已经是：
 
-`AST -> non-SSA IR -> verify -> print`
+`AST -> non-SSA IR -> verify -> analyses -> untyped SSA IR -> verify -> print / execute`
 
 当前已经落地的相关基础设施包括：
 
@@ -12,6 +12,8 @@
 - CFGAnalysis 定义在 [src/analysis/cfg_analysis.h](/home/zj/Desktop/Baltam_IR/src/analysis/cfg_analysis.h)
 - Liveness 定义在 [src/analysis/liveness.h](/home/zj/Desktop/Baltam_IR/src/analysis/liveness.h)
 - 名字级 def/use 提取辅助定义在 [src/analysis/name_analysis_utils.h](/home/zj/Desktop/Baltam_IR/src/analysis/name_analysis_utils.h)
+
+本文描述的 Liveness analysis 仍然运行在 `NonSSA` 上；当前 SSA 构建器会直接消费它的结果。
 
 也就是说，当前 liveness analysis 不是在 SSA value 图上做的，而是建立在：
 
@@ -110,7 +112,7 @@ body:
 
 Liveness 在当前仓库里最直接的用途是：
 
-- 为 `BuildPrunedSSA` 提供 pruned phi 插入的过滤条件
+- 为 `construct_untyped_ssa_module(...)` 提供 pruned phi 插入的过滤条件
 
 也就是说：
 
@@ -383,7 +385,7 @@ public:
 - 当前还没有 SSA value 图
 - 需要的只是块边界活跃信息
 - 算法短、定义清楚、容易验证
-- 已足够支撑 `BuildPrunedSSA`
+- 已足够支撑当前 SSA 构建器
 
 当前并不需要一开始就扩展成：
 
@@ -500,7 +502,7 @@ public:
 
 当前 Liveness 是后续这些步骤的直接前置之一：
 
-- `BuildPrunedSSA`
+- `construct_untyped_ssa_module(...)`
 - pruned phi 过滤
 - 名字级死代码消除
 
@@ -524,6 +526,6 @@ public:
 - 分析域：
   - `NamedValue.name`
 - 作用：
-  - 为后续 `BuildPrunedSSA` 和名字级优化提供块级活跃信息
+  - 为当前 SSA 构建器和后续名字级优化提供块级活跃信息
 
-它是从 `DominanceFrontier` 继续走向 `BuildPrunedSSA` 时不可缺的一块名字级 analysis。
+它是从 `DominanceFrontier` 继续走向当前 SSA 构建器时不可缺的一块名字级 analysis。
