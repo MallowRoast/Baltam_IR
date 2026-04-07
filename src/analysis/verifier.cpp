@@ -481,8 +481,7 @@ void verify_ssa_value_use(VerificationResult& result, const Function& function, 
         return;
     }
 
-    const SSAValueInfo* info = function.find_value_info(value.id);
-    if (info == nullptr) {
+    if (!function.has_value(value.id)) {
         add_error(result, "函数 `" + function.name() + "` 的 " + context + " 引用了未知的 SSA 值 %" +
                               std::to_string(value.id) + "。");
         return;
@@ -500,8 +499,7 @@ void verify_ssa_value_def(VerificationResult& result, const Function& function, 
         return;
     }
 
-    const SSAValueInfo* info = function.find_value_info(value_id);
-    if (info == nullptr) {
+    if (!function.has_value(value_id)) {
         add_error(result, "函数 `" + function.name() + "` 的 " + context + " 产生了未知的 SSA 值 %" +
                               std::to_string(value_id) + "。");
         return;
@@ -533,8 +531,7 @@ void verify_untyped_ssa_values(VerificationResult& result, const Function& funct
             continue;
         }
 
-        const SSAValueInfo* info = function.find_value_info(value_id);
-        if (info == nullptr) {
+        if (!function.has_value(value_id)) {
             add_error(result, "函数 `" + function.name() + "` 的参数值 %" +
                                   std::to_string(value_id) + " 不存在于 value table 中。");
             continue;
@@ -684,16 +681,12 @@ void verify_untyped_ssa_values(VerificationResult& result, const Function& funct
         }
     }
 
-    for (const SSAValueInfo& info : function.values()) {
-        if (info.id == InvalidValueId) {
-            add_error(result, "函数 `" + function.name() + "` 的 value table 含有无效 id。");
-            continue;
-        }
-
-        if (node_defs.find(info.id) == node_defs.end() &&
-            argument_values.find(info.id) == argument_values.end()) {
+    for (std::size_t index = 0; index < function.value_count(); ++index) {
+        const ValueId value_id = static_cast<ValueId>(index + 1);
+        if (node_defs.find(value_id) == node_defs.end() &&
+            argument_values.find(value_id) == argument_values.end()) {
             add_error(result, "函数 `" + function.name() + "` 的 SSA 值 %" +
-                                  std::to_string(info.id) +
+                                  std::to_string(value_id) +
                                   " 既不是参数值，也没有对应定义节点。");
         }
     }
@@ -714,7 +707,7 @@ void verify_function_stage_metadata(VerificationResult& result, const Function& 
                 add_error(result, "函数 `" + function.name() +
                                       "` 处于 `NonSSA` 阶段，不应携带 SSA 参数值。");
             }
-            if (!function.values().empty()) {
+            if (function.value_count() != 0) {
                 add_error(result, "函数 `" + function.name() +
                                       "` 处于 `NonSSA` 阶段，不应携带 SSA value table。");
             }

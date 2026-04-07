@@ -278,8 +278,26 @@ const std::vector<ValueId>& Function::argument_values() const {
     return argument_values_;
 }
 
-const std::vector<SSAValueInfo>& Function::values() const {
-    return value_table_;
+std::size_t Function::value_count() const {
+    return value_debug_names_.size();
+}
+
+bool Function::has_value(ValueId id) const {
+    if (id == InvalidValueId) {
+        return false;
+    }
+
+    const std::size_t index = static_cast<std::size_t>(id - 1);
+    return index < value_debug_names_.size();
+}
+
+const std::string* Function::find_value_debug_name(ValueId id) const {
+    if (!has_value(id)) {
+        return nullptr;
+    }
+
+    const std::size_t index = static_cast<std::size_t>(id - 1);
+    return &value_debug_names_[index];
 }
 
 BasicBlock* Function::entry_block() const {
@@ -327,32 +345,17 @@ void Function::set_argument_values(std::vector<ValueId> argument_values) {
 }
 
 ValueId Function::create_value(std::string debug_name) {
-    const ValueId id = next_value_id_++;
-    value_table_.push_back(SSAValueInfo{id, std::move(debug_name)});
+    const ValueId id = static_cast<ValueId>(value_debug_names_.size() + 1);
+    value_debug_names_.push_back(std::move(debug_name));
     return id;
-}
-
-const SSAValueInfo* Function::find_value_info(ValueId id) const {
-    if (id == InvalidValueId) {
-        return nullptr;
-    }
-
-    const std::size_t index = static_cast<std::size_t>(id - 1);
-    if (index >= value_table_.size()) {
-        return nullptr;
-    }
-    if (value_table_[index].id != id) {
-        return nullptr;
-    }
-    return &value_table_[index];
 }
 
 void Function::set_value_debug_name(ValueId id, std::string debug_name) {
     const std::size_t index = static_cast<std::size_t>(id - 1);
-    if (id == InvalidValueId || index >= value_table_.size() || value_table_[index].id != id) {
+    if (id == InvalidValueId || index >= value_debug_names_.size()) {
         return;
     }
-    value_table_[index].debug_name = std::move(debug_name);
+    value_debug_names_[index] = std::move(debug_name);
 }
 
 void Function::set_parent(Module* module) {

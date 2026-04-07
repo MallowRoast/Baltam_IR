@@ -18,6 +18,7 @@ add_executable(main
     src/ir/ir.cpp
     src/ir/ir_printer.cpp
     src/lowering/lowering.cpp
+    src/optimizer/construct_untyped_ssa.cpp
     src/optimizer/pass_manager.cpp
     src/optimizer/optimize.cpp
 )

@@ -109,11 +109,11 @@ void test_print_untyped_ssa_module() {
 
     expect_contains(text, "; stage = \"untyped-ssa\"",
                     "untyped SSA stage should be printed.");
-    expect_contains(text, "define primary_function @ssa_fn(%cond.1, %x.2)",
-                    "SSA function arguments should use ValueId form.");
-    expect_contains(text, "%merged.5 = phi [ %one.3, %then ], [ %two.4, %else ]",
+    expect_contains(text, "define primary_function @ssa_fn(%cond, %x)",
+                    "SSA arguments with single definitions should not be renumbered.");
+    expect_contains(text, "%merged = phi [ %one, %then ], [ %two, %else ]",
                     "phi node should be printed in SSA form.");
-    expect_contains(text, "ret %merged.5", "SSA return should be printed.");
+    expect_contains(text, "ret %merged", "SSA return should be printed.");
 }
 
 }  // namespace

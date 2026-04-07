@@ -207,53 +207,179 @@ std::string format_argument_list(const std::vector<NamedValue>& values) {
     return oss.str();
 }
 
-std::string format_ssa_value(const Function& function, ValueId value_id,
-                             const std::string& fallback_name = {}) {
+struct SSADisplayNames {
+    std::unordered_map<ValueId, std::string> by_id;
+};
+
+std::string base_ssa_name(const Function& function, ValueId value_id,
+                          const std::string& fallback_name = {}) {
+    if (value_id == InvalidValueId) {
+        return {};
+    }
+
+    std::string debug_name = fallback_name;
+    if (const std::string* info = function.find_value_debug_name(value_id);
+        info != nullptr && !info->empty()) {
+        debug_name = *info;
+    }
+
+    return debug_name;
+}
+
+void append_ssa_definition(std::unordered_map<std::string, std::vector<ValueId>>& ids_by_name,
+                           const std::string& name, ValueId value_id) {
+    if (value_id == InvalidValueId || name.empty()) {
+        return;
+    }
+    ids_by_name[name].push_back(value_id);
+}
+
+void collect_ssa_result_ids(const UntypedSSANode& node, std::vector<ValueId>& result_ids) {
+    switch (node.type()) {
+        case UntypedSSANode::SSA_Number:
+            result_ids.push_back(static_cast<const SSANumberNode&>(node).result());
+            return;
+        case UntypedSSANode::SSA_Text:
+            result_ids.push_back(static_cast<const SSATextNode&>(node).result());
+            return;
+        case UntypedSSANode::SSA_Undef:
+            result_ids.push_back(static_cast<const SSAUndefNode&>(node).result());
+            return;
+        case UntypedSSANode::SSA_Phi:
+            result_ids.push_back(static_cast<const SSAPhiNode&>(node).result());
+            return;
+        case UntypedSSANode::SSA_Copy:
+            result_ids.push_back(static_cast<const SSACopyNode&>(node).result());
+            return;
+        case UntypedSSANode::SSA_UnaryOp:
+            result_ids.push_back(static_cast<const SSAUnaryOpNode&>(node).result());
+            return;
+        case UntypedSSANode::SSA_BinOp:
+            result_ids.push_back(static_cast<const SSABinOpNode&>(node).result());
+            return;
+        case UntypedSSANode::SSA_Call: {
+            const auto& call = static_cast<const SSACallNode&>(node);
+            result_ids.insert(result_ids.end(), call.results().begin(), call.results().end());
+            return;
+        }
+        case UntypedSSANode::SSA_CondJump:
+        case UntypedSSANode::SSA_Jump:
+        case UntypedSSANode::SSA_Return:
+            return;
+    }
+}
+
+SSADisplayNames build_ssa_display_names(const Function& function) {
+    SSADisplayNames result;
+    std::unordered_map<std::string, std::vector<ValueId>> ids_by_name;
+
+    const std::size_t argument_count =
+        std::max(function.inputs().size(), function.argument_values().size());
+    for (std::size_t i = 0; i < argument_count; ++i) {
+        if (i >= function.argument_values().size()) {
+            continue;
+        }
+        const std::string fallback =
+            i < function.inputs().size() ? function.inputs()[i].name : std::string{};
+        append_ssa_definition(ids_by_name, base_ssa_name(function, function.argument_values()[i], fallback),
+                              function.argument_values()[i]);
+    }
+
+    std::vector<ValueId> result_ids;
+    for (const auto& block : function.blocks()) {
+        if (block == nullptr) {
+            continue;
+        }
+
+        for (IRNode* node : block->phi_nodes()) {
+            if (node == nullptr) {
+                continue;
+            }
+            result_ids.clear();
+            collect_ssa_result_ids(require_untyped_ssa_node(*node), result_ids);
+            for (ValueId value_id : result_ids) {
+                append_ssa_definition(ids_by_name, base_ssa_name(function, value_id), value_id);
+            }
+        }
+
+        for (IRNode* node : block->instructions()) {
+            if (node == nullptr) {
+                continue;
+            }
+            result_ids.clear();
+            collect_ssa_result_ids(require_untyped_ssa_node(*node), result_ids);
+            for (ValueId value_id : result_ids) {
+                append_ssa_definition(ids_by_name, base_ssa_name(function, value_id), value_id);
+            }
+        }
+    }
+
+    for (const auto& entry : ids_by_name) {
+        const std::string& name = entry.first;
+        const std::vector<ValueId>& ids = entry.second;
+        if (ids.size() == 1) {
+            result.by_id.emplace(ids.front(), "%" + name);
+            continue;
+        }
+
+        for (std::size_t i = 0; i < ids.size(); ++i) {
+            result.by_id.emplace(ids[i], "%" + name + "." + std::to_string(i + 1));
+        }
+    }
+
+    return result;
+}
+
+std::string format_ssa_value(const Function& function, const SSADisplayNames& display_names,
+                             ValueId value_id, const std::string& fallback_name = {}) {
     if (value_id == InvalidValueId) {
         return "%<invalid>";
     }
 
-    std::string debug_name = fallback_name;
-    if (const SSAValueInfo* info = function.find_value_info(value_id);
-        info != nullptr && !info->debug_name.empty()) {
-        debug_name = info->debug_name;
+    auto it = display_names.by_id.find(value_id);
+    if (it != display_names.by_id.end()) {
+        return it->second;
     }
 
+    const std::string debug_name = base_ssa_name(function, value_id, fallback_name);
     if (!debug_name.empty()) {
-        return "%" + debug_name + "." + std::to_string(value_id);
+        return "%" + debug_name;
     }
 
     return "%" + std::to_string(value_id);
 }
 
-std::string format_ssa_value(const Function& function, ValueRef value,
+std::string format_ssa_value(const Function& function, const SSADisplayNames& display_names,
+                             ValueRef value,
                              const std::string& fallback_name = {}) {
-    return format_ssa_value(function, value.id, fallback_name);
+    return format_ssa_value(function, display_names, value.id, fallback_name);
 }
 
-std::string format_ssa_value_list(const Function& function, const std::vector<ValueRef>& values) {
+std::string format_ssa_value_list(const Function& function, const SSADisplayNames& display_names,
+                                  const std::vector<ValueRef>& values) {
     std::ostringstream oss;
     for (std::size_t i = 0; i < values.size(); ++i) {
         if (i != 0) {
             oss << ", ";
         }
-        oss << format_ssa_value(function, values[i]);
+        oss << format_ssa_value(function, display_names, values[i]);
     }
     return oss.str();
 }
 
-std::string format_ssa_result_list(const Function& function, const std::vector<ValueId>& values) {
+std::string format_ssa_result_list(const Function& function, const SSADisplayNames& display_names,
+                                   const std::vector<ValueId>& values) {
     std::ostringstream oss;
     for (std::size_t i = 0; i < values.size(); ++i) {
         if (i != 0) {
             oss << ", ";
         }
-        oss << format_ssa_value(function, values[i]);
+        oss << format_ssa_value(function, display_names, values[i]);
     }
     return oss.str();
 }
 
-std::string format_ssa_argument_list(const Function& function) {
+std::string format_ssa_argument_list(const Function& function, const SSADisplayNames& display_names) {
     std::ostringstream oss;
     oss << "(";
 
@@ -266,7 +392,7 @@ std::string format_ssa_argument_list(const Function& function) {
         if (i < function.argument_values().size()) {
             const std::string fallback =
                 i < function.inputs().size() ? function.inputs()[i].name : std::string{};
-            oss << format_ssa_value(function, function.argument_values()[i], fallback);
+            oss << format_ssa_value(function, display_names, function.argument_values()[i], fallback);
         } else {
             oss << format_named_value(function.inputs()[i]);
         }
@@ -369,27 +495,29 @@ std::string expr_text(const NonSSANode& node) {
     return "<node>";
 }
 
-std::string format_phi_incomings(const Function& function,
+std::string format_phi_incomings(const Function& function, const SSADisplayNames& display_names,
                                  const std::vector<SSAPhiNode::Incoming>& incomings) {
     std::ostringstream oss;
     for (std::size_t i = 0; i < incomings.size(); ++i) {
         if (i != 0) {
             oss << ", ";
         }
-        oss << "[ " << format_ssa_value(function, incomings[i].value) << ", "
+        oss << "[ " << format_ssa_value(function, display_names, incomings[i].value) << ", "
             << format_block_ref(incomings[i].predecessor) << " ]";
     }
     return oss.str();
 }
 
-std::string format_ssa_callee(const Function& function, const SSACallNode::Callee& callee) {
+std::string format_ssa_callee(const Function& function, const SSADisplayNames& display_names,
+                              const SSACallNode::Callee& callee) {
     if (callee.type == SSACallNode::Callee::Direct) {
         return format_function_ref(callee.direct_symbol);
     }
-    return format_ssa_value(function, callee.indirect_value);
+    return format_ssa_value(function, display_names, callee.indirect_value);
 }
 
-std::string expr_text(const Function& function, const UntypedSSANode& node) {
+std::string expr_text(const Function& function, const SSADisplayNames& display_names,
+                      const UntypedSSANode& node) {
     switch (node.type()) {
         case UntypedSSANode::SSA_Number: {
             const auto& number = static_cast<const SSANumberNode&>(node);
@@ -403,31 +531,33 @@ std::string expr_text(const Function& function, const UntypedSSANode& node) {
             return "undef";
         case UntypedSSANode::SSA_Phi: {
             const auto& phi = static_cast<const SSAPhiNode&>(node);
-            return "phi " + format_phi_incomings(function, phi.incomings());
+            return "phi " + format_phi_incomings(function, display_names, phi.incomings());
         }
         case UntypedSSANode::SSA_Copy: {
             const auto& copy = static_cast<const SSACopyNode&>(node);
-            return "copy " + format_ssa_value(function, copy.src());
+            return "copy " + format_ssa_value(function, display_names, copy.src());
         }
         case UntypedSSANode::SSA_UnaryOp: {
             const auto& unary = static_cast<const SSAUnaryOpNode&>(node);
-            return unary_opcode(unary.op()) + " " + format_ssa_value(function, unary.operand());
+            return unary_opcode(unary.op()) + " " + format_ssa_value(function, display_names,
+                                                                     unary.operand());
         }
         case UntypedSSANode::SSA_BinOp: {
             const auto& binop = static_cast<const SSABinOpNode&>(node);
-            return binop_opcode(binop.op()) + " " + format_ssa_value(function, binop.lhs()) + ", " +
-                   format_ssa_value(function, binop.rhs());
+            return binop_opcode(binop.op()) + " " +
+                   format_ssa_value(function, display_names, binop.lhs()) + ", " +
+                   format_ssa_value(function, display_names, binop.rhs());
         }
         case UntypedSSANode::SSA_Call: {
             const auto& call = static_cast<const SSACallNode&>(node);
             std::ostringstream oss;
-            oss << "call " << format_ssa_callee(function, call.callee()) << "("
-                << format_ssa_value_list(function, call.inputs()) << ")";
+            oss << "call " << format_ssa_callee(function, display_names, call.callee()) << "("
+                << format_ssa_value_list(function, display_names, call.inputs()) << ")";
             return oss.str();
         }
         case UntypedSSANode::SSA_CondJump: {
             const auto& jump = static_cast<const SSACondJumpNode&>(node);
-            return "br " + format_ssa_value(function, jump.cond()) + ", label " +
+            return "br " + format_ssa_value(function, display_names, jump.cond()) + ", label " +
                    format_block_ref(jump.true_block()) + ", label " +
                    format_block_ref(jump.false_block());
         }
@@ -440,14 +570,15 @@ std::string expr_text(const Function& function, const UntypedSSANode& node) {
             if (ret.values().empty()) {
                 return "ret void";
             }
-            return "ret " + format_ssa_value_list(function, ret.values());
+            return "ret " + format_ssa_value_list(function, display_names, ret.values());
         }
     }
 
     return "<ssa-node>";
 }
 
-std::string format_node_text(const Function& function, const IRNode& node) {
+std::string format_node_text(const Function& function, const SSADisplayNames& display_names,
+                             const IRNode& node) {
     switch (function.stage()) {
         case IRNode::NonSSA: {
             const NonSSANode& non_ssa = require_non_ssa_node(node);
@@ -489,37 +620,44 @@ std::string format_node_text(const Function& function, const IRNode& node) {
             std::string text;
             switch (ssa.type()) {
                 case UntypedSSANode::SSA_Number:
-                    text = format_ssa_value(function, static_cast<const SSANumberNode&>(ssa).result()) +
+                    text = format_ssa_value(function, display_names,
+                                            static_cast<const SSANumberNode&>(ssa).result()) +
                            " = ";
                     break;
                 case UntypedSSANode::SSA_Text:
-                    text = format_ssa_value(function, static_cast<const SSATextNode&>(ssa).result()) +
+                    text = format_ssa_value(function, display_names,
+                                            static_cast<const SSATextNode&>(ssa).result()) +
                            " = ";
                     break;
                 case UntypedSSANode::SSA_Undef:
-                    text = format_ssa_value(function, static_cast<const SSAUndefNode&>(ssa).result()) +
+                    text = format_ssa_value(function, display_names,
+                                            static_cast<const SSAUndefNode&>(ssa).result()) +
                            " = ";
                     break;
                 case UntypedSSANode::SSA_Phi:
-                    text = format_ssa_value(function, static_cast<const SSAPhiNode&>(ssa).result()) +
+                    text = format_ssa_value(function, display_names,
+                                            static_cast<const SSAPhiNode&>(ssa).result()) +
                            " = ";
                     break;
                 case UntypedSSANode::SSA_Copy:
-                    text = format_ssa_value(function, static_cast<const SSACopyNode&>(ssa).result()) +
+                    text = format_ssa_value(function, display_names,
+                                            static_cast<const SSACopyNode&>(ssa).result()) +
                            " = ";
                     break;
                 case UntypedSSANode::SSA_UnaryOp:
-                    text = format_ssa_value(function, static_cast<const SSAUnaryOpNode&>(ssa).result()) +
+                    text = format_ssa_value(function, display_names,
+                                            static_cast<const SSAUnaryOpNode&>(ssa).result()) +
                            " = ";
                     break;
                 case UntypedSSANode::SSA_BinOp:
-                    text = format_ssa_value(function, static_cast<const SSABinOpNode&>(ssa).result()) +
+                    text = format_ssa_value(function, display_names,
+                                            static_cast<const SSABinOpNode&>(ssa).result()) +
                            " = ";
                     break;
                 case UntypedSSANode::SSA_Call: {
                     const auto& call = static_cast<const SSACallNode&>(ssa);
                     if (!call.results().empty()) {
-                        text = format_ssa_result_list(function, call.results()) + " = ";
+                        text = format_ssa_result_list(function, display_names, call.results()) + " = ";
                     }
                     break;
                 }
@@ -529,7 +667,7 @@ std::string format_node_text(const Function& function, const IRNode& node) {
                     break;
             }
 
-            text += expr_text(function, ssa);
+            text += expr_text(function, display_names, ssa);
             return text;
         }
         case IRNode::TypedSSA:
@@ -620,28 +758,32 @@ std::optional<SourceComment> source_comment_from_location(
 }
 
 std::size_t source_comment_column(const Function& function) {
+    const SSADisplayNames display_names =
+        function.stage() == IRNode::UntypedSSA ? build_ssa_display_names(function) : SSADisplayNames{};
     std::size_t max_width = 0;
     for (const auto& block : function.blocks()) {
         for (IRNode* node : block->phi_nodes()) {
             if (node != nullptr) {
-                max_width = std::max(max_width, format_node_text(function, *node).size());
+                max_width = std::max(max_width, format_node_text(function, display_names, *node).size());
             }
         }
         for (IRNode* node : block->instructions()) {
             if (node != nullptr) {
-                max_width = std::max(max_width, format_node_text(function, *node).size());
+                max_width = std::max(max_width, format_node_text(function, display_names, *node).size());
             }
         }
         if (block->terminal() != nullptr) {
-            max_width = std::max(max_width, format_node_text(function, *block->terminal()).size());
+            max_width = std::max(max_width,
+                                 format_node_text(function, display_names, *block->terminal()).size());
         }
     }
     return max_width == 0 ? 0 : max_width + 2;
 }
 
-void print_node(std::ostream& os, const Function& function, const IRNode& node,
+void print_node(std::ostream& os, const Function& function, const SSADisplayNames& display_names,
+                const IRNode& node,
                 std::size_t comment_column, std::optional<SourceComment>& last_comment) {
-    const std::string text = format_node_text(function, node);
+    const std::string text = format_node_text(function, display_names, node);
     const std::optional<SourceComment> source = source_comment_from_location(node.source_location());
 
     bool emit_comment = false;
@@ -668,7 +810,7 @@ void print_node(std::ostream& os, const Function& function, const IRNode& node,
 
 std::string format_function_arguments(const Function& function) {
     if (function.stage() == IRNode::UntypedSSA) {
-        return format_ssa_argument_list(function);
+        return format_ssa_argument_list(function, build_ssa_display_names(function));
     }
     return format_argument_list(function.inputs());
 }
@@ -697,6 +839,9 @@ void print_ir(std::ostream& os, const Module& module) {
                                                   : "%<null>")
            << "\n";
 
+        const SSADisplayNames display_names =
+            function->stage() == IRNode::UntypedSSA ? build_ssa_display_names(*function)
+                                                    : SSADisplayNames{};
         const std::size_t comment_column = source_comment_column(*function);
         std::optional<SourceComment> last_comment;
         for (const auto& block : function->blocks()) {
@@ -719,16 +864,17 @@ void print_ir(std::ostream& os, const Module& module) {
 
             for (IRNode* node : block->phi_nodes()) {
                 if (node != nullptr) {
-                    print_node(os, *function, *node, comment_column, last_comment);
+                    print_node(os, *function, display_names, *node, comment_column, last_comment);
                 }
             }
             for (IRNode* node : block->instructions()) {
                 if (node != nullptr) {
-                    print_node(os, *function, *node, comment_column, last_comment);
+                    print_node(os, *function, display_names, *node, comment_column, last_comment);
                 }
             }
             if (block->terminal() != nullptr) {
-                print_node(os, *function, *block->terminal(), comment_column, last_comment);
+                print_node(os, *function, display_names, *block->terminal(), comment_column,
+                           last_comment);
             }
         }
 

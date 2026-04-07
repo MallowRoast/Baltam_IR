@@ -15,6 +15,7 @@
 #include "bt_ast_interface.h"
 #include "ir/ir_printer.h"
 #include "lowering/lowering.h"
+#include "optimizer/construct_untyped_ssa.h"
 
 using namespace baltam;
 
@@ -50,24 +51,27 @@ std::string resolve_script_argument(const std::string& arg) {
 int run_m_file(const std::string& script_path) {
     int exit_code = 0;
     std::string msg;
-    const auto parsed_units = bt_ast_interface::parse_mfile(script_path, msg);
-
-    if (!msg.empty()) {
-        std::cout << "解析器消息: " << msg << std::endl;
-    }
+    const auto parsed_units =
+        bt_ast_interface::parse_mfile(script_path, ParserOpts{ParserOpts::DEFAULT}, msg);
 
     if (parsed_units.empty()) {
+        if (!msg.empty()) {
+            std::cerr << "解析失败: " << msg << std::endl;
+        }
         std::cerr << "文件未生成 AST: " << script_path << std::endl;
         return 1;
     }
 
     try {
-        const Module non_ssa_module = lower_parsed_units_to_ir(parsed_units);
+        Module non_ssa_module = lower_parsed_units_to_ir(parsed_units);
         analysis::verify_module_or_throw(non_ssa_module);
+        Module untyped_ssa_module = optimizer::construct_untyped_ssa_module(non_ssa_module);
+        analysis::verify_module_or_throw(untyped_ssa_module);
         print_ir(std::cout, non_ssa_module);
+        print_ir(std::cout, untyped_ssa_module);
         std::cout << std::endl;
     } catch (const std::exception& ex) {
-        std::cerr << "文件的 non-SSA IR 处理失败: " << script_path << "，原因: "
+        std::cerr << "文件的 IR 处理失败: " << script_path << "，原因: "
                   << ex.what()
                   << std::endl;
         exit_code = 1;

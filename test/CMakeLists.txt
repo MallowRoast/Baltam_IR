@@ -97,3 +97,23 @@ target_include_directories(ir_printer_test PRIVATE
 )
 
 add_test(NAME ir_printer_test COMMAND ir_printer_test)
+
+add_executable(construct_untyped_ssa_test
+    construct_untyped_ssa_test.cpp
+    ../src/analysis/analysis_manager.cpp
+    ../src/analysis/cfg_analysis.cpp
+    ../src/analysis/def_use.cpp
+    ../src/analysis/dominance_frontier.cpp
+    ../src/analysis/dominator_tree.cpp
+    ../src/analysis/liveness.cpp
+    ../src/analysis/verifier.cpp
+    ../src/ir/ir.cpp
+    ../src/ir/ir_printer.cpp
+    ../src/optimizer/construct_untyped_ssa.cpp
+)
+
+target_include_directories(construct_untyped_ssa_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+add_test(NAME construct_untyped_ssa_test COMMAND construct_untyped_ssa_test)

@@ -55,14 +55,6 @@ struct ValueRef {
 };
 
 /**
- * @brief 函数内某个 SSA 值的元信息。
- */
-struct SSAValueInfo {
-    ValueId id = InvalidValueId;
-    std::string debug_name;
-};
-
-/**
  * @brief 分阶段 IR 体系中的公共节点基类。
  *
  * 当前实际只实现 non-SSA 阶段，但公共基类先固定 stage、parent 和
@@ -604,7 +596,9 @@ public:
     const std::vector<NamedValue>& inputs() const;
     const std::vector<NamedValue>& outputs() const;
     const std::vector<ValueId>& argument_values() const;
-    const std::vector<SSAValueInfo>& values() const;
+    std::size_t value_count() const;
+    bool has_value(ValueId id) const;
+    const std::string* find_value_debug_name(ValueId id) const;
     BasicBlock* entry_block() const;
     const std::vector<std::unique_ptr<BasicBlock>>& blocks() const;
 
@@ -615,7 +609,6 @@ public:
     void set_output_names(std::vector<std::string> names);
     void set_argument_values(std::vector<ValueId> argument_values);
     ValueId create_value(std::string debug_name = {});
-    const SSAValueInfo* find_value_info(ValueId id) const;
     void set_value_debug_name(ValueId id, std::string debug_name);
 
     template <typename T, typename... Args>
@@ -638,8 +631,7 @@ private:
     std::vector<NamedValue> inputs_;
     std::vector<NamedValue> outputs_;
     std::vector<ValueId> argument_values_;
-    std::vector<SSAValueInfo> value_table_;
-    ValueId next_value_id_ = 1;
+    std::vector<std::string> value_debug_names_;
     std::vector<std::unique_ptr<BasicBlock>> block_storage_;
     std::vector<std::unique_ptr<IRNode>> node_storage_;
     BasicBlock* entry_block_ = nullptr;

@@ -196,12 +196,14 @@ void collect_predeclared_user_names(const ast_ptr& node,
 
 std::unordered_set<std::string> collect_function_predeclared_names(const pcdata& unit) {
     std::unordered_set<std::string> names;
-    if (unit.is_mscript()) {
-        return names;
-    }
-
     collect_predeclared_user_names(function_body_from_unit(unit), names);
     return names;
+}
+
+std::vector<std::string> to_sorted_name_list(const std::unordered_set<std::string>& names) {
+    std::vector<std::string> result(names.begin(), names.end());
+    std::sort(result.begin(), result.end());
+    return result;
 }
 
 void populate_function_signature(Function& function, const pcdata& unit) {
@@ -960,7 +962,12 @@ void lower_stmt(const ast_ptr& node, LoweringContext& ctx) {
 void lower_unit_into_function(const pcdata& unit, Module& module) {
     Function* function =
         module.create_function(function_name_from_unit(unit), function_type_from_unit(unit));
+    const std::unordered_set<std::string> predeclared_user_names =
+        collect_function_predeclared_names(unit);
     populate_function_signature(*function, unit);
+    if (function->type() == Function::Script && function->outputs().empty()) {
+        function->set_output_names(to_sorted_name_list(predeclared_user_names));
+    }
     if (function->type() == Function::Script ||
         function->type() == Function::PrimaryFunction) {
         module.set_entry_function(function);
@@ -972,7 +979,7 @@ void lower_unit_into_function(const pcdata& unit, Module& module) {
     LoweringContext ctx;
     ctx.function = function;
     ctx.current_block = entry;
-    ctx.defined_user_names = collect_function_predeclared_names(unit);
+    ctx.defined_user_names = predeclared_user_names;
     ctx.mark_defined(function->inputs());
     ctx.mark_defined(function->outputs());
 
