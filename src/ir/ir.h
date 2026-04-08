@@ -40,6 +40,29 @@ struct NamedValue {
 using ValueId = std::uint32_t;
 constexpr ValueId InvalidValueId = 0;
 
+/**
+ * @brief 一元运算节点共享的操作码类型。
+ */
+enum class UnaryOpType {
+    Logic_Not,
+    UMinus,
+};
+
+/**
+ * @brief 二元运算节点共享的操作码类型。
+ */
+enum class BinOpType {
+    Add,
+    Subtract,
+    Eq,
+    Gt,
+    Lt,
+    Ne,
+    Or,
+    MPower,
+    Multiply,
+};
+
 class IRNode;
 class BasicBlock;
 class Function;
@@ -210,10 +233,10 @@ private:
  */
 class UnaryOpNode final : public NonSSANode {
 public:
-    enum Op {
-        Logic_Not,
-        UMinus,
-    };
+    using Op = UnaryOpType;
+
+    static constexpr Op Logic_Not = Op::Logic_Not;
+    static constexpr Op UMinus = Op::UMinus;
 
     UnaryOpNode(Op op, NamedValue result, NamedValue operand,
                 std::optional<SourceLocation> location = std::nullopt);
@@ -223,7 +246,7 @@ public:
     const NamedValue& operand() const;
 
 private:
-    Op op_ = UMinus;
+    Op op_ = Op::UMinus;
     NamedValue result_;
     NamedValue operand_;
 };
@@ -233,17 +256,17 @@ private:
  */
 class BinOpNode final : public NonSSANode {
 public:
-    enum Op {
-        Add,
-        Subtract,
-        Eq,
-        Gt,
-        Lt,
-        Ne,
-        Or,
-        MPower,
-        Multiply,
-    };
+    using Op = BinOpType;
+
+    static constexpr Op Add = Op::Add;
+    static constexpr Op Subtract = Op::Subtract;
+    static constexpr Op Eq = Op::Eq;
+    static constexpr Op Gt = Op::Gt;
+    static constexpr Op Lt = Op::Lt;
+    static constexpr Op Ne = Op::Ne;
+    static constexpr Op Or = Op::Or;
+    static constexpr Op MPower = Op::MPower;
+    static constexpr Op Multiply = Op::Multiply;
 
     BinOpNode(Op op, NamedValue result, NamedValue lhs, NamedValue rhs,
               std::optional<SourceLocation> location = std::nullopt);
@@ -254,7 +277,7 @@ public:
     const NamedValue& rhs() const;
 
 private:
-    Op op_ = Add;
+    Op op_ = Op::Add;
     NamedValue result_;
     NamedValue lhs_;
     NamedValue rhs_;
@@ -425,7 +448,7 @@ private:
  */
 class SSAUnaryOpNode final : public UntypedSSANode {
 public:
-    using Op = UnaryOpNode::Op;
+    using Op = UnaryOpType;
 
     SSAUnaryOpNode(Op op, ValueId result, ValueRef operand,
                    std::optional<SourceLocation> location = std::nullopt);
@@ -435,7 +458,7 @@ public:
     ValueRef operand() const;
 
 private:
-    Op op_ = UnaryOpNode::UMinus;
+    Op op_ = Op::UMinus;
     ValueId result_ = InvalidValueId;
     ValueRef operand_;
 };
@@ -445,7 +468,7 @@ private:
  */
 class SSABinOpNode final : public UntypedSSANode {
 public:
-    using Op = BinOpNode::Op;
+    using Op = BinOpType;
 
     SSABinOpNode(Op op, ValueId result, ValueRef lhs, ValueRef rhs,
                  std::optional<SourceLocation> location = std::nullopt);
@@ -456,7 +479,7 @@ public:
     ValueRef rhs() const;
 
 private:
-    Op op_ = BinOpNode::Add;
+    Op op_ = Op::Add;
     ValueId result_ = InvalidValueId;
     ValueRef lhs_;
     ValueRef rhs_;

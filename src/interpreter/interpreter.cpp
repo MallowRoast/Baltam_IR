@@ -166,7 +166,7 @@ std::size_t required_builtin_out_count(const std::string& name) {
 std::vector<Value::Object> invoke_function_ptr(const std::string& name, baFunPtr function_ptr,
                                                const std::vector<Value::Object>& in_args,
                                                std::size_t out_count, CallableType type) {
-    std::vector<__const_ba_obj_p> runtime_in_args;
+    std::vector<const_ba_obj_ptr> runtime_in_args;
     runtime_in_args.reserve(in_args.size());
     for (const Value::Object& arg : in_args) {
         runtime_in_args.push_back(arg);

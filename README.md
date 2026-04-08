@@ -107,13 +107,13 @@ cmake --build build
 4. 构建 untyped SSA IR
 5. 再做 verifier
 6. 打印两份 IR
-7. 若入口函数是零参数，则执行 untyped SSA 并打印输出值
+7. 若入口函数是零参数，或通过 `--` 提供了对应个数的字符串实参，则执行 untyped SSA 并打印输出值
 
 示例：
 
 ```bash
 ./build/main simple_demo
-./build/main test1
+./build/main test1 -- left right
 ./build/main /home/zj/Desktop/Baltam_IR/test/test37/test37.m
 ```
 
@@ -123,8 +123,10 @@ cmake --build build
 LD_LIBRARY_PATH="$PWD/deps/core/lib:/opt/Baltamatica/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ./build/main simple_demo
 ```
 
-当前 `main` 已接入零参数入口函数的 untyped SSA 执行；
-若入口函数需要参数，则当前仍只打印 IR，并提示跳过执行。
+当前 `main` 已接入入口函数的 untyped SSA 执行；
+零参数入口函数可直接运行，带参数入口函数可通过 `--` 后追加字符串实参，例如
+`./build/main test1 -- left right`。
+若未提供所需参数，则当前仍只打印 IR，并提示跳过执行。
 
 ## 测试
 

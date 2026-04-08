@@ -55,6 +55,14 @@ EOF
     esac
 }
 
+entry_args_for_test() {
+    case "$1" in
+        test/test1/test1.m)
+            printf '%s\n' "left" "right"
+            ;;
+    esac
+}
+
 selected_tests=()
 verbose_mode=0
 if (( $# == 0 )); then
@@ -110,11 +118,17 @@ failures=0
 test_log="$(mktemp)"
 
 for test_file in "${selected_tests[@]}"; do
+    command=("${binary_path}" "$test_file")
+    mapfile -t entry_args < <(entry_args_for_test "$test_file")
+    if (( ${#entry_args[@]} != 0 )); then
+        command+=(-- "${entry_args[@]}")
+    fi
+
     if (( verbose_mode )); then
         printf '==> %s\n' "$test_file"
         : >"${test_log}"
         # 指定测试时显式回放程序的完整输出，确保 IR 和解释器输出都稳定显示。
-        if "${binary_path}" "$test_file" >"${test_log}" 2>&1; then
+        if "${command[@]}" >"${test_log}" 2>&1; then
             cat "${test_log}"
             printf 'PASS %s\n' "$test_file"
         else
@@ -123,7 +137,7 @@ for test_file in "${selected_tests[@]}"; do
             failures=$((failures + 1))
         fi
     else
-        if "${binary_path}" "$test_file" >"${test_log}" 2>&1; then
+        if "${command[@]}" >"${test_log}" 2>&1; then
             printf 'PASS %s\n' "$test_file"
         else
             printf 'FAIL %s\n' "$test_file"

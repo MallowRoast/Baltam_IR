@@ -54,20 +54,25 @@ void configure_runtime_library_path() {
     setenv("LD_LIBRARY_PATH", (required_prefix + ":" + current).c_str(), 1);
 }
 
-void test_execute_simple_demo() {
-    const std::string script_path = source_path_from_relative("/test/simple_demo.m");
+Module build_ssa_module_from_relative_path(std::string_view relative_path) {
+    const std::string script_path = source_path_from_relative(relative_path);
     std::string parse_message;
     const auto parsed_units =
         bt_ast_interface::parse_mfile(script_path, ParserOpts{ParserOpts::DEFAULT}, parse_message);
 
-    expect(!parsed_units.empty(), "simple_demo parse should produce AST units: " + parse_message);
+    expect(!parsed_units.empty(), std::string(relative_path) +
+                                     " parse should produce AST units: " + parse_message);
 
     Module non_ssa_module = lower_parsed_units_to_ir(parsed_units);
     analysis::verify_module_or_throw(non_ssa_module);
 
     Module ssa_module = optimizer::construct_untyped_ssa_module(non_ssa_module);
     analysis::verify_module_or_throw(ssa_module);
+    return ssa_module;
+}
 
+void test_execute_simple_demo() {
+    Module ssa_module = build_ssa_module_from_relative_path("/test/simple_demo.m");
     Function* entry_function = ssa_module.entry_function();
     expect(entry_function != nullptr, "simple_demo SSA module should have entry function.");
 
@@ -87,6 +92,24 @@ void test_execute_simple_demo() {
     expect_near(c, expected_c, 1e-12, "simple_demo c mismatch.");
 }
 
+void test_execute_test1_with_args() {
+    Module ssa_module = build_ssa_module_from_relative_path("/test/test1/test1.m");
+    Function* entry_function = ssa_module.entry_function();
+    expect(entry_function != nullptr, "test1 SSA module should have entry function.");
+    expect(entry_function->inputs().size() == 2, "test1 should require exactly 2 input args.");
+
+    const interpreter::ExecResult result = interpreter::execute_function(
+        *entry_function,
+        {std::make_shared<ba_obj>("left", ba_char_mat),
+         std::make_shared<ba_obj>("right", ba_char_mat)});
+
+    expect(result.outputs.size() == 1, "test1 should expose ret output.");
+    expect(result.outputs[0].type == interpreter::Value::Concrete,
+           "test1 output should be concrete.");
+    expect(result.outputs[0].object != nullptr, "test1 output object should not be null.");
+    expect(result.outputs[0].object->as_int() == 0, "test1 ret should be 0.");
+}
+
 }  // namespace
 
 int main() {
@@ -101,6 +124,7 @@ int main() {
 
     try {
         test_execute_simple_demo();
+        test_execute_test1_with_args();
         std::cout << "simple_demo_test PASSED\n";
     } catch (const std::exception& ex) {
         std::cerr << "simple_demo_test FAILED: " << ex.what() << '\n';

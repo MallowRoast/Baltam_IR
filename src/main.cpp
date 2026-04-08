@@ -23,6 +23,10 @@ using namespace baltam;
 
 namespace {
 
+struct RunRequest {
+    std::vector<std::string> script_paths;
+    std::vector<std::string> entry_args;
+};
 
 std::string source_path_from_relative(std::string_view relative_path) {
     return std::string(BALTAM_IR_SOURCE_DIR) + std::string(relative_path);
@@ -76,20 +80,38 @@ std::string format_value(const interpreter::Value& value) {
     return internal::obj2str_one_line(*value.object);
 }
 
-void execute_and_print_untyped_ssa(std::ostream& os, Module& untyped_ssa_module) {
+std::vector<interpreter::Value::Object> make_entry_arguments(
+    const std::vector<std::string>& entry_arg_texts) {
+    std::vector<interpreter::Value::Object> args;
+    args.reserve(entry_arg_texts.size());
+    for (const std::string& text : entry_arg_texts) {
+        args.push_back(std::make_shared<ba_obj>(text.c_str(), ba_char_mat));
+    }
+    return args;
+}
+
+void execute_and_print_untyped_ssa(std::ostream& os, Module& untyped_ssa_module,
+                                   const std::vector<std::string>& entry_arg_texts = {}) {
     Function* entry_function = untyped_ssa_module.entry_function();
     if (entry_function == nullptr) {
         throw std::runtime_error("SSA 模块缺少入口函数，无法执行。");
     }
 
-    if (!entry_function->inputs().empty()) {
+    const std::size_t expected_arg_count = entry_function->inputs().size();
+    if (entry_arg_texts.empty() && expected_arg_count != 0) {
         os << "; 跳过执行：入口函数 `" << entry_function->name() << "` 需要 "
-           << entry_function->inputs().size()
-           << " 个参数，main 当前只支持零参数执行。" << std::endl;
+           << expected_arg_count << " 个参数；请使用 `--` 后追加 "
+           << expected_arg_count << " 个字符串实参。" << std::endl;
         return;
     }
+    if (entry_arg_texts.size() != expected_arg_count) {
+        throw std::runtime_error("入口函数 `" + entry_function->name() + "` 需要 " +
+                                 std::to_string(expected_arg_count) + " 个参数，但 main 收到 " +
+                                 std::to_string(entry_arg_texts.size()) + " 个。");
+    }
 
-    const interpreter::ExecResult exec_result = interpreter::execute_function(*entry_function);
+    const interpreter::ExecResult exec_result =
+        interpreter::execute_function(*entry_function, make_entry_arguments(entry_arg_texts));
     os << "; untyped SSA execution result for `" << entry_function->name() << '`' << std::endl;
     if (exec_result.outputs.empty()) {
         os << "; <no outputs>" << std::endl;
@@ -106,7 +128,40 @@ void execute_and_print_untyped_ssa(std::ostream& os, Module& untyped_ssa_module)
     }
 }
 
-int run_m_file(const std::string& script_path) {
+RunRequest parse_run_request(int argc, char** argv) {
+    RunRequest request;
+    int separator_index = -1;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string_view(argv[i]) == "--") {
+            separator_index = i;
+            break;
+        }
+    }
+
+    if (separator_index < 0) {
+        request.script_paths.reserve(static_cast<std::size_t>(std::max(argc - 1, 0)));
+        for (int i = 1; i < argc; ++i) {
+            request.script_paths.push_back(resolve_script_argument(argv[i]));
+        }
+        return request;
+    }
+
+    if (separator_index == 1) {
+        throw std::runtime_error("`--` 前缺少脚本参数。");
+    }
+    if (separator_index != 2) {
+        throw std::runtime_error("带入口参数执行时，main 当前只支持单个脚本。");
+    }
+
+    request.script_paths.push_back(resolve_script_argument(argv[1]));
+    request.entry_args.reserve(static_cast<std::size_t>(argc - separator_index - 1));
+    for (int i = separator_index + 1; i < argc; ++i) {
+        request.entry_args.push_back(argv[i]);
+    }
+    return request;
+}
+
+int run_m_file(const std::string& script_path, const std::vector<std::string>& entry_arg_texts = {}) {
     int exit_code = 0;
     std::string msg;
     const auto parsed_units =
@@ -127,7 +182,7 @@ int run_m_file(const std::string& script_path) {
         analysis::verify_module_or_throw(untyped_ssa_module);
         print_ir(std::cout, non_ssa_module);
         print_ir(std::cout, untyped_ssa_module);
-        execute_and_print_untyped_ssa(std::cout, untyped_ssa_module);
+        execute_and_print_untyped_ssa(std::cout, untyped_ssa_module, entry_arg_texts);
         std::cout << std::endl;
     } catch (const std::exception& ex) {
         std::cerr << "文件的 IR 处理失败: " << script_path << "，原因: "
@@ -150,18 +205,22 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::vector<std::string> script_paths;
-    script_paths.reserve(static_cast<std::size_t>(std::max(argc - 1, 0)));
-    for (int i = 1; i < argc; ++i) {
-        const std::string arg = argv[i];
-        script_paths.push_back(resolve_script_argument(arg));
+    RunRequest run_request;
+    try {
+        run_request = parse_run_request(argc, argv);
+    } catch (const std::exception& ex) {
+        std::cerr << "命令行参数错误: " << ex.what() << std::endl;
+        bt_ast_interface::finalize();
+        std::_Exit(1);
     }
 
-    for (std::size_t i = 0; i < script_paths.size(); ++i) {
+    for (std::size_t i = 0; i < run_request.script_paths.size(); ++i) {
         if (i != 0) {
             std::cout << std::string(72, '=') << std::endl;
         }
-        exit_code = std::max(exit_code, run_m_file(script_paths[i]));
+        const std::vector<std::string>& entry_args =
+            i == 0 ? run_request.entry_args : std::vector<std::string>{};
+        exit_code = std::max(exit_code, run_m_file(run_request.script_paths[i], entry_args));
     }
 
     std::cout << std::flush;
