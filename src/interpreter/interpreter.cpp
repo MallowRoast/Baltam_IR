@@ -17,27 +17,24 @@
 namespace baltam::interpreter {
 namespace {
 
-using RuntimeValueTable = std::unordered_map<ValueId, RuntimeValue>;
+using ValueTable = std::unordered_map<ValueId, Value>;
 
 struct ExecutionState {
     Function& function;
-    RuntimeValueTable values;
-    std::vector<RuntimeValue> outputs;
+    ValueTable values;
+    std::vector<Value> outputs;
     BasicBlock* predecessor = nullptr;
+
+    const Value& load_value(ValueRef ref) const;
+    const Value& require_concrete_value(ValueRef ref, const char* context) const;
+    Value::Object require_concrete_object(ValueRef ref, const char* context) const;
+    void store_value(ValueId id, Value value);
 };
 
 enum class CallableType {
     Builtin,
     Internal,
 };
-
-const UntypedSSANode& require_untyped_ssa_node(const IRNode& node) {
-    const auto* untyped_ssa = dynamic_cast<const UntypedSSANode*>(&node);
-    if (untyped_ssa == nullptr) {
-        throw std::runtime_error("解释器收到了非 `UntypedSSANode` 节点。");
-    }
-    return *untyped_ssa;
-}
 
 std::string value_label(const Function& function, ValueId id) {
     const std::string* debug_name = function.find_value_debug_name(id);
@@ -51,51 +48,49 @@ std::string block_label(const BasicBlock* block) {
     return block != nullptr ? block->name() : "<entry>";
 }
 
-RuntimeValue concrete(RuntimeObject object) {
-    return RuntimeValue{RuntimeValue::Concrete, std::move(object)};
-}
-
-RuntimeValue undef() {
-    return RuntimeValue{RuntimeValue::Undef, nullptr};
-}
-
-const RuntimeValue& load_value(const ExecutionState& state, ValueRef ref) {
+const Value& ExecutionState::load_value(ValueRef ref) const {
     if (!ref.valid()) {
         throw std::runtime_error("尝试读取非法的 `ValueRef`。");
     }
 
-    auto it = state.values.find(ref.id);
-    if (it == state.values.end()) {
-        throw std::runtime_error("函数 `" + state.function.name() + "` 读取了未定义的 SSA 值 `" +
-                                 value_label(state.function, ref.id) + "`。");
+    auto it = values.find(ref.id);
+    if (it == values.end()) {
+        throw std::runtime_error("函数 `" + function.name() + "` 读取了未定义的 SSA 值 `" +
+                                 value_label(function, ref.id) + "`。");
     }
     return it->second;
 }
 
-const RuntimeValue& require_concrete_value(const ExecutionState& state, ValueRef ref,
-                                           const char* context) {
-    const RuntimeValue& value = load_value(state, ref);
-    if (value.type == RuntimeValue::Undef) {
-        throw std::runtime_error("函数 `" + state.function.name() + "` 在 " + context +
+const Value& ExecutionState::require_concrete_value(ValueRef ref, const char* context) const {
+    const Value& value = load_value(ref);
+    if (value.type == Value::Undef) {
+        throw std::runtime_error("函数 `" + function.name() + "` 在 " + context +
                                  " 使用了 `undef` SSA 值 `" +
-                                 value_label(state.function, ref.id) + "`。");
+                                 value_label(function, ref.id) + "`。");
     }
     return value;
 }
 
-RuntimeObject require_concrete_object(const ExecutionState& state, ValueRef ref,
-                                      const char* context) {
-    return require_concrete_value(state, ref, context).object;
+Value::Object ExecutionState::require_concrete_object(ValueRef ref, const char* context) const {
+    return require_concrete_value(ref, context).object;
 }
 
-void store_value(ExecutionState& state, ValueId id, RuntimeValue value) {
+void ExecutionState::store_value(ValueId id, Value value) {
     if (id == InvalidValueId) {
-        throw std::runtime_error("函数 `" + state.function.name() + "` 试图写入非法的 SSA 值。");
+        throw std::runtime_error("函数 `" + function.name() + "` 试图写入非法的 SSA 值。");
     }
-    state.values[id] = std::move(value);
+    values[id] = std::move(value);
 }
 
-bool condition_value_as_bool(const RuntimeObject& value) {
+Value concrete(Value::Object object) {
+    return Value{Value::Concrete, std::move(object)};
+}
+
+Value undef() {
+    return Value{Value::Undef, nullptr};
+}
+
+bool condition_value_as_bool(const Value::Object& value) {
     if (value == nullptr) {
         throw std::runtime_error("条件值为空。");
     }
@@ -168,17 +163,17 @@ std::size_t required_builtin_out_count(const std::string& name) {
     return static_cast<std::size_t>(declared_nargout);
 }
 
-std::vector<RuntimeObject> invoke_function_ptr(const std::string& name, baFunPtr function_ptr,
-                                               const std::vector<RuntimeObject>& in_args,
+std::vector<Value::Object> invoke_function_ptr(const std::string& name, baFunPtr function_ptr,
+                                               const std::vector<Value::Object>& in_args,
                                                std::size_t out_count, CallableType type) {
     std::vector<__const_ba_obj_p> runtime_in_args;
     runtime_in_args.reserve(in_args.size());
-    for (const RuntimeObject& arg : in_args) {
+    for (const Value::Object& arg : in_args) {
         runtime_in_args.push_back(arg);
     }
 
     const bool use_ans_placeholder = out_count == 0;
-    std::vector<RuntimeObject> out_args(use_ans_placeholder ? 1 : out_count);
+    std::vector<Value::Object> out_args(use_ans_placeholder ? 1 : out_count);
     for (std::size_t i = 0; i < out_args.size(); ++i) {
         out_args[i] = use_ans_placeholder && i == 0 ? ba_obj::make_void(V_ANS)
                                                     : std::make_shared<ba_obj>();
@@ -195,7 +190,7 @@ std::vector<RuntimeObject> invoke_function_ptr(const std::string& name, baFunPtr
     return out_args;
 }
 
-RuntimeObject eval_binop(BinOpNode::Op op, RuntimeObject lhs, RuntimeObject rhs) {
+Value::Object eval_binop(BinOpNode::Op op, Value::Object lhs, Value::Object rhs) {
     std::string name;
     switch (op) {
         case BinOpNode::Add:
@@ -231,13 +226,13 @@ RuntimeObject eval_binop(BinOpNode::Op op, RuntimeObject lhs, RuntimeObject rhs)
     if (!try_lookup_builtin_function_cached(name, function_ptr)) {
         throw std::runtime_error("找不到内置函数：" + name);
     }
-    std::vector<RuntimeObject> results =
+    std::vector<Value::Object> results =
         invoke_function_ptr(name, function_ptr, {std::move(lhs), std::move(rhs)}, 1,
                             CallableType::Builtin);
     return results.front();
 }
 
-RuntimeObject eval_unaryop(UnaryOpNode::Op op, RuntimeObject operand) {
+Value::Object eval_unaryop(UnaryOpNode::Op op, Value::Object operand) {
     std::string name;
     switch (op) {
         case UnaryOpNode::Logic_Not:
@@ -252,18 +247,18 @@ RuntimeObject eval_unaryop(UnaryOpNode::Op op, RuntimeObject operand) {
     if (!try_lookup_builtin_function_cached(name, function_ptr)) {
         throw std::runtime_error("找不到内置函数：" + name);
     }
-    std::vector<RuntimeObject> results =
+    std::vector<Value::Object> results =
         invoke_function_ptr(name, function_ptr, {std::move(operand)}, 1, CallableType::Builtin);
     return results.front();
 }
 
-std::vector<RuntimeValue> wrap_outputs(std::vector<RuntimeObject> values, std::size_t expected_out_count,
-                                       const std::string& callee_name) {
+std::vector<Value> wrap_outputs(std::vector<Value::Object> values, std::size_t expected_out_count,
+                                const std::string& callee_name) {
     if (values.size() < expected_out_count) {
         throw std::runtime_error("调用 `" + callee_name + "` 时返回值个数不足。");
     }
 
-    std::vector<RuntimeValue> outputs;
+    std::vector<Value> outputs;
     outputs.reserve(expected_out_count);
     for (std::size_t i = 0; i < expected_out_count; ++i) {
         outputs.push_back(concrete(std::move(values[i])));
@@ -271,11 +266,11 @@ std::vector<RuntimeValue> wrap_outputs(std::vector<RuntimeObject> values, std::s
     return outputs;
 }
 
-ExecResult execute_function_impl(Function& function, const std::vector<RuntimeObject>& args);
+ExecResult execute_function_impl(Function& function, const std::vector<Value::Object>& args);
 
-std::vector<RuntimeValue> invoke_module_function(Function& caller, const std::string& function_name,
-                                                 const std::vector<RuntimeObject>& in_args,
-                                                 std::size_t expected_out_count) {
+std::vector<Value> invoke_module_function(Function& caller, const std::string& function_name,
+                                          const std::vector<Value::Object>& in_args,
+                                          std::size_t expected_out_count) {
     Module* module = caller.parent();
     if (module == nullptr) {
         throw std::runtime_error("找不到可调用的函数 `" + function_name + "`：当前函数不在模块内。");
@@ -288,16 +283,16 @@ std::vector<RuntimeValue> invoke_module_function(Function& caller, const std::st
                 throw std::runtime_error("函数 `" + function_name + "` 的输出个数不足。");
             }
             callee_result.outputs.resize(expected_out_count);
-            return callee_result.outputs;
+            return std::move(callee_result.outputs);
         }
     }
 
     throw std::runtime_error("找不到可调用的函数 `" + function_name + "`。");
 }
 
-std::vector<RuntimeValue> invoke_direct_call(Function& caller, const std::string& callee_name,
-                                             const std::vector<RuntimeObject>& in_args,
-                                             std::size_t expected_out_count) {
+std::vector<Value> invoke_direct_call(Function& caller, const std::string& callee_name,
+                                      const std::vector<Value::Object>& in_args,
+                                      std::size_t expected_out_count) {
     if (callee_name == "__ir_make_cell__") {
         if (expected_out_count == 0) {
             return {};
@@ -324,8 +319,8 @@ std::vector<RuntimeValue> invoke_direct_call(Function& caller, const std::string
             return {};
         }
 
-        const RuntimeObject& lhs = in_args[0];
-        const RuntimeObject& rhs = in_args[1];
+        const Value::Object& lhs = in_args[0];
+        const Value::Object& rhs = in_args[1];
         bool matched = false;
 
         try {
@@ -372,9 +367,9 @@ std::vector<RuntimeValue> invoke_direct_call(Function& caller, const std::string
     throw std::runtime_error("找不到可调用的函数 `" + callee_name + "`。");
 }
 
-std::vector<RuntimeValue> invoke_indirect_call(Function& caller, const RuntimeObject& callee_value,
-                                               const std::vector<RuntimeObject>& in_args,
-                                               std::size_t expected_out_count) {
+std::vector<Value> invoke_indirect_call(Function& caller, const Value::Object& callee_value,
+                                        const std::vector<Value::Object>& in_args,
+                                        std::size_t expected_out_count) {
     if (callee_value == nullptr) {
         throw std::runtime_error("调用目标为空。");
     }
@@ -410,11 +405,11 @@ std::vector<RuntimeValue> invoke_indirect_call(Function& caller, const RuntimeOb
                              std::string(fh_type_string(handle->type())) + "`。");
 }
 
-std::vector<RuntimeValue> evaluate_call(const SSACallNode& call, ExecutionState& state) {
-    std::vector<RuntimeObject> in_args;
+std::vector<Value> evaluate_call(const SSACallNode& call, ExecutionState& state) {
+    std::vector<Value::Object> in_args;
     in_args.reserve(call.inputs().size());
     for (const ValueRef input : call.inputs()) {
-        in_args.push_back(require_concrete_object(state, input, "调用实参"));
+        in_args.push_back(state.require_concrete_object(input, "调用实参"));
     }
 
     const std::size_t expected_out_count = call.results().size();
@@ -423,13 +418,13 @@ std::vector<RuntimeValue> evaluate_call(const SSACallNode& call, ExecutionState&
                                   expected_out_count);
     }
 
-    const RuntimeObject callee_value =
-        require_concrete_object(state, call.callee().indirect_value, "间接调用目标");
+    const Value::Object callee_value =
+        state.require_concrete_object(call.callee().indirect_value, "间接调用目标");
     return invoke_indirect_call(state.function, callee_value, in_args, expected_out_count);
 }
 
 void execute_phi_nodes(const BasicBlock& block, ExecutionState& state) {
-    std::vector<std::pair<ValueId, RuntimeValue>> pending;
+    std::vector<std::pair<ValueId, Value>> pending;
     pending.reserve(block.phi_nodes().size());
 
     for (IRNode* node : block.phi_nodes()) {
@@ -437,7 +432,7 @@ void execute_phi_nodes(const BasicBlock& block, ExecutionState& state) {
             continue;
         }
 
-        const auto& phi = static_cast<const SSAPhiNode&>(require_untyped_ssa_node(*node));
+        const auto& phi = static_cast<const SSAPhiNode&>(*node);
         const SSAPhiNode::Incoming* selected = nullptr;
         for (const SSAPhiNode::Incoming& incoming : phi.incomings()) {
             if (incoming.predecessor == state.predecessor) {
@@ -453,66 +448,66 @@ void execute_phi_nodes(const BasicBlock& block, ExecutionState& state) {
                                      "` 的 incoming。");
         }
 
-        pending.emplace_back(phi.result(), load_value(state, selected->value));
+        pending.emplace_back(phi.result(), state.load_value(selected->value));
     }
 
     for (auto& entry : pending) {
-        store_value(state, entry.first, std::move(entry.second));
+        state.store_value(entry.first, std::move(entry.second));
     }
 }
 
 void execute_instruction(const IRNode& node, ExecutionState& state) {
-    const UntypedSSANode& ssa = require_untyped_ssa_node(node);
+    const auto& ssa = static_cast<const UntypedSSANode&>(node);
     switch (ssa.type()) {
         case UntypedSSANode::SSA_Number: {
             const auto& number = static_cast<const SSANumberNode&>(ssa);
-            RuntimeObject object = std::visit(
-                [](const auto& item) -> RuntimeObject { return std::make_shared<ba_obj>(item); },
+            Value::Object object = std::visit(
+                [](const auto& item) -> Value::Object { return std::make_shared<ba_obj>(item); },
                 number.value());
-            store_value(state, number.result(), concrete(std::move(object)));
+            state.store_value(number.result(), concrete(std::move(object)));
             return;
         }
         case UntypedSSANode::SSA_Text: {
             const auto& text = static_cast<const SSATextNode&>(ssa);
-            store_value(state, text.result(),
-                        concrete(std::make_shared<ba_obj>(text.text().c_str(), ba_char_mat)));
+            state.store_value(text.result(),
+                              concrete(std::make_shared<ba_obj>(text.text().c_str(), ba_char_mat)));
             return;
         }
         case UntypedSSANode::SSA_Undef: {
             const auto& undef_node = static_cast<const SSAUndefNode&>(ssa);
-            store_value(state, undef_node.result(), undef());
+            state.store_value(undef_node.result(), undef());
             return;
         }
         case UntypedSSANode::SSA_Copy: {
             const auto& copy = static_cast<const SSACopyNode&>(ssa);
-            store_value(state, copy.result(), load_value(state, copy.src()));
+            state.store_value(copy.result(), state.load_value(copy.src()));
             return;
         }
         case UntypedSSANode::SSA_UnaryOp: {
             const auto& unary = static_cast<const SSAUnaryOpNode&>(ssa);
-            store_value(state, unary.result(),
-                        concrete(eval_unaryop(
-                            unary.op(),
-                            require_concrete_object(state, unary.operand(), "单目运算输入"))));
+            state.store_value(unary.result(),
+                              concrete(eval_unaryop(
+                                  unary.op(),
+                                  state.require_concrete_object(unary.operand(), "单目运算输入"))));
             return;
         }
         case UntypedSSANode::SSA_BinOp: {
             const auto& binop = static_cast<const SSABinOpNode&>(ssa);
-            store_value(state, binop.result(),
-                        concrete(eval_binop(
-                            binop.op(),
-                            require_concrete_object(state, binop.lhs(), "二元运算左输入"),
-                            require_concrete_object(state, binop.rhs(), "二元运算右输入"))));
+            state.store_value(binop.result(),
+                              concrete(eval_binop(
+                                  binop.op(),
+                                  state.require_concrete_object(binop.lhs(), "二元运算左输入"),
+                                  state.require_concrete_object(binop.rhs(), "二元运算右输入"))));
             return;
         }
         case UntypedSSANode::SSA_Call: {
             const auto& call = static_cast<const SSACallNode&>(ssa);
-            std::vector<RuntimeValue> outputs = evaluate_call(call, state);
+            std::vector<Value> outputs = evaluate_call(call, state);
             if (outputs.size() != call.results().size()) {
                 throw std::runtime_error("函数 `" + state.function.name() + "` 的调用节点返回值个数不匹配。");
             }
             for (std::size_t i = 0; i < outputs.size(); ++i) {
-                store_value(state, call.results()[i], std::move(outputs[i]));
+                state.store_value(call.results()[i], std::move(outputs[i]));
             }
             return;
         }
@@ -531,12 +526,12 @@ BasicBlock* execute_terminal(const BasicBlock& block, ExecutionState& state) {
                                  block.name() + "` 缺少终结节点。");
     }
 
-    const UntypedSSANode& terminal = require_untyped_ssa_node(*block.terminal());
+    const auto& terminal = static_cast<const UntypedSSANode&>(*block.terminal());
     switch (terminal.type()) {
         case UntypedSSANode::SSA_CondJump: {
             const auto& jump = static_cast<const SSACondJumpNode&>(terminal);
             return condition_value_as_bool(
-                       require_concrete_object(state, jump.cond(), "条件跳转条件值"))
+                       state.require_concrete_object(jump.cond(), "条件跳转条件值"))
                        ? jump.true_block()
                        : jump.false_block();
         }
@@ -547,7 +542,7 @@ BasicBlock* execute_terminal(const BasicBlock& block, ExecutionState& state) {
             state.outputs.clear();
             state.outputs.reserve(ret.values().size());
             for (const ValueRef value : ret.values()) {
-                state.outputs.push_back(require_concrete_value(state, value, "返回值"));
+                state.outputs.push_back(state.require_concrete_value(value, "返回值"));
             }
             return nullptr;
         }
@@ -565,7 +560,7 @@ BasicBlock* execute_terminal(const BasicBlock& block, ExecutionState& state) {
     throw std::runtime_error("基本块 `" + block.name() + "` 的终结节点类型非法。");
 }
 
-ExecResult execute_function_impl(Function& function, const std::vector<RuntimeObject>& args) {
+ExecResult execute_function_impl(Function& function, const std::vector<Value::Object>& args) {
     if (function.stage() != IRNode::UntypedSSA) {
         throw std::runtime_error("解释器只支持执行 `UntypedSSA` 函数 `" + function.name() + "`。");
     }
@@ -583,7 +578,7 @@ ExecResult execute_function_impl(Function& function, const std::vector<RuntimeOb
 
     ExecutionState state{function, {}, {}, nullptr};
     for (std::size_t i = 0; i < args.size(); ++i) {
-        store_value(state, function.argument_values()[i], concrete(args[i]));
+        state.store_value(function.argument_values()[i], concrete(args[i]));
     }
 
     BasicBlock* current_block = function.entry_block();
@@ -600,12 +595,12 @@ ExecResult execute_function_impl(Function& function, const std::vector<RuntimeOb
         current_block = next_block;
     }
 
-    return ExecResult{std::move(state.outputs), std::move(state.values)};
+    return ExecResult{std::move(state.outputs)};
 }
 
 }  // namespace
 
-ExecResult execute_function(Function& function, const std::vector<RuntimeObject>& args) {
+ExecResult execute_function(Function& function, const std::vector<Value::Object>& args) {
     return execute_function_impl(function, args);
 }
 

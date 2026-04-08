@@ -107,6 +107,7 @@ cmake --build build
 4. 构建 untyped SSA IR
 5. 再做 verifier
 6. 打印两份 IR
+7. 若入口函数是零参数，则执行 untyped SSA 并打印输出值
 
 示例：
 
@@ -122,7 +123,8 @@ cmake --build build
 LD_LIBRARY_PATH="$PWD/deps/core/lib:/opt/Baltamatica/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ./build/main simple_demo
 ```
 
-当前 `main` 还不会直接执行 SSA；解释执行主要通过测试覆盖。
+当前 `main` 已接入零参数入口函数的 untyped SSA 执行；
+若入口函数需要参数，则当前仍只打印 IR，并提示跳过执行。
 
 ## 测试
 

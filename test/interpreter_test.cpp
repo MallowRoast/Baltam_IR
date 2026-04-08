@@ -29,7 +29,7 @@ void expect_contains(const std::string& text, const std::string& needle,
     }
 }
 
-const interpreter::RuntimeValue& require_single_output(const interpreter::ExecResult& result) {
+const interpreter::Value& require_single_output(const interpreter::ExecResult& result) {
     if (result.outputs.size() != 1) {
         fail("expected exactly one output.");
     }
@@ -38,8 +38,8 @@ const interpreter::RuntimeValue& require_single_output(const interpreter::ExecRe
 
 void expect_output_int(const interpreter::ExecResult& result, std::int64_t expected,
                        const std::string& message) {
-    const interpreter::RuntimeValue& output = require_single_output(result);
-    expect(output.type == interpreter::RuntimeValue::Concrete, message + " output should be concrete.");
+    const interpreter::Value& output = require_single_output(result);
+    expect(output.type == interpreter::Value::Concrete, message + " output should be concrete.");
     expect(output.object != nullptr, message + " output object should not be null.");
     expect(output.object->as_int() == expected, message + " output mismatch.");
 }
@@ -104,8 +104,8 @@ void test_execute_branch_phi() {
 
     analysis::verify_function_or_throw(function);
 
-    interpreter::RuntimeObject true_arg = std::make_shared<ba_obj>(true);
-    interpreter::RuntimeObject false_arg = std::make_shared<ba_obj>(false);
+    interpreter::Value::Object true_arg = std::make_shared<ba_obj>(true);
+    interpreter::Value::Object false_arg = std::make_shared<ba_obj>(false);
     expect_output_int(interpreter::execute_function(function, {true_arg}), 1, "branch phi true");
     expect_output_int(interpreter::execute_function(function, {false_arg}), 2, "branch phi false");
 }
