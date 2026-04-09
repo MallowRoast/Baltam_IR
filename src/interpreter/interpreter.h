@@ -2,6 +2,9 @@
 #define BALTAM_IR_INTERPRETER_INTERPRETER_H
 
 #include <memory>
+#include <ostream>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "ba_obj/ba_obj.h"
@@ -29,13 +32,26 @@ struct Value {
     Object object;
 };
 
+struct NamedBindingSnapshot {
+    std::string name;
+    ValueId value_id = InvalidValueId;
+};
+
+struct ExecutionOptions {
+    std::ostream* trace_stream = nullptr;
+    bool print_final_named_bindings = false;
+};
+
 /**
  * @brief 函数解释执行的结果。
  *
- * 当前只对外暴露函数 `ret` 返回的输出值，不返回中间 SSA 值表。
+ * 除了函数 `ret` 返回值之外，也对外暴露执行后仍可观察到的 SSA 值表和
+ * 具名绑定快照，方便测试和调试。
  */
 struct ExecResult {
     std::vector<Value> outputs;
+    std::unordered_map<ValueId, Value> values;
+    std::vector<NamedBindingSnapshot> final_named_bindings;
 };
 
 /**
@@ -44,7 +60,8 @@ struct ExecResult {
  * `args` 按函数 `argument_values()` 的顺序传入；返回值中的 `outputs`
  * 与函数 `ret` 的返回顺序一致。结构非法或运行时失败时抛出异常。
  */
-ExecResult execute_function(Function& function, const std::vector<Value::Object>& args = {});
+ExecResult execute_function(Function& function, const std::vector<Value::Object>& args = {},
+                            const ExecutionOptions& options = ExecutionOptions{});
 
 }  // namespace baltam::interpreter
 

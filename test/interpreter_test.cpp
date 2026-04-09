@@ -44,6 +44,24 @@ void expect_output_int(const interpreter::ExecResult& result, std::int64_t expec
     expect(output.object->as_int() == expected, message + " output mismatch.");
 }
 
+const interpreter::NamedBindingSnapshot* find_named_binding(const interpreter::ExecResult& result,
+                                                            const std::string& name) {
+    for (const interpreter::NamedBindingSnapshot& binding : result.final_named_bindings) {
+        if (binding.name == name) {
+            return &binding;
+        }
+    }
+    return nullptr;
+}
+
+const interpreter::Value* find_value(const interpreter::ExecResult& result, ValueId id) {
+    auto it = result.values.find(id);
+    if (it == result.values.end()) {
+        return nullptr;
+    }
+    return &it->second;
+}
+
 void test_execute_constant_and_copy() {
     Function function("const_copy", Function::PrimaryFunction);
     function.set_stage(IRNode::UntypedSSA);
@@ -108,6 +126,74 @@ void test_execute_branch_phi() {
     interpreter::Value::Object false_arg = std::make_shared<ba_obj>(false);
     expect_output_int(interpreter::execute_function(function, {true_arg}), 1, "branch phi true");
     expect_output_int(interpreter::execute_function(function, {false_arg}), 2, "branch phi false");
+}
+
+void test_exec_result_tracks_final_named_bindings() {
+    Function function("named_bindings", Function::PrimaryFunction);
+    function.set_stage(IRNode::UntypedSSA);
+    function.set_input_names({"cond"});
+    function.set_output_names({"out"});
+
+    const ValueId cond = function.create_value("cond");
+    function.set_argument_values({cond});
+
+    BasicBlock* entry = function.create_block("entry");
+    BasicBlock* then_block = function.create_block("then");
+    BasicBlock* else_block = function.create_block("else");
+    BasicBlock* merge = function.create_block("merge");
+    function.set_entry_block(entry);
+
+    entry->add_successor(then_block);
+    entry->add_successor(else_block);
+    entry->set_terminal(function.create_node<SSACondJumpNode>(ValueRef{cond}, then_block, else_block));
+
+    const ValueId then_out = function.create_value("out");
+    then_block->append_instruction(
+        function.create_node<SSANumberNode>(then_out, SSANumberNode::NumberValue{std::int64_t{3}}));
+    then_block->add_successor(merge);
+    then_block->set_terminal(function.create_node<SSAJumpNode>(merge));
+
+    const ValueId else_out = function.create_value("out");
+    else_block->append_instruction(
+        function.create_node<SSANumberNode>(else_out, SSANumberNode::NumberValue{std::int64_t{4}}));
+    else_block->add_successor(merge);
+    else_block->set_terminal(function.create_node<SSAJumpNode>(merge));
+
+    const ValueId merged_out = function.create_value("out");
+    auto* phi = function.create_node<SSAPhiNode>(merged_out);
+    phi->add_incoming(then_block, ValueRef{then_out});
+    phi->add_incoming(else_block, ValueRef{else_out});
+    merge->append_phi(phi);
+    merge->set_terminal(function.create_node<SSAReturnNode>(std::vector<ValueRef>{ValueRef{merged_out}}));
+
+    analysis::verify_function_or_throw(function);
+
+    const interpreter::ExecResult true_result =
+        interpreter::execute_function(function, {std::make_shared<ba_obj>(true)});
+    const interpreter::NamedBindingSnapshot* true_out = find_named_binding(true_result, "out");
+    const interpreter::Value* true_value = true_out != nullptr
+                                               ? find_value(true_result, true_out->value_id)
+                                               : nullptr;
+    expect(true_out != nullptr, "true branch should retain final `out` binding.");
+    expect(true_out->value_id == merged_out, "final `out` binding should point at merge phi.");
+    expect(true_value != nullptr, "true branch final `out` should resolve to an SSA value.");
+    expect(true_value->type == interpreter::Value::Concrete,
+           "final `out` binding should be concrete.");
+    expect(true_value->object != nullptr, "final `out` binding object should not be null.");
+    expect(true_value->object->as_int() == 3, "true branch final `out` mismatch.");
+    expect(true_result.values.find(merged_out) != true_result.values.end(),
+           "final SSA value table should keep merged phi.");
+
+    const interpreter::ExecResult false_result =
+        interpreter::execute_function(function, {std::make_shared<ba_obj>(false)});
+    const interpreter::NamedBindingSnapshot* false_out = find_named_binding(false_result, "out");
+    const interpreter::Value* false_value = false_out != nullptr
+                                                ? find_value(false_result, false_out->value_id)
+                                                : nullptr;
+    expect(false_out != nullptr, "false branch should retain final `out` binding.");
+    expect(false_value != nullptr, "false branch final `out` should resolve to an SSA value.");
+    expect(false_value->object != nullptr, "false branch final `out` object should not be null.");
+    expect(false_value->object->as_int() == 4, "false branch final `out` mismatch.");
 }
 
 void test_returning_undef_throws() {
@@ -214,6 +300,7 @@ int main() {
     try {
         test_execute_constant_and_copy();
         test_execute_branch_phi();
+        test_exec_result_tracks_final_named_bindings();
         test_returning_undef_throws();
         test_direct_module_function_call();
         test_indirect_function_handle_call();

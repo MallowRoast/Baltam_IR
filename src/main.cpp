@@ -110,8 +110,12 @@ void execute_and_print_untyped_ssa(std::ostream& os, Module& untyped_ssa_module,
                                  std::to_string(entry_arg_texts.size()) + " 个。");
     }
 
+    interpreter::ExecutionOptions execution_options;
+    execution_options.trace_stream = &os;
+    execution_options.print_final_named_bindings = true;
     const interpreter::ExecResult exec_result =
-        interpreter::execute_function(*entry_function, make_entry_arguments(entry_arg_texts));
+        interpreter::execute_function(*entry_function, make_entry_arguments(entry_arg_texts),
+                                      execution_options);
     os << "; untyped SSA execution result for `" << entry_function->name() << '`' << std::endl;
     if (exec_result.outputs.empty()) {
         os << "; <no outputs>" << std::endl;

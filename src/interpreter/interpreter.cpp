@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <ostream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -13,17 +14,25 @@
 #include "ba_obj/cell.h"
 #include "ba_obj/function_handle.h"
 #include "baltam_worker/builtin_manager.h"
+#include "print/obj2str.h"
 
 namespace baltam::interpreter {
 namespace {
 
 using ValueTable = std::unordered_map<ValueId, Value>;
 
+struct ExecutionContext {
+    const ExecutionOptions& options;
+    std::size_t call_depth = 0;
+};
+
 struct ExecutionState {
     Function& function;
     ValueTable values;
+    std::unordered_map<std::string, ValueId> active_named_values;
     std::vector<Value> outputs;
     BasicBlock* predecessor = nullptr;
+    const ExecutionContext& context;
 
     const Value& load_value(ValueRef ref) const;
     const Value& require_concrete_value(ValueRef ref, const char* context) const;
@@ -46,6 +55,20 @@ std::string value_label(const Function& function, ValueId id) {
 
 std::string block_label(const BasicBlock* block) {
     return block != nullptr ? block->name() : "<entry>";
+}
+
+std::string format_value(const Value& value) {
+    if (value.type == Value::Undef) {
+        return "undef";
+    }
+    if (value.object == nullptr) {
+        return "<null>";
+    }
+    return internal::obj2str_one_line(*value.object);
+}
+
+std::string trace_indent(std::size_t call_depth) {
+    return std::string(call_depth * 2, ' ');
 }
 
 const Value& ExecutionState::load_value(ValueRef ref) const {
@@ -80,6 +103,11 @@ void ExecutionState::store_value(ValueId id, Value value) {
         throw std::runtime_error("函数 `" + function.name() + "` 试图写入非法的 SSA 值。");
     }
     values[id] = std::move(value);
+
+    const std::string* debug_name = function.find_value_debug_name(id);
+    if (debug_name != nullptr && !debug_name->empty()) {
+        active_named_values[*debug_name] = id;
+    }
 }
 
 Value concrete(Value::Object object) {
@@ -266,11 +294,13 @@ std::vector<Value> wrap_outputs(std::vector<Value::Object> values, std::size_t e
     return outputs;
 }
 
-ExecResult execute_function_impl(Function& function, const std::vector<Value::Object>& args);
+ExecResult execute_function_impl(Function& function, const std::vector<Value::Object>& args,
+                                 const ExecutionContext& context);
 
 std::vector<Value> invoke_module_function(Function& caller, const std::string& function_name,
                                           const std::vector<Value::Object>& in_args,
-                                          std::size_t expected_out_count) {
+                                          std::size_t expected_out_count,
+                                          const ExecutionContext& context) {
     Module* module = caller.parent();
     if (module == nullptr) {
         throw std::runtime_error("找不到可调用的函数 `" + function_name + "`：当前函数不在模块内。");
@@ -278,7 +308,8 @@ std::vector<Value> invoke_module_function(Function& caller, const std::string& f
 
     for (const auto& function : module->functions()) {
         if (function != nullptr && function->name() == function_name) {
-            ExecResult callee_result = execute_function_impl(*function, in_args);
+            const ExecutionContext callee_context{context.options, context.call_depth + 1};
+            ExecResult callee_result = execute_function_impl(*function, in_args, callee_context);
             if (callee_result.outputs.size() < expected_out_count) {
                 throw std::runtime_error("函数 `" + function_name + "` 的输出个数不足。");
             }
@@ -292,7 +323,8 @@ std::vector<Value> invoke_module_function(Function& caller, const std::string& f
 
 std::vector<Value> invoke_direct_call(Function& caller, const std::string& callee_name,
                                       const std::vector<Value::Object>& in_args,
-                                      std::size_t expected_out_count) {
+                                      std::size_t expected_out_count,
+                                      const ExecutionContext& context) {
     if (callee_name == "__ir_make_cell__") {
         if (expected_out_count == 0) {
             return {};
@@ -342,7 +374,8 @@ std::vector<Value> invoke_direct_call(Function& caller, const std::string& calle
     if (module != nullptr) {
         for (const auto& function : module->functions()) {
             if (function != nullptr && function->name() == callee_name) {
-                return invoke_module_function(caller, callee_name, in_args, expected_out_count);
+                return invoke_module_function(caller, callee_name, in_args, expected_out_count,
+                                              context);
             }
         }
     }
@@ -369,7 +402,8 @@ std::vector<Value> invoke_direct_call(Function& caller, const std::string& calle
 
 std::vector<Value> invoke_indirect_call(Function& caller, const Value::Object& callee_value,
                                         const std::vector<Value::Object>& in_args,
-                                        std::size_t expected_out_count) {
+                                        std::size_t expected_out_count,
+                                        const ExecutionContext& context) {
     if (callee_value == nullptr) {
         throw std::runtime_error("调用目标为空。");
     }
@@ -382,7 +416,8 @@ std::vector<Value> invoke_indirect_call(Function& caller, const Value::Object& c
         case fh_anonymous:
         case fh_mfunction:
         case fh_script:
-            return invoke_module_function(caller, handle->data(), in_args, expected_out_count);
+            return invoke_module_function(caller, handle->data(), in_args, expected_out_count,
+                                          context);
         case fh_builtin: {
             baFunPtr function_ptr = nullptr;
             if (!try_lookup_builtin_function_cached(handle->data(), function_ptr)) {
@@ -415,12 +450,13 @@ std::vector<Value> evaluate_call(const SSACallNode& call, ExecutionState& state)
     const std::size_t expected_out_count = call.results().size();
     if (call.callee().type == SSACallNode::Callee::Direct) {
         return invoke_direct_call(state.function, call.callee().direct_symbol, in_args,
-                                  expected_out_count);
+                                  expected_out_count, state.context);
     }
 
     const Value::Object callee_value =
         state.require_concrete_object(call.callee().indirect_value, "间接调用目标");
-    return invoke_indirect_call(state.function, callee_value, in_args, expected_out_count);
+    return invoke_indirect_call(state.function, callee_value, in_args, expected_out_count,
+                                state.context);
 }
 
 void execute_phi_nodes(const BasicBlock& block, ExecutionState& state) {
@@ -560,7 +596,53 @@ BasicBlock* execute_terminal(const BasicBlock& block, ExecutionState& state) {
     throw std::runtime_error("基本块 `" + block.name() + "` 的终结节点类型非法。");
 }
 
-ExecResult execute_function_impl(Function& function, const std::vector<Value::Object>& args) {
+std::vector<NamedBindingSnapshot> collect_final_named_bindings(const ExecutionState& state) {
+    std::vector<NamedBindingSnapshot> bindings;
+    bindings.reserve(state.active_named_values.size());
+
+    for (const auto& [name, value_id] : state.active_named_values) {
+        if (state.values.find(value_id) == state.values.end()) {
+            continue;
+        }
+        bindings.push_back(NamedBindingSnapshot{name, value_id});
+    }
+
+    std::sort(bindings.begin(), bindings.end(),
+              [](const NamedBindingSnapshot& lhs, const NamedBindingSnapshot& rhs) {
+                  if (lhs.name != rhs.name) {
+                      return lhs.name < rhs.name;
+                  }
+                  return lhs.value_id < rhs.value_id;
+              });
+    return bindings;
+}
+
+void print_final_named_bindings(const Function& function, const ExecResult& result,
+                                const ExecutionContext& context) {
+    if (!context.options.print_final_named_bindings || context.options.trace_stream == nullptr) {
+        return;
+    }
+
+    std::ostream& os = *context.options.trace_stream;
+    const std::string indent = trace_indent(context.call_depth);
+    os << indent << "; final named bindings for `" << function.name() << "`" << std::endl;
+    if (result.final_named_bindings.empty()) {
+        os << indent << "; <none>" << std::endl;
+        return;
+    }
+
+    for (const NamedBindingSnapshot& binding : result.final_named_bindings) {
+        auto value_it = result.values.find(binding.value_id);
+        if (value_it == result.values.end()) {
+            continue;
+        }
+        os << indent << binding.name << " = " << format_value(value_it->second)
+           << "    ; " << value_label(function, binding.value_id) << std::endl;
+    }
+}
+
+ExecResult execute_function_impl(Function& function, const std::vector<Value::Object>& args,
+                                 const ExecutionContext& context) {
     if (function.stage() != IRNode::UntypedSSA) {
         throw std::runtime_error("解释器只支持执行 `UntypedSSA` 函数 `" + function.name() + "`。");
     }
@@ -576,7 +658,7 @@ ExecResult execute_function_impl(Function& function, const std::vector<Value::Ob
         throw std::runtime_error("执行函数 `" + function.name() + "` 时实参数量不匹配。");
     }
 
-    ExecutionState state{function, {}, {}, nullptr};
+    ExecutionState state{function, {}, {}, {}, nullptr, context};
     for (std::size_t i = 0; i < args.size(); ++i) {
         state.store_value(function.argument_values()[i], concrete(args[i]));
     }
@@ -595,13 +677,20 @@ ExecResult execute_function_impl(Function& function, const std::vector<Value::Ob
         current_block = next_block;
     }
 
-    return ExecResult{std::move(state.outputs)};
+    ExecResult result;
+    result.outputs = std::move(state.outputs);
+    result.final_named_bindings = collect_final_named_bindings(state);
+    result.values = std::move(state.values);
+    print_final_named_bindings(function, result, context);
+    return result;
 }
 
 }  // namespace
 
-ExecResult execute_function(Function& function, const std::vector<Value::Object>& args) {
-    return execute_function_impl(function, args);
+ExecResult execute_function(Function& function, const std::vector<Value::Object>& args,
+                            const ExecutionOptions& options) {
+    const ExecutionContext context{options, 0};
+    return execute_function_impl(function, args, context);
 }
 
 }  // namespace baltam::interpreter

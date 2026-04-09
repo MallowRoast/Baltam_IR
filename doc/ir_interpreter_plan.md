@@ -20,7 +20,9 @@
 当前解释器接口是：
 
 ```cpp
-ExecResult execute_function(Function& function, const std::vector<RuntimeObject>& args = {});
+ExecResult execute_function(Function& function,
+                            const std::vector<RuntimeObject>& args = {},
+                            const ExecutionOptions& options = {});
 ```
 
 要求：
@@ -73,6 +75,12 @@ struct ExecResult {
 
 - `outputs` 是函数返回值
 - `values` 保留执行后所有 SSA 值槽位的最终状态，方便测试和调试
+- `final_named_bindings` 保留本次执行路径退出时的最终 `name -> ValueId` 绑定，方便按名字检查
+
+当前 `ExecutionOptions` 还支持：
+
+- 把“函数执行结束后的最终具名绑定”打印到指定输出流
+- 递归透传到模块内函数调用，从而在不修改 SSA IR 的前提下观察每次函数执行结束时的名字状态
 
 ## 当前执行模型
 
