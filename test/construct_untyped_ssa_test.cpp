@@ -45,7 +45,7 @@ std::string print_module(const Module& module) {
 }
 
 void test_if_else_generates_phi() {
-    Module module("branch_module", "test/branch_module.m", Module::M_Function);
+    Module module("branch_module", "test/m/branch_module.m", Module::M_Function);
     Function* function = module.create_function("branch", Function::PrimaryFunction);
     module.set_entry_function(function);
     function->set_input_names({"cond"});
@@ -87,7 +87,7 @@ void test_if_else_generates_phi() {
 }
 
 void test_missing_definition_materializes_undef() {
-    Module module("undef_module", "test/undef_module.m", Module::M_Function);
+    Module module("undef_module", "test/m/undef_module.m", Module::M_Function);
     Function* function = module.create_function("maybe_assign", Function::PrimaryFunction);
     module.set_entry_function(function);
     function->set_input_names({"cond"});
@@ -126,7 +126,7 @@ void test_missing_definition_materializes_undef() {
 }
 
 void test_loop_generates_header_phi() {
-    Module module("loop_module", "test/loop_module.m", Module::M_Function);
+    Module module("loop_module", "test/m/loop_module.m", Module::M_Function);
     Function* function = module.create_function("loop", Function::PrimaryFunction);
     module.set_entry_function(function);
     function->set_input_names({"cond"});
@@ -171,7 +171,7 @@ void test_loop_generates_header_phi() {
 }
 
 void test_dead_temporary_does_not_generate_phi() {
-    Module module("dead_temp_module", "test/dead_temp_module.m", Module::M_Function);
+    Module module("dead_temp_module", "test/m/dead_temp_module.m", Module::M_Function);
     Function* function = module.create_function("dead_temp_branch", Function::PrimaryFunction);
     module.set_entry_function(function);
     function->set_input_names({"cond"});
@@ -216,8 +216,8 @@ void test_dead_temporary_does_not_generate_phi() {
                         "dead temporary should not create a merge phi.");
 }
 
-void test_simple_demo_local_temp_does_not_generate_phi() {
-    Module module("simple_demo_module", "test/simple_demo.m", Module::M_Function);
+void test_test0_local_temp_does_not_generate_phi() {
+    Module module("test0_module", "test/m/test0/test0.m", Module::M_Function);
     Function* function = module.create_function("__script_main__", Function::Script);
     module.set_entry_function(function);
     function->set_output_names({"a", "b", "c"});
@@ -274,7 +274,7 @@ void test_simple_demo_local_temp_does_not_generate_phi() {
     analysis::verify_module_or_throw(ssa_module);
     const std::string text = print_module(ssa_module);
 
-    expect_contains(text, "if.end.2:", "simple_demo merge block should be preserved.");
+    expect_contains(text, "if.end.2:", "test0 merge block should be preserved.");
     expect_contains(text, " = phi [ %c.", "merge should still create phi for `c`.");
     expect_not_contains(text, " = phi [ %__t4.",
                         "then-local temporary `__t4` should not create a merge phi.");
@@ -288,7 +288,7 @@ int main() {
         test_missing_definition_materializes_undef();
         test_loop_generates_header_phi();
         test_dead_temporary_does_not_generate_phi();
-        test_simple_demo_local_temp_does_not_generate_phi();
+        test_test0_local_temp_does_not_generate_phi();
     } catch (const std::exception& ex) {
         std::cerr << "construct_untyped_ssa_test FAILED: " << ex.what() << '\n';
         return 1;

@@ -222,7 +222,7 @@ void test_returning_undef_throws() {
 }
 
 void test_direct_module_function_call() {
-    Module module("call_module", "test/call_module.m", Module::M_Function);
+    Module module("call_module", "test/m/call_module.m", Module::M_Function);
     Function* callee = module.create_function("callee", Function::LocalFunction);
     callee->set_stage(IRNode::UntypedSSA);
     callee->set_output_names({"out"});
@@ -253,7 +253,7 @@ void test_direct_module_function_call() {
 }
 
 void test_indirect_function_handle_call() {
-    Module module("handle_module", "test/handle_module.m", Module::M_Function);
+    Module module("handle_module", "test/m/handle_module.m", Module::M_Function);
     Function* callee = module.create_function("callee", Function::LocalFunction);
     callee->set_stage(IRNode::UntypedSSA);
     callee->set_output_names({"out"});

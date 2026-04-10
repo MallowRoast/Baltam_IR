@@ -31,7 +31,7 @@ void expect_contains(const std::string& text, const std::string& needle,
 }
 
 void test_print_non_ssa_module() {
-    Module module("non_ssa_module", "test/non_ssa_module.m", Module::M_Function);
+    Module module("non_ssa_module", "test/m/non_ssa_module.m", Module::M_Function);
     Function* function = module.create_function("plain", Function::PrimaryFunction);
     module.set_entry_function(function);
     function->set_input_names({"x"});
@@ -59,7 +59,7 @@ void test_print_non_ssa_module() {
 }
 
 void test_print_untyped_ssa_module() {
-    Module module("ssa_module", "test/ssa_module.m", Module::M_Function);
+    Module module("ssa_module", "test/m/ssa_module.m", Module::M_Function);
     Function* function = module.create_function("ssa_fn", Function::PrimaryFunction);
     module.set_entry_function(function);
     function->set_stage(IRNode::UntypedSSA);

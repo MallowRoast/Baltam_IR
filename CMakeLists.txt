@@ -1,13 +1,20 @@
 cmake_minimum_required(VERSION 3.11)
 
-project(TEST_KERNEL)
+project(BALTAM_IR)
 
 option(BUILD_TEST "Build unit tests." ON)
 
 # cmake_policy(SET CMP0167 OLD)
 
-add_executable(main
-    src/main.cpp
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/deps/core")
+    list(PREPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/deps/core")
+endif()
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/deps/logger")
+    list(PREPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/deps/logger")
+endif()
+
+set(BALTAM_IR_LIBRARY_SOURCES
+    src/baltam_ir.cpp
     src/analysis/analysis_manager.cpp
     src/analysis/cfg_analysis.cpp
     src/analysis/def_use.cpp
@@ -23,33 +30,54 @@ add_executable(main
     src/optimizer/pass_manager.cpp
     src/optimizer/optimize.cpp
 )
-target_compile_definitions(main PRIVATE BALTAM_IR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-target_include_directories(main PRIVATE src)
+add_library(BALTAM_IR ${BALTAM_IR_LIBRARY_SOURCES})
+add_library(BALTAM_IR::BALTAM_IR ALIAS BALTAM_IR)
+target_include_directories(BALTAM_IR PUBLIC src)
 
 # boost
 find_package(Boost REQUIRED)
 
+find_package(baltam_logger 1.0.4 REQUIRED CONFIG)
 find_package(baltam_core 3.8.4 REQUIRED COMPONENTS dev)
 find_package(baltam_worker 3.8.4 REQUIRED)
 find_package(baltam_kernel 3.10.2 REQUIRED)
-find_library(BALTAM_LOGGER_LIBRARY
-    NAMES bt_logger libbt_logger.so
-    PATHS /opt/Baltamatica/lib
-    NO_DEFAULT_PATH
-    REQUIRED
-)
 
-target_link_libraries(main PRIVATE
+function(get_imported_target_library_dir out_var target_name)
+    set(imported_library_path "")
+
+    get_target_property(imported_configs ${target_name} IMPORTED_CONFIGURATIONS)
+    foreach(imported_config IN LISTS imported_configs)
+        string(TOUPPER "${imported_config}" imported_config_upper)
+        get_target_property(candidate_path ${target_name}
+            "IMPORTED_LOCATION_${imported_config_upper}")
+        if(candidate_path AND EXISTS "${candidate_path}")
+            set(imported_library_path "${candidate_path}")
+            break()
+        endif()
+    endforeach()
+
+    if(NOT imported_library_path)
+        get_target_property(candidate_path ${target_name} IMPORTED_LOCATION)
+        if(candidate_path AND EXISTS "${candidate_path}")
+            set(imported_library_path "${candidate_path}")
+        endif()
+    endif()
+
+    if(NOT imported_library_path)
+        message(FATAL_ERROR
+            "Failed to resolve imported library path for target `${target_name}`.")
+    endif()
+
+    get_filename_component(imported_library_dir "${imported_library_path}" DIRECTORY)
+    set(${out_var} "${imported_library_dir}" PARENT_SCOPE)
+endfunction()
+
+get_imported_target_library_dir(BALTAM_LOGGER_LIBRARY_DIR baltam_logger::baltam_logger)
+
+target_link_libraries(BALTAM_IR PUBLIC
     baltam_kernel::bt_ast
     baltam_worker::ba_worker
-    ${BALTAM_LOGGER_LIBRARY}
-)
-target_link_options(main PRIVATE
-    "-Wl,--disable-new-dtags"
-    "-Wl,--no-as-needed"
-)
-set_target_properties(main PROPERTIES
-    BUILD_RPATH "/home/zj/Desktop/Baltam_IR/deps/core/lib;/opt/Baltamatica/lib"
+    baltam_logger::baltam_logger
 )
 
 if(BUILD_TEST)

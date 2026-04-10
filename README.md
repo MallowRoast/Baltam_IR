@@ -97,36 +97,21 @@ cmake -S . -B build
 cmake --build build
 ```
 
-## 运行
+主产物现在是库目标 `BALTAM_IR`。
 
-当前 `main` 会做这些事情：
+## 作为库使用
+
+[baltam_ir.h](/home/zj/Desktop/Baltam_IR/src/baltam_ir.h) 当前暴露了几项高层入口：
 
 1. 解析 `.m` 文件
-2. 生成 non-SSA IR
-3. 做 verifier
-4. 构建 untyped SSA IR
-5. 再做 verifier
-6. 打印两份 IR
-7. 若入口函数是零参数，或通过 `--` 提供了对应个数的字符串实参，则执行 untyped SSA，并打印函数结束时的具名绑定和输出值
+2. 生成 non-SSA IR 并做 verifier
+3. 构建 untyped SSA IR 并做 verifier
 
-示例：
+当前主要接口包括：
 
-```bash
-./build/main simple_demo
-./build/main test1 -- left right
-./build/main /home/zj/Desktop/Baltam_IR/test/test37/test37.m
-```
+- `build_mfile_ir_pipeline(...)`
 
-如果需要运行时库路径，当前常用方式是：
-
-```bash
-LD_LIBRARY_PATH="$PWD/deps/core/lib:/opt/Baltamatica/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ./build/main simple_demo
-```
-
-当前 `main` 已接入入口函数的 untyped SSA 执行；
-零参数入口函数可直接运行，带参数入口函数可通过 `--` 后追加字符串实参，例如
-`./build/main test1 -- left right`。
-若未提供所需参数，则当前仍只打印 IR，并提示跳过执行。
+调用这个接口前，调用方仍需先执行 `bt_ast_interface::initialize()`，结束后再执行 `bt_ast_interface::finalize()`。
 
 ## 测试
 
@@ -140,11 +125,10 @@ ctest --test-dir build
 
 - [test/construct_untyped_ssa_test.cpp](/home/zj/Desktop/Baltam_IR/test/construct_untyped_ssa_test.cpp)
 - [test/interpreter_test.cpp](/home/zj/Desktop/Baltam_IR/test/interpreter_test.cpp)
-- [test/simple_demo_test.cpp](/home/zj/Desktop/Baltam_IR/test/simple_demo_test.cpp)
+- [test/test_test0.cpp](/home/zj/Desktop/Baltam_IR/test/test_test0.cpp)
 
-其中 `simple_demo_test` 覆盖的是：
-
-`parse -> lower -> verify -> construct_untyped_ssa -> verify -> execute`
+m 脚本回归测试统一放在 `test/test_*.cpp`；
+每适配一个 `.m` 脚本，就在 `test/` 下新增一个对应的 `test.cpp`，重新配置后即可被 `ctest` 发现。
 
 ## 当前支持的 lowering / 执行范围
 

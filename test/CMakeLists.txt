@@ -1,4 +1,19 @@
-add_executable(cfg_analysis_test
+function(add_baltam_ir_test test_name)
+    add_executable(${test_name} ${ARGN})
+    target_include_directories(${test_name} PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+    )
+    add_test(NAME ${test_name} COMMAND $<TARGET_FILE:${test_name}>)
+endfunction()
+
+function(configure_baltam_runtime_binary target_name)
+    target_link_options(${target_name} PRIVATE
+        "-Wl,--disable-new-dtags"
+        "-Wl,--no-as-needed"
+    )
+endfunction()
+
+add_baltam_ir_test(cfg_analysis_test
     cfg_analysis_test.cpp
     ../src/analysis/analysis_manager.cpp
     ../src/analysis/cfg_analysis.cpp
@@ -6,13 +21,7 @@ add_executable(cfg_analysis_test
     ../src/ir/ir.cpp
 )
 
-target_include_directories(cfg_analysis_test PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
-)
-
-add_test(NAME cfg_analysis_test COMMAND cfg_analysis_test)
-
-add_executable(dominator_tree_test
+add_baltam_ir_test(dominator_tree_test
     dominator_tree_test.cpp
     ../src/analysis/analysis_manager.cpp
     ../src/analysis/cfg_analysis.cpp
@@ -21,13 +30,7 @@ add_executable(dominator_tree_test
     ../src/ir/ir.cpp
 )
 
-target_include_directories(dominator_tree_test PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
-)
-
-add_test(NAME dominator_tree_test COMMAND dominator_tree_test)
-
-add_executable(dominance_frontier_test
+add_baltam_ir_test(dominance_frontier_test
     dominance_frontier_test.cpp
     ../src/analysis/analysis_manager.cpp
     ../src/analysis/cfg_analysis.cpp
@@ -37,13 +40,7 @@ add_executable(dominance_frontier_test
     ../src/ir/ir.cpp
 )
 
-target_include_directories(dominance_frontier_test PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
-)
-
-add_test(NAME dominance_frontier_test COMMAND dominance_frontier_test)
-
-add_executable(liveness_test
+add_baltam_ir_test(liveness_test
     liveness_test.cpp
     ../src/analysis/analysis_manager.cpp
     ../src/analysis/cfg_analysis.cpp
@@ -52,13 +49,7 @@ add_executable(liveness_test
     ../src/ir/ir.cpp
 )
 
-target_include_directories(liveness_test PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
-)
-
-add_test(NAME liveness_test COMMAND liveness_test)
-
-add_executable(def_use_test
+add_baltam_ir_test(def_use_test
     def_use_test.cpp
     ../src/analysis/analysis_manager.cpp
     ../src/analysis/cfg_analysis.cpp
@@ -67,38 +58,20 @@ add_executable(def_use_test
     ../src/ir/ir.cpp
 )
 
-target_include_directories(def_use_test PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
-)
-
-add_test(NAME def_use_test COMMAND def_use_test)
-
-add_executable(verifier_test
+add_baltam_ir_test(verifier_test
     verifier_test.cpp
     ../src/analysis/verifier.cpp
     ../src/ir/ir.cpp
 )
 
-target_include_directories(verifier_test PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
-)
-
-add_test(NAME verifier_test COMMAND verifier_test)
-
-add_executable(ir_printer_test
+add_baltam_ir_test(ir_printer_test
     ir_printer_test.cpp
     ../src/analysis/verifier.cpp
     ../src/ir/ir.cpp
     ../src/ir/ir_printer.cpp
 )
 
-target_include_directories(ir_printer_test PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
-)
-
-add_test(NAME ir_printer_test COMMAND ir_printer_test)
-
-add_executable(construct_untyped_ssa_test
+add_baltam_ir_test(construct_untyped_ssa_test
     construct_untyped_ssa_test.cpp
     ../src/analysis/analysis_manager.cpp
     ../src/analysis/cfg_analysis.cpp
@@ -112,79 +85,87 @@ add_executable(construct_untyped_ssa_test
     ../src/optimizer/construct_untyped_ssa.cpp
 )
 
-target_include_directories(construct_untyped_ssa_test PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
-)
-
-add_test(NAME construct_untyped_ssa_test COMMAND construct_untyped_ssa_test)
-
-add_executable(interpreter_test
+add_baltam_ir_test(interpreter_test
     interpreter_test.cpp
     ../src/analysis/verifier.cpp
     ../src/interpreter/interpreter.cpp
     ../src/ir/ir.cpp
 )
 
-target_include_directories(interpreter_test PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
-)
-
 target_link_libraries(interpreter_test PRIVATE
     baltam_core::baltam_core
     baltam_worker::ba_worker
-    ${BALTAM_LOGGER_LIBRARY}
+    baltam_logger::baltam_logger
 )
 
-target_link_options(interpreter_test PRIVATE
-    "-Wl,--disable-new-dtags"
-    "-Wl,--no-as-needed"
+configure_baltam_runtime_binary(interpreter_test)
+
+set(BALTAM_IR_TEST_HOME "${CMAKE_BINARY_DIR}/ctest-home")
+set(BALTAM_IR_TEST_XDG_CACHE_HOME "${BALTAM_IR_TEST_HOME}/.cache")
+file(MAKE_DIRECTORY
+    "${BALTAM_IR_TEST_HOME}"
+    "${BALTAM_IR_TEST_XDG_CACHE_HOME}"
+    "${BALTAM_IR_TEST_XDG_CACHE_HOME}/baltamatica"
 )
 
-set_target_properties(interpreter_test PROPERTIES
-    BUILD_RPATH "/home/zj/Desktop/Baltam_IR/deps/core/lib;/opt/Baltamatica/lib"
-)
+set(BALTAM_IR_TEST_LD_LIBRARY_PATH "${CMAKE_SOURCE_DIR}/deps/core/lib")
+if(BALTAM_LOGGER_LIBRARY_DIR)
+    string(APPEND BALTAM_IR_TEST_LD_LIBRARY_PATH ":${BALTAM_LOGGER_LIBRARY_DIR}")
+endif()
+set(BALTAM_IR_BUILTIN_LIBRARY_DIR "")
+foreach(candidate_dir IN ITEMS "$ENV{BALTAMATICA_LIB_DIR}" "$ENV{BALTAM_LIB_DIR}" "/opt/Baltamatica/lib")
+    if(candidate_dir AND EXISTS "${candidate_dir}/libbt_builtin.so")
+        set(BALTAM_IR_BUILTIN_LIBRARY_DIR "${candidate_dir}")
+        break()
+    endif()
+endforeach()
+if(BALTAM_IR_BUILTIN_LIBRARY_DIR)
+    string(APPEND BALTAM_IR_TEST_LD_LIBRARY_PATH ":${BALTAM_IR_BUILTIN_LIBRARY_DIR}")
+endif()
+if(DEFINED ENV{LD_LIBRARY_PATH} AND NOT "$ENV{LD_LIBRARY_PATH}" STREQUAL "")
+    string(APPEND BALTAM_IR_TEST_LD_LIBRARY_PATH ":$ENV{LD_LIBRARY_PATH}")
+endif()
 
-add_test(NAME interpreter_test COMMAND interpreter_test)
+function(configure_baltam_runtime_test test_name)
+    set_tests_properties(${test_name} PROPERTIES
+        ENVIRONMENT
+            "HOME=${BALTAM_IR_TEST_HOME};XDG_CACHE_HOME=${BALTAM_IR_TEST_XDG_CACHE_HOME};BALTAM_FRONTEND=console;LD_LIBRARY_PATH=${BALTAM_IR_TEST_LD_LIBRARY_PATH}"
+    )
+endfunction()
 
-add_executable(simple_demo_test
-    simple_demo_test.cpp
-    ../src/analysis/analysis_manager.cpp
-    ../src/analysis/cfg_analysis.cpp
-    ../src/analysis/def_use.cpp
-    ../src/analysis/dominance_frontier.cpp
-    ../src/analysis/dominator_tree.cpp
-    ../src/analysis/liveness.cpp
-    ../src/analysis/verifier.cpp
-    ../src/interpreter/interpreter.cpp
-    ../src/ir/ir.cpp
-    ../src/lowering/lowering.cpp
-    ../src/optimizer/construct_untyped_ssa.cpp
-)
+configure_baltam_runtime_test(interpreter_test)
 
-target_compile_definitions(simple_demo_test PRIVATE
-    BALTAM_IR_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
-)
+function(add_baltam_ir_m_script_test source_file)
+    get_filename_component(test_name "${source_file}" NAME_WE)
 
-target_include_directories(simple_demo_test PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
-)
+    add_baltam_ir_test(${test_name}
+        "${source_file}"
+    )
+    target_compile_definitions(${test_name} PRIVATE
+        BALTAM_IR_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_link_libraries(${test_name} PRIVATE
+        BALTAM_IR
+    )
+    configure_baltam_runtime_binary(${test_name})
+    configure_baltam_runtime_test(${test_name})
+    set_tests_properties(${test_name} PROPERTIES
+        LABELS "m_script"
+    )
+endfunction()
 
-target_link_libraries(simple_demo_test PRIVATE
-    baltam_kernel::bt_ast
-    baltam_worker::ba_worker
-    ${BALTAM_LOGGER_LIBRARY}
-)
+# m 脚本回归测试统一放在 test_*.cpp 里；新增脚本适配时只需新增一个对应源文件。
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.12")
+    file(GLOB BALTAM_IR_M_SCRIPT_TEST_SOURCES CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/test_*.cpp"
+    )
+else()
+    file(GLOB BALTAM_IR_M_SCRIPT_TEST_SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/test_*.cpp"
+    )
+endif()
+list(SORT BALTAM_IR_M_SCRIPT_TEST_SOURCES)
 
-target_link_options(simple_demo_test PRIVATE
-    "-Wl,--disable-new-dtags"
-    "-Wl,--no-as-needed"
-)
-
-set_target_properties(simple_demo_test PROPERTIES
-    BUILD_RPATH "/home/zj/Desktop/Baltam_IR/deps/core/lib;/opt/Baltamatica/lib"
-)
-
-add_test(NAME simple_demo_test COMMAND simple_demo_test)
-set_tests_properties(simple_demo_test PROPERTIES
-    ENVIRONMENT "LD_LIBRARY_PATH=/opt/Baltamatica/lib:${CMAKE_SOURCE_DIR}/deps/core/lib"
-)
+foreach(m_script_test_source IN LISTS BALTAM_IR_M_SCRIPT_TEST_SOURCES)
+    add_baltam_ir_m_script_test("${m_script_test_source}")
+endforeach()

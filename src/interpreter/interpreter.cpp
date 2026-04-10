@@ -21,18 +21,14 @@ namespace {
 
 using ValueTable = std::unordered_map<ValueId, Value>;
 
-struct ExecutionContext {
-    const ExecutionOptions& options;
-    std::size_t call_depth = 0;
-};
-
 struct ExecutionState {
     Function& function;
+    const ExecutionOptions& options;
+    std::size_t call_depth = 0;
     ValueTable values;
     std::unordered_map<std::string, ValueId> active_named_values;
     std::vector<Value> outputs;
     BasicBlock* predecessor = nullptr;
-    const ExecutionContext& context;
 
     const Value& load_value(ValueRef ref) const;
     const Value& require_concrete_value(ValueRef ref, const char* context) const;
@@ -295,21 +291,21 @@ std::vector<Value> wrap_outputs(std::vector<Value::Object> values, std::size_t e
 }
 
 ExecResult execute_function_impl(Function& function, const std::vector<Value::Object>& args,
-                                 const ExecutionContext& context);
+                                 const ExecutionOptions& options, std::size_t call_depth);
 
-std::vector<Value> invoke_module_function(Function& caller, const std::string& function_name,
+std::vector<Value> invoke_module_function(const ExecutionState& caller_state,
+                                          const std::string& function_name,
                                           const std::vector<Value::Object>& in_args,
-                                          std::size_t expected_out_count,
-                                          const ExecutionContext& context) {
-    Module* module = caller.parent();
+                                          std::size_t expected_out_count) {
+    Module* module = caller_state.function.parent();
     if (module == nullptr) {
         throw std::runtime_error("找不到可调用的函数 `" + function_name + "`：当前函数不在模块内。");
     }
 
     for (const auto& function : module->functions()) {
         if (function != nullptr && function->name() == function_name) {
-            const ExecutionContext callee_context{context.options, context.call_depth + 1};
-            ExecResult callee_result = execute_function_impl(*function, in_args, callee_context);
+            ExecResult callee_result = execute_function_impl(
+                *function, in_args, caller_state.options, caller_state.call_depth + 1);
             if (callee_result.outputs.size() < expected_out_count) {
                 throw std::runtime_error("函数 `" + function_name + "` 的输出个数不足。");
             }
@@ -321,10 +317,10 @@ std::vector<Value> invoke_module_function(Function& caller, const std::string& f
     throw std::runtime_error("找不到可调用的函数 `" + function_name + "`。");
 }
 
-std::vector<Value> invoke_direct_call(Function& caller, const std::string& callee_name,
+std::vector<Value> invoke_direct_call(const ExecutionState& caller_state,
+                                      const std::string& callee_name,
                                       const std::vector<Value::Object>& in_args,
-                                      std::size_t expected_out_count,
-                                      const ExecutionContext& context) {
+                                      std::size_t expected_out_count) {
     if (callee_name == "__ir_make_cell__") {
         if (expected_out_count == 0) {
             return {};
@@ -370,12 +366,12 @@ std::vector<Value> invoke_direct_call(Function& caller, const std::string& calle
         return {concrete(std::make_shared<ba_obj>(matched))};
     }
 
-    Module* module = caller.parent();
+    Module* module = caller_state.function.parent();
     if (module != nullptr) {
         for (const auto& function : module->functions()) {
             if (function != nullptr && function->name() == callee_name) {
-                return invoke_module_function(caller, callee_name, in_args, expected_out_count,
-                                              context);
+                return invoke_module_function(caller_state, callee_name, in_args,
+                                              expected_out_count);
             }
         }
     }
@@ -400,10 +396,10 @@ std::vector<Value> invoke_direct_call(Function& caller, const std::string& calle
     throw std::runtime_error("找不到可调用的函数 `" + callee_name + "`。");
 }
 
-std::vector<Value> invoke_indirect_call(Function& caller, const Value::Object& callee_value,
+std::vector<Value> invoke_indirect_call(const ExecutionState& caller_state,
+                                        const Value::Object& callee_value,
                                         const std::vector<Value::Object>& in_args,
-                                        std::size_t expected_out_count,
-                                        const ExecutionContext& context) {
+                                        std::size_t expected_out_count) {
     if (callee_value == nullptr) {
         throw std::runtime_error("调用目标为空。");
     }
@@ -416,8 +412,8 @@ std::vector<Value> invoke_indirect_call(Function& caller, const Value::Object& c
         case fh_anonymous:
         case fh_mfunction:
         case fh_script:
-            return invoke_module_function(caller, handle->data(), in_args, expected_out_count,
-                                          context);
+            return invoke_module_function(caller_state, handle->data(), in_args,
+                                          expected_out_count);
         case fh_builtin: {
             baFunPtr function_ptr = nullptr;
             if (!try_lookup_builtin_function_cached(handle->data(), function_ptr)) {
@@ -449,14 +445,12 @@ std::vector<Value> evaluate_call(const SSACallNode& call, ExecutionState& state)
 
     const std::size_t expected_out_count = call.results().size();
     if (call.callee().type == SSACallNode::Callee::Direct) {
-        return invoke_direct_call(state.function, call.callee().direct_symbol, in_args,
-                                  expected_out_count, state.context);
+        return invoke_direct_call(state, call.callee().direct_symbol, in_args, expected_out_count);
     }
 
     const Value::Object callee_value =
         state.require_concrete_object(call.callee().indirect_value, "间接调用目标");
-    return invoke_indirect_call(state.function, callee_value, in_args, expected_out_count,
-                                state.context);
+    return invoke_indirect_call(state, callee_value, in_args, expected_out_count);
 }
 
 void execute_phi_nodes(const BasicBlock& block, ExecutionState& state) {
@@ -617,15 +611,14 @@ std::vector<NamedBindingSnapshot> collect_final_named_bindings(const ExecutionSt
     return bindings;
 }
 
-void print_final_named_bindings(const Function& function, const ExecResult& result,
-                                const ExecutionContext& context) {
-    if (!context.options.print_final_named_bindings || context.options.trace_stream == nullptr) {
+void print_final_named_bindings(const ExecutionState& state, const ExecResult& result) {
+    if (!state.options.print_final_named_bindings || state.options.trace_stream == nullptr) {
         return;
     }
 
-    std::ostream& os = *context.options.trace_stream;
-    const std::string indent = trace_indent(context.call_depth);
-    os << indent << "; final named bindings for `" << function.name() << "`" << std::endl;
+    std::ostream& os = *state.options.trace_stream;
+    const std::string indent = trace_indent(state.call_depth);
+    os << indent << "; final named bindings for `" << state.function.name() << "`" << std::endl;
     if (result.final_named_bindings.empty()) {
         os << indent << "; <none>" << std::endl;
         return;
@@ -637,12 +630,12 @@ void print_final_named_bindings(const Function& function, const ExecResult& resu
             continue;
         }
         os << indent << binding.name << " = " << format_value(value_it->second)
-           << "    ; " << value_label(function, binding.value_id) << std::endl;
+           << "    ; " << value_label(state.function, binding.value_id) << std::endl;
     }
 }
 
 ExecResult execute_function_impl(Function& function, const std::vector<Value::Object>& args,
-                                 const ExecutionContext& context) {
+                                 const ExecutionOptions& options, std::size_t call_depth) {
     if (function.stage() != IRNode::UntypedSSA) {
         throw std::runtime_error("解释器只支持执行 `UntypedSSA` 函数 `" + function.name() + "`。");
     }
@@ -658,7 +651,7 @@ ExecResult execute_function_impl(Function& function, const std::vector<Value::Ob
         throw std::runtime_error("执行函数 `" + function.name() + "` 时实参数量不匹配。");
     }
 
-    ExecutionState state{function, {}, {}, {}, nullptr, context};
+    ExecutionState state{function, options, call_depth, {}, {}, {}, nullptr};
     for (std::size_t i = 0; i < args.size(); ++i) {
         state.store_value(function.argument_values()[i], concrete(args[i]));
     }
@@ -681,7 +674,7 @@ ExecResult execute_function_impl(Function& function, const std::vector<Value::Ob
     result.outputs = std::move(state.outputs);
     result.final_named_bindings = collect_final_named_bindings(state);
     result.values = std::move(state.values);
-    print_final_named_bindings(function, result, context);
+    print_final_named_bindings(state, result);
     return result;
 }
 
@@ -689,8 +682,7 @@ ExecResult execute_function_impl(Function& function, const std::vector<Value::Ob
 
 ExecResult execute_function(Function& function, const std::vector<Value::Object>& args,
                             const ExecutionOptions& options) {
-    const ExecutionContext context{options, 0};
-    return execute_function_impl(function, args, context);
+    return execute_function_impl(function, args, options, 0);
 }
 
 }  // namespace baltam::interpreter
