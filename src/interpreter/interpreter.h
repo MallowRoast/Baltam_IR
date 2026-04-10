@@ -1,182 +1,68 @@
-#ifndef BALTAM_IR_INTERPRETER_H
-#define BALTAM_IR_INTERPRETER_H
+#ifndef BALTAM_IR_INTERPRETER_INTERPRETER_H
+#define BALTAM_IR_INTERPRETER_INTERPRETER_H
 
 #include <memory>
+#include <ostream>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-#include "core.h"
+#include "ba_obj/ba_obj.h"
 #include "ir/ir.h"
 
-namespace baltam {
+namespace baltam::interpreter {
 
 /**
- * @brief IR 解释器统一使用的运行时值类型。
+ * @brief untyped SSA 解释器中的运行时值。
+ *
+ * 当前解释器只区分“有具体运行时对象”和“undef”两种状态。
  */
-using Value = std::shared_ptr<ba_obj>;
+struct Value {
+    /**
+     * @brief 具体运行时对象句柄。
+     */
+    using Object = std::shared_ptr<ba_obj>;
 
-/**
- * @brief 运行时符号表中的单个绑定项。
- */
-struct Binding {
-    Value value;
-    bool initialized = false;
+    enum Type {
+        Concrete,
+        Undef,
+    };
+
+    Type type = Undef;
+    Object object;
+};
+
+struct NamedBindingSnapshot {
+    std::string name;
+    ValueId value_id = InvalidValueId;
+};
+
+struct ExecutionOptions {
+    std::ostream* trace_stream = nullptr;
+    bool print_final_named_bindings = false;
 };
 
 /**
- * @brief 执行一个 IR Function 时使用的运行时帧。
+ * @brief 函数解释执行的结果。
  *
- * 当前版本采用按名字管理变量的符号表，便于和现有基于名字的 IR
- * 对接。后续若引入 slot 化，可以在不改变外层解释器接口的前提下
- * 替换内部存储。
+ * 除了函数 `ret` 返回值之外，也对外暴露执行后仍可观察到的 SSA 值表和
+ * 具名绑定快照，方便测试和调试。
  */
-class Frame {
-public:
-    /**
-     * @brief 运行时符号表类型。
-     */
-    using SymbolTable = std::unordered_map<std::string, Binding>;
-    using ValueTable = std::unordered_map<ValueId, Value>;
-
-    /**
-     * @brief 构造一个执行帧。
-     *
-     * @param function 当前执行的函数。
-     * @param caller 调用者帧；顶层脚本执行时可以为 nullptr。
-     * @param nargin 本次调用的输入参数个数。
-     * @param nargout 本次调用期望的输出参数个数。
-     */
-    Frame(Function* function = nullptr, Frame* caller = nullptr, int nargin = 0, int nargout = 0);
-
-    /**
-     * @brief 返回当前执行的函数。
-     */
-    Function* function() const;
-
-    /**
-     * @brief 返回调用者帧。
-     */
-    Frame* caller() const;
-
-    /**
-     * @brief 返回本次调用的输入参数个数。
-     */
-    int nargin() const;
-
-    /**
-     * @brief 返回本次调用期望的输出参数个数。
-     */
-    int nargout() const;
-
-    /**
-     * @brief 返回当前函数是否已经执行到 return。
-     */
-    bool returned() const;
-
-    /**
-     * @brief 返回只读符号表。
-     */
-    const SymbolTable& symbols() const;
-
-    /**
-     * @brief 返回只读 value 槽表。
-     */
-    const ValueTable& values() const;
-
-    /**
-     * @brief 返回当前帧已经收集好的输出值列表。
-     */
-    const std::vector<Value>& outputs() const;
-
-    /**
-     * @brief 预声明一个名字，但不写入值。
-     */
-    void declare(const std::string& name);
-
-    /**
-     * @brief 向指定名字写入一个值，并标记为已初始化。
-     */
-    void store(const std::string& name, Value value);
-
-    /**
-     * @brief 向指定 ValueId 写入一个运行时值。
-     */
-    void store_value(ValueId id, Value value);
-
-    /**
-     * @brief 将一组运行时值写入对应指令的 value 定义槽位。
-     */
-    void store_instruction_values(const Instruction& instruction, const std::vector<Value>& values);
-
-    /**
-     * @brief 读取一个名字对应的值。
-     *
-     * 若名字不存在或尚未初始化，会抛出异常。
-     */
-    Value load(const std::string& name) const;
-
-    /**
-     * @brief 读取一个 ValueId 对应的运行时值。
-     */
-    Value load_value(ValueId id) const;
-
-    /**
-     * @brief 读取一个 ValueRef 对应的运行时值。
-     */
-    Value load_value(const ValueRef& ref) const;
-
-    /**
-     * @brief 判断符号表中是否存在指定名字。
-     */
-    bool contains(const std::string& name) const;
-
-    /**
-     * @brief 判断指定名字是否已经初始化。
-     */
-    bool is_initialized(const std::string& name) const;
-
-    /**
-     * @brief 判断指定 ValueId 是否已写入。
-     */
-    bool has_value(ValueId id) const;
-
-    /**
-     * @brief 更新 return 标记。
-     */
-    void set_returned(bool returned);
-
-    /**
-     * @brief 设置当前帧的输出值列表。
-     */
-    void set_outputs(std::vector<Value> outputs);
-
-private:
-    Function* function_ = nullptr;
-    Frame* caller_ = nullptr;
-    int nargin_ = 0;
-    int nargout_ = 0;
-    bool returned_ = false;
-    SymbolTable symbols_;
-    ValueTable values_;
-    std::vector<Value> outputs_;
+struct ExecResult {
+    std::vector<Value> outputs;
+    std::unordered_map<ValueId, Value> values;
+    std::vector<NamedBindingSnapshot> final_named_bindings;
 };
 
 /**
- * @brief 执行一个 IR 函数。
+ * @brief 执行一个 `UntypedSSA` 函数。
  *
- * @param function 待执行的函数。
- * @param args 本次调用的输入参数列表。
- * @param caller 调用者帧；顶层调用时可以为 nullptr。
- * @return 执行结束后的 Frame，其中包含符号表和输出值。
+ * `args` 按函数 `argument_values()` 的顺序传入；返回值中的 `outputs`
+ * 与函数 `ret` 的返回顺序一致。结构非法或运行时失败时抛出异常。
  */
-Frame execute_function(Function& function, const std::vector<Value>& args = {}, Frame* caller = nullptr);
+ExecResult execute_function(Function& function, const std::vector<Value::Object>& args = {},
+                            const ExecutionOptions& options = ExecutionOptions{});
 
-/**
- * @brief 将一个运行时值转成便于调试输出的短文本。
- */
-std::string value_text(const Value& value);
-
-}  // namespace baltam
+}  // namespace baltam::interpreter
 
 #endif

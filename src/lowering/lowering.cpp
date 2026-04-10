@@ -124,6 +124,88 @@ ast_ptr function_body_from_unit(const pcdata& unit) {
     return unit.ast;
 }
 
+void collect_predeclared_user_names(const ast_ptr& node,
+                                    std::unordered_set<std::string>& names) {
+    if (!node) {
+        return;
+    }
+
+    switch (node->nodetype) {
+        case node_runlist:
+        case node_cmdlist:
+        case node_list:
+            for (const ast_ptr& branch : node->branch) {
+                collect_predeclared_user_names(branch, names);
+            }
+            return;
+        case node_asgn: {
+            const auto assign = std::static_pointer_cast<symasgn>(node);
+            if (assign->s() != nullptr && assign->s()->nodetype == node_name) {
+                names.insert(assign->name());
+            }
+            return;
+        }
+        case node_flow_if: {
+            const auto if_node = std::static_pointer_cast<if_flow>(node);
+            collect_predeclared_user_names(if_node->tl(), names);
+            collect_predeclared_user_names(if_node->el(), names);
+            return;
+        }
+        case node_flow_switch: {
+            const auto switch_node = std::static_pointer_cast<switch_flow>(node);
+            if (switch_node->cases() == nullptr) {
+                return;
+            }
+            for (const ast_ptr& case_node : switch_node->cases()->branch) {
+                if (!case_node) {
+                    continue;
+                }
+                if (case_node->nodetype == node_case && case_node->branch.size() >= 2) {
+                    collect_predeclared_user_names(case_node->branch[1], names);
+                } else if (case_node->nodetype == node_otherwise &&
+                           !case_node->branch.empty()) {
+                    collect_predeclared_user_names(case_node->branch.back(), names);
+                }
+            }
+            return;
+        }
+        case node_for: {
+            const auto for_node = std::static_pointer_cast<flow>(node);
+            if (for_node->var_ref() != nullptr && for_node->var_ref()->nodetype == node_name) {
+                names.insert(std::static_pointer_cast<symref>(for_node->var_ref())->name());
+            }
+            collect_predeclared_user_names(for_node->tl(), names);
+            return;
+        }
+        case node_flow_while: {
+            const auto while_node = std::static_pointer_cast<if_flow>(node);
+            collect_predeclared_user_names(while_node->tl(), names);
+            return;
+        }
+        case node_multiple_func: {
+            const auto call = std::static_pointer_cast<multipleFuncCall>(node);
+            for (const std::string& name : collect_name_list(call->out_args())) {
+                names.insert(name);
+            }
+            return;
+        }
+        default:
+            return;
+    }
+}
+
+std::unordered_set<std::string> collect_function_predeclared_names(const pcdata& unit) {
+    std::unordered_set<std::string> names;
+    collect_predeclared_user_names(function_body_from_unit(unit), names);
+    return names;
+}
+
+std::vector<std::string> to_sorted_name_list(const std::unordered_set<std::string>& names) {
+    std::vector<std::string> result(names.begin(), names.end());
+    std::sort(result.begin(), result.end());
+    return result;
+}
+
 void populate_function_signature(Function& function, const pcdata& unit) {
     if (unit.m_in_arg_names != nullptr && !unit.m_in_arg_names->empty()) {
         function.set_input_names(*unit.m_in_arg_names);
@@ -277,6 +359,79 @@ NamedValue lower_expr_to_operand(const ast_ptr& node, LoweringContext& ctx);
 void lower_expr_into(const ast_ptr& node, const NamedValue& target, LoweringContext& ctx);
 void lower_stmt(const ast_ptr& node, LoweringContext& ctx);
 std::vector<ast_ptr> collect_cell_elements(const ast_ptr& node);
+void ensure_fallthrough_to(LoweringContext& ctx, BasicBlock* target, const ast_ptr& node);
+
+void lower_return_stmt(const ast_ptr& node, LoweringContext& ctx) {
+    if (ctx.function == nullptr || ctx.current_block == nullptr) {
+        throw std::runtime_error("non-SSA lower 当前没有可返回的基本块。");
+    }
+
+    ctx.set_terminal<ReturnNode>(ctx.function->outputs(), source_location_from(node));
+    ctx.current_block = nullptr;
+}
+
+void append_bool_assignment(const NamedValue& target, bool value, LoweringContext& ctx,
+                            const ast_ptr& node) {
+    ctx.append_node<NumberNode>(target, value, source_location_from(node));
+}
+
+void lower_short_circuit_expr_into(const ast_ptr& node, const NamedValue& target,
+                                   LoweringContext& ctx) {
+    if (!node || node->branch.size() < 2) {
+        throw std::runtime_error("non-SSA lower 遇到了不完整的短路逻辑表达式。");
+    }
+
+    if (ctx.current_block == nullptr) {
+        throw std::runtime_error("non-SSA lower 当前没有激活基本块。");
+    }
+
+    const bool is_short_or = node->nodetype == node_logic_or_short;
+    const NamedValue lhs = lower_expr_to_operand(node->branch[0], ctx);
+    if (ctx.current_block == nullptr) {
+        throw std::runtime_error("non-SSA lower 短路逻辑左操作数没有落到有效基本块。");
+    }
+
+    BasicBlock* short_block =
+        ctx.create_block(is_short_or ? "logic.or.short.short" : "logic.and.short.short");
+    BasicBlock* rhs_block =
+        ctx.create_block(is_short_or ? "logic.or.short.rhs" : "logic.and.short.rhs");
+    BasicBlock* rhs_true_block =
+        ctx.create_block(is_short_or ? "logic.or.short.rhs.true" : "logic.and.short.rhs.true");
+    BasicBlock* rhs_false_block =
+        ctx.create_block(is_short_or ? "logic.or.short.rhs.false" : "logic.and.short.rhs.false");
+    BasicBlock* merge_block =
+        ctx.create_block(is_short_or ? "logic.or.short.end" : "logic.and.short.end");
+
+    BasicBlock* lhs_true_block = is_short_or ? short_block : rhs_block;
+    BasicBlock* lhs_false_block = is_short_or ? rhs_block : short_block;
+    ctx.current_block->add_successor(lhs_true_block);
+    ctx.current_block->add_successor(lhs_false_block);
+    ctx.set_terminal<CondJumpNode>(lhs, lhs_true_block, lhs_false_block, source_location_from(node));
+
+    ctx.current_block = short_block;
+    append_bool_assignment(target, is_short_or, ctx, node);
+    ensure_fallthrough_to(ctx, merge_block, node);
+
+    ctx.current_block = rhs_block;
+    const NamedValue rhs = lower_expr_to_operand(node->branch[1], ctx);
+    if (ctx.current_block == nullptr) {
+        throw std::runtime_error("non-SSA lower 短路逻辑右操作数没有落到有效基本块。");
+    }
+    ctx.current_block->add_successor(rhs_true_block);
+    ctx.current_block->add_successor(rhs_false_block);
+    ctx.set_terminal<CondJumpNode>(rhs, rhs_true_block, rhs_false_block, source_location_from(node));
+
+    ctx.current_block = rhs_true_block;
+    append_bool_assignment(target, true, ctx, node);
+    ensure_fallthrough_to(ctx, merge_block, node);
+
+    ctx.current_block = rhs_false_block;
+    append_bool_assignment(target, false, ctx, node);
+    ensure_fallthrough_to(ctx, merge_block, node);
+
+    ctx.current_block = merge_block;
+    ctx.mark_defined(target);
+}
 
 Function* create_anonymous_function(const ast_ptr& node, LoweringContext& ctx) {
     if (!node || node->branch.size() < 2) {
@@ -425,6 +580,10 @@ void lower_expr_into(const ast_ptr& node, const NamedValue& target, LoweringCont
             ctx.mark_defined(target);
             return;
         }
+        case node_logic_or_short:
+        case node_logic_and_short:
+            lower_short_circuit_expr_into(node, target, ctx);
+            return;
         case node_multiple_func: {
             const auto call = std::static_pointer_cast<multipleFuncCall>(node);
             std::vector<NamedValue> inputs;
@@ -545,7 +704,7 @@ NamedValue build_switch_match_cond(const NamedValue& switch_value, const ast_ptr
     for (const ast_ptr& item : match_items) {
         const NamedValue rhs = lower_expr_to_operand(item, ctx);
         const NamedValue eq = ctx.create_temp("__switch.match");
-        ctx.append_node<CallNode>(CallNode::Direct, "__ir_switch_match__", std::vector<NamedValue>{eq},
+        ctx.append_node<CallNode>(CallNode::Direct, "switch_case_match", std::vector<NamedValue>{eq},
                                   std::vector<NamedValue>{switch_value, rhs}, source_location_from(item));
         ctx.mark_defined(eq);
 
@@ -781,6 +940,9 @@ void lower_stmt(const ast_ptr& node, LoweringContext& ctx) {
             ctx.set_terminal<JumpNode>(ctx.loop_stack.back().continue_target, std::nullopt);
             ctx.current_block = nullptr;
             return;
+        case node_return:
+            lower_return_stmt(node, ctx);
+            return;
         case node_multiple_func:
             lower_call_stmt(std::static_pointer_cast<multipleFuncCall>(node), ctx);
             return;
@@ -800,7 +962,12 @@ void lower_stmt(const ast_ptr& node, LoweringContext& ctx) {
 void lower_unit_into_function(const pcdata& unit, Module& module) {
     Function* function =
         module.create_function(function_name_from_unit(unit), function_type_from_unit(unit));
+    const std::unordered_set<std::string> predeclared_user_names =
+        collect_function_predeclared_names(unit);
     populate_function_signature(*function, unit);
+    if (function->type() == Function::Script && function->outputs().empty()) {
+        function->set_output_names(to_sorted_name_list(predeclared_user_names));
+    }
     if (function->type() == Function::Script ||
         function->type() == Function::PrimaryFunction) {
         module.set_entry_function(function);
@@ -812,6 +979,7 @@ void lower_unit_into_function(const pcdata& unit, Module& module) {
     LoweringContext ctx;
     ctx.function = function;
     ctx.current_block = entry;
+    ctx.defined_user_names = predeclared_user_names;
     ctx.mark_defined(function->inputs());
     ctx.mark_defined(function->outputs());
 

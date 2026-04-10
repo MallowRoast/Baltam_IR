@@ -179,6 +179,10 @@ bool BasicBlock::contains_block(const std::vector<BasicBlock*>& blocks, const Ba
     return std::find(blocks.begin(), blocks.end(), target) != blocks.end();
 }
 
+bool ValueRef::valid() const {
+    return id != InvalidValueId;
+}
+
 Function* BasicBlock::parent() const {
     return parent_;
 }
@@ -187,7 +191,11 @@ const std::string& BasicBlock::name() const {
     return name_;
 }
 
-const std::vector<NonSSANode*>& BasicBlock::instructions() const {
+const std::vector<IRNode*>& BasicBlock::phi_nodes() const {
+    return phi_nodes_;
+}
+
+const std::vector<IRNode*>& BasicBlock::instructions() const {
     return instructions_;
 }
 
@@ -199,11 +207,19 @@ const std::vector<BasicBlock*>& BasicBlock::successors() const {
     return successors_;
 }
 
-NonSSANode* BasicBlock::terminal() const {
+IRNode* BasicBlock::terminal() const {
     return terminal_;
 }
 
-void BasicBlock::append_instruction(NonSSANode* node) {
+void BasicBlock::append_phi(IRNode* node) {
+    if (node == nullptr) {
+        return;
+    }
+    node->set_parent(this);
+    phi_nodes_.push_back(node);
+}
+
+void BasicBlock::append_instruction(IRNode* node) {
     if (node == nullptr) {
         return;
     }
@@ -221,7 +237,7 @@ void BasicBlock::add_successor(BasicBlock* successor) {
     }
 }
 
-void BasicBlock::set_terminal(NonSSANode* node) {
+void BasicBlock::set_terminal(IRNode* node) {
     terminal_ = node;
     if (terminal_ != nullptr) {
         terminal_->set_parent(this);
@@ -246,12 +262,42 @@ Function::Type Function::type() const {
     return type_;
 }
 
+IRNode::Stage Function::stage() const {
+    return stage_;
+}
+
 const std::vector<NamedValue>& Function::inputs() const {
     return inputs_;
 }
 
 const std::vector<NamedValue>& Function::outputs() const {
     return outputs_;
+}
+
+const std::vector<ValueId>& Function::argument_values() const {
+    return argument_values_;
+}
+
+std::size_t Function::value_count() const {
+    return value_debug_names_.size();
+}
+
+bool Function::has_value(ValueId id) const {
+    if (id == InvalidValueId) {
+        return false;
+    }
+
+    const std::size_t index = static_cast<std::size_t>(id - 1);
+    return index < value_debug_names_.size();
+}
+
+const std::string* Function::find_value_debug_name(ValueId id) const {
+    if (!has_value(id)) {
+        return nullptr;
+    }
+
+    const std::size_t index = static_cast<std::size_t>(id - 1);
+    return &value_debug_names_[index];
 }
 
 BasicBlock* Function::entry_block() const {
@@ -274,6 +320,10 @@ void Function::set_entry_block(BasicBlock* block) {
     entry_block_ = block;
 }
 
+void Function::set_stage(IRNode::Stage stage) {
+    stage_ = stage;
+}
+
 void Function::set_input_names(std::vector<std::string> names) {
     inputs_.clear();
     inputs_.reserve(names.size());
@@ -290,12 +340,223 @@ void Function::set_output_names(std::vector<std::string> names) {
     }
 }
 
+void Function::set_argument_values(std::vector<ValueId> argument_values) {
+    argument_values_ = std::move(argument_values);
+}
+
+ValueId Function::create_value(std::string debug_name) {
+    const ValueId id = static_cast<ValueId>(value_debug_names_.size() + 1);
+    value_debug_names_.push_back(std::move(debug_name));
+    return id;
+}
+
+void Function::set_value_debug_name(ValueId id, std::string debug_name) {
+    const std::size_t index = static_cast<std::size_t>(id - 1);
+    if (id == InvalidValueId || index >= value_debug_names_.size()) {
+        return;
+    }
+    value_debug_names_[index] = std::move(debug_name);
+}
+
 void Function::set_parent(Module* module) {
     parent_ = module;
 }
 
+UntypedSSANode::UntypedSSANode(Type type, std::optional<SourceLocation> location)
+    : SSANode(IRNode::UntypedSSA, std::move(location)), type_(type) {}
+
+UntypedSSANode::Type UntypedSSANode::type() const {
+    return type_;
+}
+
+SSANumberNode::SSANumberNode(ValueId result, NumberValue value,
+                             std::optional<SourceLocation> location)
+    : UntypedSSANode(UntypedSSANode::SSA_Number, std::move(location)),
+      result_(result),
+      value_(std::move(value)) {}
+
+ValueId SSANumberNode::result() const {
+    return result_;
+}
+
+const SSANumberNode::NumberValue& SSANumberNode::value() const {
+    return value_;
+}
+
+SSATextNode::SSATextNode(ValueId result, std::string text, std::optional<SourceLocation> location)
+    : UntypedSSANode(UntypedSSANode::SSA_Text, std::move(location)),
+      result_(result),
+      text_(std::move(text)) {}
+
+ValueId SSATextNode::result() const {
+    return result_;
+}
+
+const std::string& SSATextNode::text() const {
+    return text_;
+}
+
+SSAUndefNode::SSAUndefNode(ValueId result, std::optional<SourceLocation> location)
+    : UntypedSSANode(UntypedSSANode::SSA_Undef, std::move(location)), result_(result) {}
+
+ValueId SSAUndefNode::result() const {
+    return result_;
+}
+
+SSAPhiNode::SSAPhiNode(ValueId result, std::vector<Incoming> incomings,
+                       std::optional<SourceLocation> location)
+    : UntypedSSANode(UntypedSSANode::SSA_Phi, std::move(location)),
+      result_(result),
+      incomings_(std::move(incomings)) {}
+
+ValueId SSAPhiNode::result() const {
+    return result_;
+}
+
+const std::vector<SSAPhiNode::Incoming>& SSAPhiNode::incomings() const {
+    return incomings_;
+}
+
+void SSAPhiNode::add_incoming(BasicBlock* predecessor, ValueRef value) {
+    incomings_.push_back(Incoming{predecessor, value});
+}
+
+SSACopyNode::SSACopyNode(ValueId result, ValueRef src, std::optional<SourceLocation> location)
+    : UntypedSSANode(UntypedSSANode::SSA_Copy, std::move(location)),
+      result_(result),
+      src_(src) {}
+
+ValueId SSACopyNode::result() const {
+    return result_;
+}
+
+ValueRef SSACopyNode::src() const {
+    return src_;
+}
+
+SSAUnaryOpNode::SSAUnaryOpNode(Op op, ValueId result, ValueRef operand,
+                               std::optional<SourceLocation> location)
+    : UntypedSSANode(UntypedSSANode::SSA_UnaryOp, std::move(location)),
+      op_(op),
+      result_(result),
+      operand_(operand) {}
+
+SSAUnaryOpNode::Op SSAUnaryOpNode::op() const {
+    return op_;
+}
+
+ValueId SSAUnaryOpNode::result() const {
+    return result_;
+}
+
+ValueRef SSAUnaryOpNode::operand() const {
+    return operand_;
+}
+
+SSABinOpNode::SSABinOpNode(Op op, ValueId result, ValueRef lhs, ValueRef rhs,
+                           std::optional<SourceLocation> location)
+    : UntypedSSANode(UntypedSSANode::SSA_BinOp, std::move(location)),
+      op_(op),
+      result_(result),
+      lhs_(lhs),
+      rhs_(rhs) {}
+
+SSABinOpNode::Op SSABinOpNode::op() const {
+    return op_;
+}
+
+ValueId SSABinOpNode::result() const {
+    return result_;
+}
+
+ValueRef SSABinOpNode::lhs() const {
+    return lhs_;
+}
+
+ValueRef SSABinOpNode::rhs() const {
+    return rhs_;
+}
+
+SSACallNode::SSACallNode(Callee callee, std::vector<ValueId> results,
+                         std::vector<ValueRef> inputs, std::optional<SourceLocation> location)
+    : UntypedSSANode(UntypedSSANode::SSA_Call, std::move(location)),
+      callee_(std::move(callee)),
+      results_(std::move(results)),
+      inputs_(std::move(inputs)) {}
+
+const SSACallNode::Callee& SSACallNode::callee() const {
+    return callee_;
+}
+
+const std::vector<ValueId>& SSACallNode::results() const {
+    return results_;
+}
+
+const std::vector<ValueRef>& SSACallNode::inputs() const {
+    return inputs_;
+}
+
+SSACondJumpNode::SSACondJumpNode(ValueRef cond, BasicBlock* true_block, BasicBlock* false_block,
+                                 std::optional<SourceLocation> location)
+    : UntypedSSANode(UntypedSSANode::SSA_CondJump, std::move(location)),
+      cond_(cond),
+      true_block_(true_block),
+      false_block_(false_block) {}
+
+ValueRef SSACondJumpNode::cond() const {
+    return cond_;
+}
+
+BasicBlock* SSACondJumpNode::true_block() const {
+    return true_block_;
+}
+
+BasicBlock* SSACondJumpNode::false_block() const {
+    return false_block_;
+}
+
+SSAJumpNode::SSAJumpNode(BasicBlock* target, std::optional<SourceLocation> location)
+    : UntypedSSANode(UntypedSSANode::SSA_Jump, std::move(location)), target_(target) {}
+
+BasicBlock* SSAJumpNode::target() const {
+    return target_;
+}
+
+SSAReturnNode::SSAReturnNode(std::vector<ValueRef> values, std::optional<SourceLocation> location)
+    : UntypedSSANode(UntypedSSANode::SSA_Return, std::move(location)),
+      values_(std::move(values)) {}
+
+const std::vector<ValueRef>& SSAReturnNode::values() const {
+    return values_;
+}
+
 Module::Module(std::string name, std::string source_path, Type type)
     : name_(std::move(name)), source_path_(std::move(source_path)), type_(type) {}
+
+Module::Module(Module&& other) noexcept
+    : name_(std::move(other.name_)),
+      source_path_(std::move(other.source_path_)),
+      type_(other.type_),
+      function_storage_(std::move(other.function_storage_)),
+      entry_function_(other.entry_function_) {
+    rebind_function_parents();
+    other.entry_function_ = nullptr;
+}
+
+Module& Module::operator=(Module&& other) noexcept {
+    if (this == &other) {
+        return *this;
+    }
+
+    name_ = std::move(other.name_);
+    source_path_ = std::move(other.source_path_);
+    type_ = other.type_;
+    function_storage_ = std::move(other.function_storage_);
+    entry_function_ = other.entry_function_;
+    rebind_function_parents();
+    other.entry_function_ = nullptr;
+    return *this;
+}
 
 const std::string& Module::name() const {
     return name_;
@@ -327,6 +588,14 @@ Function* Module::create_function(std::string name, Function::Type type) {
 
 void Module::set_entry_function(Function* function) {
     entry_function_ = function;
+}
+
+void Module::rebind_function_parents() {
+    for (const auto& function : function_storage_) {
+        if (function != nullptr) {
+            function->set_parent(this);
+        }
+    }
 }
 
 }  // namespace baltam

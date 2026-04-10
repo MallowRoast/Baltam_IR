@@ -1,44 +1,49 @@
 cmake_minimum_required(VERSION 3.11)
 
-project(TEST_KERNEL)
+project(BALTAM_IR)
 
-# cmake_policy(SET CMP0167 OLD)
+option(BUILD_TEST "Build unit tests." ON)
 
-add_executable(main
-    src/main.cpp
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/deps/core")
+    list(PREPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/deps/core")
+endif()
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/deps/logger")
+    list(PREPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/deps/logger")
+endif()
+
+set(BALTAM_IR_LIBRARY_SOURCES
     src/analysis/analysis_manager.cpp
+    src/analysis/cfg_analysis.cpp
+    src/analysis/def_use.cpp
+    src/analysis/dominance_frontier.cpp
+    src/analysis/dominator_tree.cpp
+    src/analysis/liveness.cpp
     src/analysis/verifier.cpp
+    src/interpreter/interpreter.cpp
     src/ir/ir.cpp
     src/ir/ir_printer.cpp
     src/lowering/lowering.cpp
+    src/optimizer/construct_untyped_ssa.cpp
     src/optimizer/pass_manager.cpp
     src/optimizer/optimize.cpp
 )
-target_compile_definitions(main PRIVATE BALTAM_IR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-target_include_directories(main PRIVATE src)
+add_library(BALTAM_IR ${BALTAM_IR_LIBRARY_SOURCES})
+add_library(BALTAM_IR::BALTAM_IR ALIAS BALTAM_IR)
+target_include_directories(BALTAM_IR PUBLIC src)
 
-# boost
 find_package(Boost REQUIRED)
-
+find_package(baltam_logger 1.0.4 REQUIRED CONFIG)
 find_package(baltam_core 3.8.4 REQUIRED COMPONENTS dev)
 find_package(baltam_worker 3.8.4 REQUIRED)
 find_package(baltam_kernel 3.10.2 REQUIRED)
-find_library(BALTAM_LOGGER_LIBRARY
-    NAMES bt_logger libbt_logger.so
-    PATHS /opt/Baltamatica/lib
-    NO_DEFAULT_PATH
-    REQUIRED
-)
 
-target_link_libraries(main PRIVATE
+target_link_libraries(BALTAM_IR PUBLIC
     baltam_kernel::bt_ast
     baltam_worker::ba_worker
-    ${BALTAM_LOGGER_LIBRARY}
+    baltam_logger::baltam_logger
 )
-target_link_options(main PRIVATE
-    "-Wl,--disable-new-dtags"
-    "-Wl,--no-as-needed"
-)
-set_target_properties(main PROPERTIES
-    BUILD_RPATH "/home/zj/Desktop/Baltam_IR/deps/core/lib;/opt/Baltamatica/lib"
-)
+
+if(BUILD_TEST)
+    enable_testing()
+    add_subdirectory(test)
+endif()

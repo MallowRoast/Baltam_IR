@@ -1,80 +1,200 @@
-# Baltam_IR 解释器规划
+# Baltam_IR 解释器说明
 
 ## 当前状态
 
-当前仓库没有启用中的 IR 解释器主链。
+当前仓库已经有一版启用中的 IR 解释器：
 
-旧的 hybrid/value-based 解释器已经不再匹配当前 IR 结构，也不再参与当前构建主线。
+- [src/interpreter/interpreter.h](/home/zj/Desktop/Baltam_IR/src/interpreter/interpreter.h)
+- [src/interpreter/interpreter.cpp](/home/zj/Desktop/Baltam_IR/src/interpreter/interpreter.cpp)
 
-当前有效主线只有：
+它当前面向的不是旧 hybrid/value-based IR，而是：
 
-`parse -> lower(non-SSA) -> print`
+- `UntypedSSA`
 
-## 解释器的推荐目标
+当前 CLI 主入口还没有直接调用解释器，但测试里已经覆盖：
 
-后续解释器不建议直接面向当前 non-SSA IR，而建议面向：
+`parse -> lower(non-SSA) -> verify -> construct_untyped_ssa -> verify -> execute(UntypedSSA)`
 
-- `untyped SSA IR`
+## 当前解释器的输入
 
-原因是：
+当前解释器接口是：
 
-- SSA IR 的值流更显式
-- 不再需要名字环境作为主要执行语义
-- 更适合作为 profile 和优化后的统一执行层
+```cpp
+ExecResult execute_function(Function& function,
+                            const std::vector<Value::Object>& args = {},
+                            const ExecutionOptions& options = {});
+```
 
-## 解释器输入
+要求：
 
-未来解释器的输入应是：
+- `function.stage() == IRNode::UntypedSSA`
+- 函数已通过 verifier
+- `argument_values()` 与输入签名一致
+- 实参数量与参数槽位个数一致
 
-- SSA 形式的 `Module`
+也就是说，当前解释器执行的是：
+
 - SSA 形式的 `Function`
 - SSA 形式的 `BasicBlock`
 - SSA 节点
 
-而不是当前的 `NonSSANode`。
+而不是 `NonSSANode`。
 
-## 解释器的运行时值
+## 当前运行时值
 
-当前建议仍然沿用运行时值：
+当前运行时仍然复用 Baltam 运行时对象：
 
 ```cpp
-using Value = std::shared_ptr<ba_obj>;
+using Value::Object = std::shared_ptr<ba_obj>;
 ```
 
-也就是说，SSA 解释器的变化点在 IR 和执行模型，不在运行时对象系统。
+解释器对 SSA 值再包一层：
 
-## SSA 解释器的最小执行模型
+```cpp
+struct Value {
+    enum Type {
+        Concrete,
+        Undef,
+    };
 
-未来最小模型建议是：
+    Type type = Undef;
+    Object object;
+};
+```
 
-- `Frame` 维护 `SSAValue -> Value`
-- 进入块时先求值 `phi`
-- 普通节点按 SSA use 读取输入
-- `Call` 返回一组值
-- `Return` 直接返回值列表
+返回结果为：
 
-这个模型会比旧 hybrid 解释器简单很多。
+```cpp
+struct ExecResult {
+    std::vector<Value> outputs;
+    std::unordered_map<ValueId, Value> values;
+    std::vector<NamedBindingSnapshot> final_named_bindings;
+};
+```
 
-## 为什么当前不先做解释器
+其中：
 
-因为解释器的输入 IR 还没到位。
+- `outputs` 是函数返回值
+- `values` 保留执行后所有 SSA 值槽位的最终状态，方便测试和调试
+- `final_named_bindings` 保留本次执行路径退出时的最终 `name -> ValueId` 绑定，方便按名字检查
 
-在没有下面这些前置条件前，先做解释器会把接口定早：
+当前 `ExecutionOptions` 还支持：
 
-- CFGAnalysis
-- DominatorTree
-- DominanceFrontier
-- Liveness
-- DefUse
-- BuildPrunedSSA
+- 把“函数执行结束后的最终具名绑定”打印到指定输出流
+- 递归透传到模块内函数调用，从而在不修改 SSA IR 的前提下观察每次函数执行结束时的名字状态
 
-## 推荐顺序
+## 当前执行模型
 
-1. 先完成 non-SSA IR
-2. 先完成 verifier 和 analysis
-3. 再完成 untyped SSA IR
-4. 再做 SSA 解释器
+当前最小执行模型已经落地：
+
+- 进入函数时，把实参写入 `argument_values()`
+- 逐块执行 `phi`
+- 再执行 `instructions()`
+- 最后执行 `terminal`
+- 块间跳转通过 `predecessor` 选择 `phi incoming`
+
+当前已支持的 SSA 节点包括：
+
+- `SSANumberNode`
+- `SSATextNode`
+- `SSAUndefNode`
+- `SSAPhiNode`
+- `SSACopyNode`
+- `SSAUnaryOpNode`
+- `SSABinOpNode`
+- `SSACallNode`
+- `SSACondJumpNode`
+- `SSAJumpNode`
+- `SSAReturnNode`
+
+## 当前调用语义
+
+当前解释器已经支持：
+
+- 直接调用模块内函数
+- 直接调用 builtin
+- 直接调用 internal function
+- 间接调用函数句柄
+
+当前已内建处理的 helper 有：
+
+- `__ir_make_cell__`
+- `__ir_make_function_handle__`
+
+当前已显式静态缓存的 internal function 有：
+
+- `if_expr`
+- `switch_case_match`
+- `foreach_init`
+- `foreach_iterate`
+
+这些 internal function 都是在 IR 生成阶段就已知的固定符号；解释器不再保留 generic internal lookup fallback。
+
+当前对函数句柄的支持范围是：
+
+- `fh_anonymous`
+- `fh_mfunction`
+- `fh_script`
+- `fh_builtin`
+
+`fh_variable` 仍未支持。
+
+## 当前边界和限制
+
+当前解释器仍有这些明确边界：
+
+- 只执行 `UntypedSSA`
+- 不支持 `TypedSSA`
+- 遇到 `undef` 的实用读取会抛错
+- 返回 `undef` 也会抛错
+- 依赖 verifier 先保证 CFG、`phi`、值定义/使用关系基本合法
+- 还没有接进 `main.cpp`
+
+另外，解释器并不替代 SSA 构建器；它默认输入已经是：
+
+- [src/optimizer/construct_untyped_ssa.cpp](/home/zj/Desktop/Baltam_IR/src/optimizer/construct_untyped_ssa.cpp)
+
+产出的结果。
+
+## 当前测试覆盖
+
+当前直接覆盖解释器语义的测试位于：
+
+- [test/interpreter_test.cpp](/home/zj/Desktop/Baltam_IR/test/interpreter_test.cpp)
+
+它目前覆盖：
+
+- 常量和 copy
+- 分支与 `phi`
+- `undef` 返回报错
+- 直接模块函数调用
+- 间接函数句柄调用
+
+端到端脚本回归测试位于：
+
+- [test/test_test0.cpp](/home/zj/Desktop/Baltam_IR/test/test_test0.cpp)
+- [test/test_test1.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1.cpp)
+- [test/test_test1_2.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1_2.cpp)
+- [test/test_test1_3.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1_3.cpp)
+- [test/test_test1_4.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1_4.cpp)
+- [test/test_test1_5.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1_5.cpp)
+
+它们覆盖：
+
+- 解析 `.m`
+- lower 到 non-SSA
+- 构建 untyped SSA
+- 打印两阶段 IR
+- 执行入口函数并校验输出和最终具名变量绑定
 
 ## 当前结论
 
-解释器仍然是长期需要的组件，但当前不应基于旧 IR 复活，也不应抢在 SSA 之前进入主线。
+解释器已经不再只是长期规划项，而是当前 `UntypedSSA` 阶段的一部分执行基础设施。
+
+不过它目前仍主要服务于：
+
+- SSA 语义验证
+- 端到端测试
+- 后续优化 pass 的行为回归检查
+
+而不是面向用户的 CLI 执行入口。

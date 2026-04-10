@@ -1,103 +1,118 @@
 #include "interpreter/interpreter.h"
 
 #include <algorithm>
-#include <complex>
 #include <cstdint>
+#include <ostream>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
+#include "analysis/verifier.h"
 #include "ba_obj/ba_obj.h"
 #include "ba_obj/cell.h"
 #include "ba_obj/function_handle.h"
-#include "ba_obj/matrix.h"
 #include "baltam_worker/builtin_manager.h"
 #include "print/obj2str.h"
 
-namespace baltam {
-Value eval_expr(Instruction* instruction, Frame& frame);
-void exec_inst(Instruction* instruction, Frame& frame);
-BasicBlock* exec_terminal(Instruction* instruction, Frame& frame);
-
+namespace baltam::interpreter {
 namespace {
-Value load_use_value(Frame& frame, Instruction* instruction, ValueRef ref);
 
-void record_instruction_value(Frame& frame, Instruction& instruction, Value value) {
-    if (!instruction.has_values()) {
-        return;
-    }
-    frame.store_instruction_values(instruction, {std::move(value)});
-}
+using ValueTable = std::unordered_map<ValueId, Value>;
 
-Value record_and_return(Frame& frame, Instruction& instruction, Value value) {
-    record_instruction_value(frame, instruction, value);
-    return value;
-}
+struct ExecutionState {
+    Function& function;
+    const ExecutionOptions& options;
+    std::size_t call_depth = 0;
+    ValueTable values;
+    std::unordered_map<std::string, ValueId> active_named_values;
+    std::vector<Value> outputs;
+    BasicBlock* predecessor = nullptr;
 
-void materialize_instruction_value(Frame& frame, Instruction& instruction) {
-    if (!instruction.has_values()) {
-        return;
-    }
-
-    (void)eval_expr(&instruction, frame);
-}
-
-Value eval_phi_instruction(const PhiInstruction& instruction, BasicBlock* predecessor, Frame& frame) {
-    for (const PhiInstruction::Incoming& incoming : instruction.incomings()) {
-        if (incoming.predecessor == predecessor) {
-            return load_use_value(frame, nullptr, incoming.value_ref);
-        }
-    }
-
-    const std::string predecessor_name = predecessor != nullptr ? predecessor->name() : "<entry>";
-    throw std::runtime_error("phi 节点缺少来自前驱块 " + predecessor_name + " 的 incoming。");
-}
-
-void exec_phi_nodes(BasicBlock& block, BasicBlock* predecessor, Frame& frame) {
-    for (Instruction* instruction : block.instructions()) {
-        if (instruction == nullptr || instruction->type() != Instruction::Phi) {
-            break;
-        }
-
-        Value value = eval_phi_instruction(*static_cast<const PhiInstruction*>(instruction),
-                                           predecessor, frame);
-        record_instruction_value(frame, *instruction, std::move(value));
-    }
-}
-
-Function* value_owner_function(Frame& frame, Instruction* instruction) {
-    if (instruction != nullptr && instruction->parent() != nullptr &&
-        instruction->parent()->parent() != nullptr) {
-        return instruction->parent()->parent();
-    }
-    return frame.function();
-}
-
-Value load_use_value(Frame& frame, Instruction* instruction, ValueRef ref) {
-    if (ref.is_valid() && frame.has_value(ref.id)) {
-        return frame.load_value(ref);
-    }
-    if (ref.is_valid()) {
-        Function* function = value_owner_function(frame, instruction);
-        if (function != nullptr) {
-            if (Instruction* owner = function->find_value_owner(ref.id)) {
-                materialize_instruction_value(frame, *owner);
-                if (frame.has_value(ref.id)) {
-                    return frame.load_value(ref);
-                }
-            }
-        }
-    }
-    if (instruction == nullptr) {
-        throw std::runtime_error("尝试读取空的 IR 操作数。");
-    }
-    return eval_expr(instruction, frame);
-}
+    const Value& load_value(ValueRef ref) const;
+    const Value& require_concrete_value(ValueRef ref, const char* context) const;
+    Value::Object require_concrete_object(ValueRef ref, const char* context) const;
+    void store_value(ValueId id, Value value);
+};
 
 enum class CallableType {
     Builtin,
     Internal,
 };
+
+std::string value_label(const Function& function, ValueId id) {
+    const std::string* debug_name = function.find_value_debug_name(id);
+    if (debug_name != nullptr && !debug_name->empty()) {
+        return "%" + *debug_name;
+    }
+    return "%" + std::to_string(id);
+}
+
+std::string block_label(const BasicBlock* block) {
+    return block != nullptr ? block->name() : "<entry>";
+}
+
+std::string format_value(const Value& value) {
+    if (value.type == Value::Undef) {
+        return "undef";
+    }
+    if (value.object == nullptr) {
+        return "<null>";
+    }
+    return internal::obj2str_one_line(*value.object);
+}
+
+std::string trace_indent(std::size_t call_depth) {
+    return std::string(call_depth * 2, ' ');
+}
+
+const Value& ExecutionState::load_value(ValueRef ref) const {
+    if (!ref.valid()) {
+        throw std::runtime_error("尝试读取非法的 `ValueRef`。");
+    }
+
+    auto it = values.find(ref.id);
+    if (it == values.end()) {
+        throw std::runtime_error("函数 `" + function.name() + "` 读取了未定义的 SSA 值 `" +
+                                 value_label(function, ref.id) + "`。");
+    }
+    return it->second;
+}
+
+const Value& ExecutionState::require_concrete_value(ValueRef ref, const char* context) const {
+    const Value& value = load_value(ref);
+    if (value.type == Value::Undef) {
+        throw std::runtime_error("函数 `" + function.name() + "` 在 " + context +
+                                 " 使用了 `undef` SSA 值 `" +
+                                 value_label(function, ref.id) + "`。");
+    }
+    return value;
+}
+
+Value::Object ExecutionState::require_concrete_object(ValueRef ref, const char* context) const {
+    return require_concrete_value(ref, context).object;
+}
+
+void ExecutionState::store_value(ValueId id, Value value) {
+    if (id == InvalidValueId) {
+        throw std::runtime_error("函数 `" + function.name() + "` 试图写入非法的 SSA 值。");
+    }
+    values[id] = std::move(value);
+
+    const std::string* debug_name = function.find_value_debug_name(id);
+    if (debug_name != nullptr && !debug_name->empty()) {
+        active_named_values[*debug_name] = id;
+    }
+}
+
+Value concrete(Value::Object object) {
+    return Value{Value::Concrete, std::move(object)};
+}
+
+Value undef() {
+    return Value{Value::Undef, nullptr};
+}
 
 const char* callable_type_text(CallableType type) {
     switch (type) {
@@ -114,11 +129,6 @@ std::unordered_map<std::string, baFunPtr>& builtin_function_cache() {
     return cache;
 }
 
-std::unordered_map<std::string, baFunPtr>& internal_function_cache() {
-    static std::unordered_map<std::string, baFunPtr> cache;
-    return cache;
-}
-
 bool try_lookup_builtin_function_cached(const std::string& name, baFunPtr& function_ptr) {
     auto& cache = builtin_function_cache();
     auto it = cache.find(name);
@@ -130,6 +140,7 @@ bool try_lookup_builtin_function_cached(const std::string& name, baFunPtr& funct
     function_ptr = nullptr;
     if (!lookup_builtin_function(name, function_ptr) || function_ptr == nullptr) {
         function_ptr = nullptr;
+        cache.emplace(name, nullptr);
         return false;
     }
 
@@ -137,21 +148,14 @@ bool try_lookup_builtin_function_cached(const std::string& name, baFunPtr& funct
     return true;
 }
 
-bool try_lookup_internal_function_cached(const std::string& name, baFunPtr& function_ptr) {
-    auto& cache = internal_function_cache();
-    auto it = cache.find(name);
-    if (it != cache.end()) {
-        function_ptr = it->second;
-        return function_ptr != nullptr;
-    }
-
-    function_ptr = lookup_internal_function(name.c_str());
+baFunPtr require_internal_function_ptr(const char* name, baFunPtr& function_ptr) {
     if (function_ptr == nullptr) {
-        return false;
+        function_ptr = lookup_internal_function(name);
     }
-
-    cache.emplace(name, function_ptr);
-    return true;
+    if (function_ptr == nullptr) {
+        throw std::runtime_error("找不到内部函数 `" + std::string(name) + "`。");
+    }
+    return function_ptr;
 }
 
 std::size_t required_builtin_out_count(const std::string& name) {
@@ -163,18 +167,17 @@ std::size_t required_builtin_out_count(const std::string& name) {
     return static_cast<std::size_t>(declared_nargout);
 }
 
-std::vector<Value> invoke_function_ptr(const std::string& name, baFunPtr function_ptr,
-                                       const std::vector<Value>& in_args,
-                                       std::size_t out_count, CallableType type) {
-    std::vector<__const_ba_obj_p> runtime_in_args;
+std::vector<Value::Object> invoke_function_ptr(const std::string& name, baFunPtr function_ptr,
+                                               const std::vector<Value::Object>& in_args,
+                                               std::size_t out_count, CallableType type) {
+    std::vector<const_ba_obj_ptr> runtime_in_args;
     runtime_in_args.reserve(in_args.size());
-    for (const Value& arg : in_args) {
+    for (const Value::Object& arg : in_args) {
         runtime_in_args.push_back(arg);
     }
 
-    // 语句位置调用仍然为运行时构造一个 ans 占位槽位，避免 out_args 为空。
     const bool use_ans_placeholder = out_count == 0;
-    std::vector<Value> out_args(use_ans_placeholder ? 1 : out_count);
+    std::vector<Value::Object> out_args(use_ans_placeholder ? 1 : out_count);
     for (std::size_t i = 0; i < out_args.size(); ++i) {
         out_args[i] = use_ans_placeholder && i == 0 ? ba_obj::make_void(V_ANS)
                                                     : std::make_shared<ba_obj>();
@@ -191,34 +194,56 @@ std::vector<Value> invoke_function_ptr(const std::string& name, baFunPtr functio
     return out_args;
 }
 
-Value eval_binop(BinOpInstruction::Type op, Value lhs, Value rhs) {
+bool condition_value_as_bool(const Value::Object& value) {
+    if (value == nullptr) {
+        throw std::runtime_error("条件值为空。");
+    }
+
+    static baFunPtr if_expr_ptr = nullptr;
+    const baFunPtr function_ptr = require_internal_function_ptr("if_expr", if_expr_ptr);
+
+    std::vector<Value::Object> outputs =
+        invoke_function_ptr("if_expr", function_ptr, {value}, 1, CallableType::Internal);
+    if (outputs.empty() || outputs.front() == nullptr) {
+        throw std::runtime_error("内部函数 `if_expr` 未返回有效结果。");
+    }
+
+    try {
+        return outputs.front()->as_bool();
+    } catch (const std::exception& ex) {
+        throw std::runtime_error(std::string("内部函数 `if_expr` 返回值不能转成 bool：") +
+                                 ex.what());
+    }
+}
+
+Value::Object eval_binop(BinOpNode::Op op, Value::Object lhs, Value::Object rhs) {
     std::string name;
     switch (op) {
-        case BinOpInstruction::Add:
+        case BinOpNode::Add:
             name = "plus";
             break;
-        case BinOpInstruction::Subtract:
+        case BinOpNode::Subtract:
             name = "minus";
             break;
-        case BinOpInstruction::Eq:
+        case BinOpNode::Eq:
             name = "eq";
             break;
-        case BinOpInstruction::Gt:
+        case BinOpNode::Gt:
             name = "gt";
             break;
-        case BinOpInstruction::Lt:
+        case BinOpNode::Lt:
             name = "lt";
             break;
-        case BinOpInstruction::Ne:
+        case BinOpNode::Ne:
             name = "ne";
             break;
-        case BinOpInstruction::Or:
+        case BinOpNode::Or:
             name = "or";
             break;
-        case BinOpInstruction::MPower:
+        case BinOpNode::MPower:
             name = "mpower";
             break;
-        case BinOpInstruction::Multiply:
+        case BinOpNode::Multiply:
             name = "times";
             break;
     }
@@ -227,19 +252,19 @@ Value eval_binop(BinOpInstruction::Type op, Value lhs, Value rhs) {
     if (!try_lookup_builtin_function_cached(name, function_ptr)) {
         throw std::runtime_error("找不到内置函数：" + name);
     }
-    std::vector<Value> results =
+    std::vector<Value::Object> results =
         invoke_function_ptr(name, function_ptr, {std::move(lhs), std::move(rhs)}, 1,
                             CallableType::Builtin);
     return results.front();
 }
 
-Value eval_unaryop(UnaryOpInstruction::Type op, Value operand) {
+Value::Object eval_unaryop(UnaryOpNode::Op op, Value::Object operand) {
     std::string name;
     switch (op) {
-        case UnaryOpInstruction::Logic_Not:
+        case UnaryOpNode::Logic_Not:
             name = "not";
             break;
-        case UnaryOpInstruction::UMinus:
+        case UnaryOpNode::UMinus:
             name = "uminus";
             break;
     }
@@ -248,100 +273,129 @@ Value eval_unaryop(UnaryOpInstruction::Type op, Value operand) {
     if (!try_lookup_builtin_function_cached(name, function_ptr)) {
         throw std::runtime_error("找不到内置函数：" + name);
     }
-    std::vector<Value> results =
+    std::vector<Value::Object> results =
         invoke_function_ptr(name, function_ptr, {std::move(operand)}, 1, CallableType::Builtin);
     return results.front();
 }
 
-std::vector<Value> eval_call(const std::string& name, const std::vector<Value>& in_args,
-                             std::size_t out_count, Frame& frame) {
-    Module* module = frame.function() != nullptr ? frame.function()->parent() : nullptr;
-    auto invoke_module_function = [&](const std::string& function_name) -> std::vector<Value> {
-        if (module == nullptr) {
-            throw std::runtime_error("找不到可调用的函数：" + function_name);
-        }
-
-        for (const auto& function : module->functions()) {
-            if (function != nullptr && function->name() == function_name) {
-                Frame callee = execute_function(*function, in_args, &frame);
-                if (callee.outputs().size() < out_count) {
-                    throw std::runtime_error("函数输出个数不匹配：" + function_name);
-                }
-                if (out_count == 0) {
-                    return {};
-                }
-                std::vector<Value> outputs = callee.outputs();
-                outputs.resize(out_count);
-                return outputs;
-            }
-        }
-        throw std::runtime_error("找不到可调用的函数：" + function_name);
-    };
-
-    if (name == "__ir_make_cell__") {
-        if (out_count == 0) {
-            return {};
-        }
-        return {std::make_shared<ba_obj>(new cell_array(in_args, false))};
+std::vector<Value> wrap_outputs(std::vector<Value::Object> values, std::size_t expected_out_count,
+                                const std::string& callee_name) {
+    if (values.size() < expected_out_count) {
+        throw std::runtime_error("调用 `" + callee_name + "` 时返回值个数不足。");
     }
 
-    if (name == "__ir_make_function_handle__") {
+    std::vector<Value> outputs;
+    outputs.reserve(expected_out_count);
+    for (std::size_t i = 0; i < expected_out_count; ++i) {
+        outputs.push_back(concrete(std::move(values[i])));
+    }
+    return outputs;
+}
+
+std::vector<Value> invoke_known_internal_call(const char* name, baFunPtr& function_ptr,
+                                              const std::vector<Value::Object>& in_args,
+                                              std::size_t expected_out_count) {
+    const baFunPtr resolved_ptr = require_internal_function_ptr(name, function_ptr);
+    return wrap_outputs(
+        invoke_function_ptr(name, resolved_ptr, in_args, expected_out_count, CallableType::Internal),
+        expected_out_count, name);
+}
+
+ExecResult execute_function_impl(Function& function, const std::vector<Value::Object>& args,
+                                 const ExecutionOptions& options, std::size_t call_depth);
+
+std::vector<Value> invoke_module_function(const ExecutionState& caller_state,
+                                          const std::string& function_name,
+                                          const std::vector<Value::Object>& in_args,
+                                          std::size_t expected_out_count) {
+    Module* module = caller_state.function.parent();
+    if (module == nullptr) {
+        throw std::runtime_error("找不到可调用的函数 `" + function_name + "`：当前函数不在模块内。");
+    }
+
+    for (const auto& function : module->functions()) {
+        if (function != nullptr && function->name() == function_name) {
+            ExecResult callee_result = execute_function_impl(
+                *function, in_args, caller_state.options, caller_state.call_depth + 1);
+            if (callee_result.outputs.size() < expected_out_count) {
+                throw std::runtime_error("函数 `" + function_name + "` 的输出个数不足。");
+            }
+            callee_result.outputs.resize(expected_out_count);
+            return std::move(callee_result.outputs);
+        }
+    }
+
+    throw std::runtime_error("找不到可调用的函数 `" + function_name + "`。");
+}
+
+std::vector<Value> invoke_direct_call(const ExecutionState& caller_state,
+                                      const std::string& callee_name,
+                                      const std::vector<Value::Object>& in_args,
+                                      std::size_t expected_out_count) {
+    if (callee_name == "__ir_make_cell__") {
+        if (expected_out_count == 0) {
+            return {};
+        }
+        return {concrete(std::make_shared<ba_obj>(new cell_array(in_args, false)))};
+    }
+
+    if (callee_name == "__ir_make_function_handle__") {
         if (in_args.size() != 1 || in_args.front() == nullptr) {
             throw std::runtime_error("构造函数句柄时缺少函数名。");
         }
-        if (out_count == 0) {
+        if (expected_out_count == 0) {
             return {};
         }
         const std::string function_name = in_args.front()->as_string();
-        return {std::make_shared<ba_obj>(function_handle(fh_anonymous, function_name))};
+        return {concrete(std::make_shared<ba_obj>(function_handle(fh_anonymous, function_name)))};
     }
 
-    if (name == "__ir_switch_match__") {
-        if (in_args.size() != 2) {
-            throw std::runtime_error("switch 匹配比较需要两个输入。");
-        }
-        if (out_count == 0) {
-            return {};
-        }
+    if (callee_name == "switch_case_match") {
+        static baFunPtr switch_case_match_ptr = nullptr;
+        return invoke_known_internal_call("switch_case_match", switch_case_match_ptr, in_args,
+                                          expected_out_count);
+    }
 
-        const Value& lhs = in_args[0];
-        const Value& rhs = in_args[1];
-        bool matched = false;
+    if (callee_name == "foreach_init") {
+        static baFunPtr foreach_init_ptr = nullptr;
+        return invoke_known_internal_call("foreach_init", foreach_init_ptr, in_args,
+                                          expected_out_count);
+    }
 
-        try {
-            if (lhs != nullptr && rhs != nullptr &&
-                ((lhs->_is_string() || lhs->is_char_vector()) &&
-                 (rhs->_is_string() || rhs->is_char_vector()))) {
-                matched = lhs->as_string() == rhs->as_string();
-            } else {
-                matched = eval_binop(BinOpInstruction::Eq, lhs, rhs)->as_bool();
+    if (callee_name == "foreach_iterate") {
+        static baFunPtr foreach_iterate_ptr = nullptr;
+        return invoke_known_internal_call("foreach_iterate", foreach_iterate_ptr, in_args,
+                                          expected_out_count);
+    }
+
+    Module* module = caller_state.function.parent();
+    if (module != nullptr) {
+        for (const auto& function : module->functions()) {
+            if (function != nullptr && function->name() == callee_name) {
+                return invoke_module_function(caller_state, callee_name, in_args,
+                                              expected_out_count);
             }
-        } catch (const std::exception&) {
-            matched = false;
         }
-
-        return {std::make_shared<ba_obj>(matched)};
     }
 
     baFunPtr function_ptr = nullptr;
-
-    if (try_lookup_builtin_function_cached(name, function_ptr)) {
+    if (try_lookup_builtin_function_cached(callee_name, function_ptr)) {
         const std::size_t actual_out_count =
-            out_count == 0 ? 0 : std::max(out_count, required_builtin_out_count(name));
-        return invoke_function_ptr(name, function_ptr, in_args, actual_out_count,
-                                   CallableType::Builtin);
+            expected_out_count == 0
+                ? 0
+                : std::max(expected_out_count, required_builtin_out_count(callee_name));
+        return wrap_outputs(invoke_function_ptr(callee_name, function_ptr, in_args, actual_out_count,
+                                                CallableType::Builtin),
+                            expected_out_count, callee_name);
     }
 
-    if (try_lookup_internal_function_cached(name, function_ptr)) {
-        return invoke_function_ptr(name, function_ptr, in_args, out_count,
-                                   CallableType::Internal);
-    }
-
-    return invoke_module_function(name);
+    throw std::runtime_error("找不到可调用的函数 `" + callee_name + "`。");
 }
 
-std::vector<Value> eval_call_value(const Value& callee_value, const std::vector<Value>& in_args,
-                                   std::size_t out_count, Frame& frame) {
+std::vector<Value> invoke_indirect_call(const ExecutionState& caller_state,
+                                        const Value::Object& callee_value,
+                                        const std::vector<Value::Object>& in_args,
+                                        std::size_t expected_out_count) {
     if (callee_value == nullptr) {
         throw std::runtime_error("调用目标为空。");
     }
@@ -349,535 +403,284 @@ std::vector<Value> eval_call_value(const Value& callee_value, const std::vector<
         throw std::runtime_error("调用目标不是函数句柄。");
     }
 
-    Module* module = frame.function() != nullptr ? frame.function()->parent() : nullptr;
-    auto invoke_module_function = [&](const std::string& function_name) -> std::vector<Value> {
-        if (module == nullptr) {
-            throw std::runtime_error("找不到可调用的函数：" + function_name);
-        }
-        for (const auto& function : module->functions()) {
-            if (function != nullptr && function->name() == function_name) {
-                Frame callee = execute_function(*function, in_args, &frame);
-                if (callee.outputs().size() < out_count) {
-                    throw std::runtime_error("函数输出个数不匹配：" + function_name);
-                }
-                if (out_count == 0) {
-                    return {};
-                }
-                std::vector<Value> outputs = callee.outputs();
-                outputs.resize(out_count);
-                return outputs;
-            }
-        }
-        throw std::runtime_error("找不到可调用的函数：" + function_name);
-    };
-
     const auto* handle = callee_value->cget<function_handle>();
     switch (handle->type()) {
         case fh_anonymous:
         case fh_mfunction:
-            return invoke_module_function(handle->data());
+        case fh_script:
+            return invoke_module_function(caller_state, handle->data(), in_args,
+                                          expected_out_count);
         case fh_builtin: {
             baFunPtr function_ptr = nullptr;
             if (!try_lookup_builtin_function_cached(handle->data(), function_ptr)) {
-                throw std::runtime_error("找不到内置函数句柄：" + handle->data());
+                throw std::runtime_error("找不到内置函数句柄 `" + handle->data() + "`。");
             }
             const std::size_t actual_out_count =
-                out_count == 0 ? 0 : std::max(out_count, required_builtin_out_count(handle->data()));
-            return invoke_function_ptr(handle->data(), function_ptr, in_args, actual_out_count,
-                                       CallableType::Builtin);
+                expected_out_count == 0
+                    ? 0
+                    : std::max(expected_out_count, required_builtin_out_count(handle->data()));
+            return wrap_outputs(
+                invoke_function_ptr(handle->data(), function_ptr, in_args, actual_out_count,
+                                    CallableType::Builtin),
+                expected_out_count, handle->data());
         }
-        default:
-            throw std::runtime_error("暂不支持该函数句柄类型：" +
-                                     std::string(fh_type_string(handle->type())));
-    }
-}
-
-std::vector<Value> eval_call_instruction(const CallInstruction& instruction, Frame& frame,
-                                         std::size_t default_out_count) {
-    std::vector<Value> in_args;
-    const std::size_t in_arg_count = instruction.input_count();
-    in_args.reserve(in_arg_count);
-    for (std::size_t i = 0; i < in_arg_count; ++i) {
-        in_args.push_back(load_use_value(frame, nullptr, instruction.input_ref(i)));
-    }
-
-    const std::size_t out_count =
-        instruction.output_count() == 0 ? default_out_count : instruction.output_count();
-    std::vector<Value> out_args =
-        instruction.is_indirect()
-            ? eval_call_value(load_use_value(frame, nullptr, instruction.callee_ref()), in_args,
-                              out_count, frame)
-            : eval_call(instruction.name(), in_args, out_count, frame);
-
-    frame.store_instruction_values(instruction, out_args);
-
-    return out_args;
-}
-
-std::vector<Value> collect_function_outputs(Function& function, const Frame& frame) {
-    std::vector<Value> outputs;
-    outputs.reserve(function.output_names().size());
-    for (const std::string& name : function.output_names()) {
-        outputs.push_back(frame.load(name));
-    }
-    return outputs;
-}
-
-std::vector<Value> collect_return_values(const ReturnInstruction& instruction, Frame& frame) {
-    const std::size_t value_count = instruction.return_value_count();
-    if (value_count == 0) {
-        return collect_function_outputs(*frame.function(), frame);
-    }
-
-    std::vector<Value> outputs;
-    outputs.reserve(value_count);
-    for (std::size_t i = 0; i < value_count; ++i) {
-        const ValueRef ref = instruction.return_value_ref(i);
-        outputs.push_back(load_use_value(frame, nullptr, ref));
-    }
-    return outputs;
-}
-
-Value maybe_eval_named_constant(const std::string& name) {
-    if (name == "i" || name == "j") {
-        return std::make_shared<ba_obj>(std::complex<double>{0.0, 1.0});
-    }
-    return nullptr;
-}
-
-template <typename T>
-bool matrix_condition_value_from_data(const T* data, baSize size) {
-    for (baIndex i = 0; i < size; ++i) {
-        if (data[i] == T{}) {
-            return false;
-        }
-    }
-    return true;
-}
-
-template <typename T>
-bool matrix_condition_value(const matrix<T>& mat) {
-    const baSize size = mat.size();
-    if (size == 0) {
-        return false;
-    }
-
-    if (mat.is_contiguous()) {
-        return matrix_condition_value_from_data(mat.data(), size);
-    }
-
-    const matrix<T> contiguous = mat.contiguous();
-    return matrix_condition_value_from_data(contiguous.data(), size);
-}
-
-bool bool_matrix_condition_value(const matrix<bool>& mat) {
-    const baSize size = mat.size();
-    if (size == 0) {
-        return false;
-    }
-
-    if (mat.is_contiguous()) {
-        return matrix_condition_value_from_data(mat.data(), size);
-    }
-
-    const matrix<bool> contiguous = mat.contiguous();
-    return matrix_condition_value_from_data(contiguous.data(), size);
-}
-
-bool char_matrix_condition_value(const matrix<char>& mat) {
-    const baSize size = mat.size();
-    if (size == 0) {
-        return false;
-    }
-
-    if (mat.is_contiguous()) {
-        return matrix_condition_value_from_data(mat.data(), size);
-    }
-
-    const matrix<char> contiguous = mat.contiguous();
-    return matrix_condition_value_from_data(contiguous.data(), size);
-}
-
-bool complex_matrix_condition_value(const matrix<std::complex<double>>& mat) {
-    const baSize size = mat.size();
-    if (size == 0) {
-        return false;
-    }
-
-    if (mat.is_contiguous()) {
-        return matrix_condition_value_from_data(mat.data(), size);
-    }
-
-    const matrix<std::complex<double>> contiguous = mat.contiguous();
-    return matrix_condition_value_from_data(contiguous.data(), size);
-}
-
-bool complex_matrix_condition_value(const matrix<std::complex<float>>& mat) {
-    const baSize size = mat.size();
-    if (size == 0) {
-        return false;
-    }
-
-    if (mat.is_contiguous()) {
-        return matrix_condition_value_from_data(mat.data(), size);
-    }
-
-    const matrix<std::complex<float>> contiguous = mat.contiguous();
-    return matrix_condition_value_from_data(contiguous.data(), size);
-}
-
-bool condition_value_as_bool(const Value& value) {
-    if (value == nullptr) {
-        throw std::runtime_error("条件值为空。");
-    }
-
-    try {
-        return value->as_bool();
-    } catch (const std::invalid_argument&) {
-    }
-
-    switch (value->type()) {
-        case ba_int8_mat:
-            return matrix_condition_value(*value->cget<matrix<std::int8_t>>());
-        case ba_int16_mat:
-            return matrix_condition_value(*value->cget<matrix<std::int16_t>>());
-        case ba_int_mat:
-            return matrix_condition_value(*value->cget<matrix<std::int32_t>>());
-        case ba_int64_mat:
-            return matrix_condition_value(*value->cget<matrix<std::int64_t>>());
-        case ba_uint8_mat:
-            return matrix_condition_value(*value->cget<matrix<std::uint8_t>>());
-        case ba_uint16_mat:
-            return matrix_condition_value(*value->cget<matrix<std::uint16_t>>());
-        case ba_uint_mat:
-            return matrix_condition_value(*value->cget<matrix<std::uint32_t>>());
-        case ba_uint64_mat:
-            return matrix_condition_value(*value->cget<matrix<std::uint64_t>>());
-        case ba_double_mat:
-            return matrix_condition_value(*value->cget<matrix<double>>());
-        case ba_single_mat:
-            return matrix_condition_value(*value->cget<matrix<float>>());
-        case ba_complex_double_mat:
-            return complex_matrix_condition_value(*value->cget<matrix<std::complex<double>>>());
-        case ba_complex_single_mat:
-            return complex_matrix_condition_value(*value->cget<matrix<std::complex<float>>>());
-        case ba_char_mat:
-            return char_matrix_condition_value(*value->cget<matrix<char>>());
-        case ba_bool_mat:
-            return bool_matrix_condition_value(*value->cget<matrix<bool>>());
-        default:
+        case fh_variable:
             break;
     }
 
-    throw std::runtime_error("该 ba_obj 对象不能转化为 bool 标量。");
+    throw std::runtime_error("暂不支持该函数句柄类型 `" +
+                             std::string(fh_type_string(handle->type())) + "`。");
+}
+
+std::vector<Value> evaluate_call(const SSACallNode& call, ExecutionState& state) {
+    std::vector<Value::Object> in_args;
+    in_args.reserve(call.inputs().size());
+    for (const ValueRef input : call.inputs()) {
+        in_args.push_back(state.require_concrete_object(input, "调用实参"));
+    }
+
+    const std::size_t expected_out_count = call.results().size();
+    if (call.callee().type == SSACallNode::Callee::Direct) {
+        return invoke_direct_call(state, call.callee().direct_symbol, in_args, expected_out_count);
+    }
+
+    const Value::Object callee_value =
+        state.require_concrete_object(call.callee().indirect_value, "间接调用目标");
+    return invoke_indirect_call(state, callee_value, in_args, expected_out_count);
+}
+
+void execute_phi_nodes(const BasicBlock& block, ExecutionState& state) {
+    std::vector<std::pair<ValueId, Value>> pending;
+    pending.reserve(block.phi_nodes().size());
+
+    for (IRNode* node : block.phi_nodes()) {
+        if (node == nullptr) {
+            continue;
+        }
+
+        const auto& phi = static_cast<const SSAPhiNode&>(*node);
+        const SSAPhiNode::Incoming* selected = nullptr;
+        for (const SSAPhiNode::Incoming& incoming : phi.incomings()) {
+            if (incoming.predecessor == state.predecessor) {
+                selected = &incoming;
+                break;
+            }
+        }
+
+        if (selected == nullptr) {
+            throw std::runtime_error("函数 `" + state.function.name() + "` 的 phi `" +
+                                     value_label(state.function, phi.result()) +
+                                     "` 缺少来自前驱块 `" + block_label(state.predecessor) +
+                                     "` 的 incoming。");
+        }
+
+        pending.emplace_back(phi.result(), state.load_value(selected->value));
+    }
+
+    for (auto& entry : pending) {
+        state.store_value(entry.first, std::move(entry.second));
+    }
+}
+
+void execute_instruction(const IRNode& node, ExecutionState& state) {
+    const auto& ssa = static_cast<const UntypedSSANode&>(node);
+    switch (ssa.type()) {
+        case UntypedSSANode::SSA_Number: {
+            const auto& number = static_cast<const SSANumberNode&>(ssa);
+            Value::Object object = std::visit(
+                [](const auto& item) -> Value::Object { return std::make_shared<ba_obj>(item); },
+                number.value());
+            state.store_value(number.result(), concrete(std::move(object)));
+            return;
+        }
+        case UntypedSSANode::SSA_Text: {
+            const auto& text = static_cast<const SSATextNode&>(ssa);
+            state.store_value(text.result(),
+                              concrete(std::make_shared<ba_obj>(text.text().c_str(), ba_char_mat)));
+            return;
+        }
+        case UntypedSSANode::SSA_Undef: {
+            const auto& undef_node = static_cast<const SSAUndefNode&>(ssa);
+            state.store_value(undef_node.result(), undef());
+            return;
+        }
+        case UntypedSSANode::SSA_Copy: {
+            const auto& copy = static_cast<const SSACopyNode&>(ssa);
+            state.store_value(copy.result(), state.load_value(copy.src()));
+            return;
+        }
+        case UntypedSSANode::SSA_UnaryOp: {
+            const auto& unary = static_cast<const SSAUnaryOpNode&>(ssa);
+            state.store_value(unary.result(),
+                              concrete(eval_unaryop(
+                                  unary.op(),
+                                  state.require_concrete_object(unary.operand(), "单目运算输入"))));
+            return;
+        }
+        case UntypedSSANode::SSA_BinOp: {
+            const auto& binop = static_cast<const SSABinOpNode&>(ssa);
+            state.store_value(binop.result(),
+                              concrete(eval_binop(
+                                  binop.op(),
+                                  state.require_concrete_object(binop.lhs(), "二元运算左输入"),
+                                  state.require_concrete_object(binop.rhs(), "二元运算右输入"))));
+            return;
+        }
+        case UntypedSSANode::SSA_Call: {
+            const auto& call = static_cast<const SSACallNode&>(ssa);
+            std::vector<Value> outputs = evaluate_call(call, state);
+            if (outputs.size() != call.results().size()) {
+                throw std::runtime_error("函数 `" + state.function.name() + "` 的调用节点返回值个数不匹配。");
+            }
+            for (std::size_t i = 0; i < outputs.size(); ++i) {
+                state.store_value(call.results()[i], std::move(outputs[i]));
+            }
+            return;
+        }
+        case UntypedSSANode::SSA_Phi:
+            throw std::runtime_error("phi 节点只能出现在 phi 区域。");
+        case UntypedSSANode::SSA_CondJump:
+        case UntypedSSANode::SSA_Jump:
+        case UntypedSSANode::SSA_Return:
+            throw std::runtime_error("终结节点不能出现在基本块正文中。");
+    }
+}
+
+BasicBlock* execute_terminal(const BasicBlock& block, ExecutionState& state) {
+    if (block.terminal() == nullptr) {
+        throw std::runtime_error("函数 `" + state.function.name() + "` 的基本块 `" +
+                                 block.name() + "` 缺少终结节点。");
+    }
+
+    const auto& terminal = static_cast<const UntypedSSANode&>(*block.terminal());
+    switch (terminal.type()) {
+        case UntypedSSANode::SSA_CondJump: {
+            const auto& jump = static_cast<const SSACondJumpNode&>(terminal);
+            return condition_value_as_bool(
+                       state.require_concrete_object(jump.cond(), "条件跳转条件值"))
+                       ? jump.true_block()
+                       : jump.false_block();
+        }
+        case UntypedSSANode::SSA_Jump:
+            return static_cast<const SSAJumpNode&>(terminal).target();
+        case UntypedSSANode::SSA_Return: {
+            const auto& ret = static_cast<const SSAReturnNode&>(terminal);
+            state.outputs.clear();
+            state.outputs.reserve(ret.values().size());
+            for (const ValueRef value : ret.values()) {
+                state.outputs.push_back(state.require_concrete_value(value, "返回值"));
+            }
+            return nullptr;
+        }
+        case UntypedSSANode::SSA_Number:
+        case UntypedSSANode::SSA_Text:
+        case UntypedSSANode::SSA_Undef:
+        case UntypedSSANode::SSA_Phi:
+        case UntypedSSANode::SSA_Copy:
+        case UntypedSSANode::SSA_UnaryOp:
+        case UntypedSSANode::SSA_BinOp:
+        case UntypedSSANode::SSA_Call:
+            break;
+    }
+
+    throw std::runtime_error("基本块 `" + block.name() + "` 的终结节点类型非法。");
+}
+
+std::vector<NamedBindingSnapshot> collect_final_named_bindings(const ExecutionState& state) {
+    std::vector<NamedBindingSnapshot> bindings;
+    bindings.reserve(state.active_named_values.size());
+
+    for (const auto& [name, value_id] : state.active_named_values) {
+        if (state.values.find(value_id) == state.values.end()) {
+            continue;
+        }
+        bindings.push_back(NamedBindingSnapshot{name, value_id});
+    }
+
+    std::sort(bindings.begin(), bindings.end(),
+              [](const NamedBindingSnapshot& lhs, const NamedBindingSnapshot& rhs) {
+                  if (lhs.name != rhs.name) {
+                      return lhs.name < rhs.name;
+                  }
+                  return lhs.value_id < rhs.value_id;
+              });
+    return bindings;
+}
+
+void print_final_named_bindings(const ExecutionState& state, const ExecResult& result) {
+    if (!state.options.print_final_named_bindings || state.options.trace_stream == nullptr) {
+        return;
+    }
+
+    std::ostream& os = *state.options.trace_stream;
+    const std::string indent = trace_indent(state.call_depth);
+    os << indent << "; final named bindings for `" << state.function.name() << "`" << std::endl;
+    if (result.final_named_bindings.empty()) {
+        os << indent << "; <none>" << std::endl;
+        os << std::endl;
+        return;
+    }
+
+    for (const NamedBindingSnapshot& binding : result.final_named_bindings) {
+        auto value_it = result.values.find(binding.value_id);
+        if (value_it == result.values.end()) {
+            continue;
+        }
+        os << indent << binding.name << " = " << format_value(value_it->second)
+           << "    ; " << value_label(state.function, binding.value_id) << std::endl;
+    }
+    os << std::endl;
+}
+
+ExecResult execute_function_impl(Function& function, const std::vector<Value::Object>& args,
+                                 const ExecutionOptions& options, std::size_t call_depth) {
+    if (function.stage() != IRNode::UntypedSSA) {
+        throw std::runtime_error("解释器只支持执行 `UntypedSSA` 函数 `" + function.name() + "`。");
+    }
+    analysis::verify_function_or_throw(function);
+
+    if (function.entry_block() == nullptr) {
+        throw std::runtime_error("函数 `" + function.name() + "` 缺少入口块。");
+    }
+    if (function.argument_values().size() != function.inputs().size()) {
+        throw std::runtime_error("函数 `" + function.name() + "` 的输入签名与 SSA 参数槽位个数不一致。");
+    }
+    if (args.size() != function.argument_values().size()) {
+        throw std::runtime_error("执行函数 `" + function.name() + "` 时实参数量不匹配。");
+    }
+
+    ExecutionState state{function, options, call_depth, {}, {}, {}, nullptr};
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        state.store_value(function.argument_values()[i], concrete(args[i]));
+    }
+
+    BasicBlock* current_block = function.entry_block();
+    while (current_block != nullptr) {
+        execute_phi_nodes(*current_block, state);
+        for (IRNode* node : current_block->instructions()) {
+            if (node != nullptr) {
+                execute_instruction(*node, state);
+            }
+        }
+
+        BasicBlock* next_block = execute_terminal(*current_block, state);
+        state.predecessor = current_block;
+        current_block = next_block;
+    }
+
+    ExecResult result;
+    result.outputs = std::move(state.outputs);
+    result.final_named_bindings = collect_final_named_bindings(state);
+    result.values = std::move(state.values);
+    print_final_named_bindings(state, result);
+    return result;
 }
 
 }  // namespace
 
-Frame::Frame(Function* function, Frame* caller, int nargin, int nargout)
-    : function_(function), caller_(caller), nargin_(nargin), nargout_(nargout) {}
-
-Function* Frame::function() const {
-    return function_;
+ExecResult execute_function(Function& function, const std::vector<Value::Object>& args,
+                            const ExecutionOptions& options) {
+    return execute_function_impl(function, args, options, 0);
 }
 
-Frame* Frame::caller() const {
-    return caller_;
-}
-
-int Frame::nargin() const {
-    return nargin_;
-}
-
-int Frame::nargout() const {
-    return nargout_;
-}
-
-bool Frame::returned() const {
-    return returned_;
-}
-
-const Frame::SymbolTable& Frame::symbols() const {
-    return symbols_;
-}
-
-const Frame::ValueTable& Frame::values() const {
-    return values_;
-}
-
-const std::vector<Value>& Frame::outputs() const {
-    return outputs_;
-}
-
-void Frame::declare(const std::string& name) {
-    symbols_.try_emplace(name);
-}
-
-void Frame::store(const std::string& name, Value value) {
-    Binding& binding = symbols_[name];
-    binding.value = std::move(value);
-    binding.initialized = true;
-}
-
-void Frame::store_value(ValueId id, Value value) {
-    if (id == InvalidValueId) {
-        return;
-    }
-    values_[id] = std::move(value);
-}
-
-void Frame::store_instruction_values(const Instruction& instruction, const std::vector<Value>& values) {
-    const std::size_t count = std::min(instruction.value_count(), values.size());
-    for (std::size_t i = 0; i < count; ++i) {
-        const ValueRef ref = instruction.value_ref(i);
-        if (!ref.is_valid()) {
-            continue;
-        }
-        store_value(ref.id, values[i]);
-    }
-}
-
-Value Frame::load(const std::string& name) const {
-    auto it = symbols_.find(name);
-    if (it == symbols_.end()) {
-        if (Value constant = maybe_eval_named_constant(name); constant != nullptr) {
-            return constant;
-        }
-        throw std::runtime_error("未定义的符号：" + name);
-    }
-    if (!it->second.initialized || it->second.value == nullptr) {
-        throw std::runtime_error("符号尚未初始化：" + name);
-    }
-    return it->second.value;
-}
-
-Value Frame::load_value(ValueId id) const {
-    auto it = values_.find(id);
-    if (it == values_.end()) {
-        throw std::runtime_error("未定义的 IR 值槽：" + std::to_string(id));
-    }
-    return it->second;
-}
-
-Value Frame::load_value(const ValueRef& ref) const {
-    if (!ref.is_valid()) {
-        throw std::runtime_error("尝试读取非法的 ValueRef。");
-    }
-    return load_value(ref.id);
-}
-
-bool Frame::contains(const std::string& name) const {
-    return symbols_.find(name) != symbols_.end();
-}
-
-bool Frame::is_initialized(const std::string& name) const {
-    auto it = symbols_.find(name);
-    return it != symbols_.end() && it->second.initialized;
-}
-
-bool Frame::has_value(ValueId id) const {
-    return values_.find(id) != values_.end();
-}
-
-void Frame::set_returned(bool returned) {
-    returned_ = returned;
-}
-
-void Frame::set_outputs(std::vector<Value> outputs) {
-    outputs_ = std::move(outputs);
-}
-
-Value eval_expr(Instruction* instruction, Frame& frame) {
-    if (instruction == nullptr) {
-        throw std::runtime_error("不能对空指令求值。");
-    }
-
-    switch (instruction->type()) {
-        case Instruction::Text: {
-            const auto* text = static_cast<const TextInstruction*>(instruction);
-            return record_and_return(frame, *instruction,
-                                     std::make_shared<ba_obj>(text->text().c_str(), ba_char_mat));
-        }
-        case Instruction::Binding: {
-            const auto* binding = static_cast<const BindingInstruction*>(instruction);
-            if (!frame.contains(binding->name())) {
-                if (Value constant = maybe_eval_named_constant(binding->name()); constant != nullptr) {
-                    return record_and_return(frame, *instruction, constant);
-                }
-            }
-            return record_and_return(frame, *instruction, frame.load(binding->name()));
-        }
-        case Instruction::Number: {
-            const auto* number = static_cast<const NumberInstruction*>(instruction);
-            return record_and_return(frame, *instruction, std::visit(
-                [](const auto& item) -> Value { return std::make_shared<ba_obj>(item); },
-                number->value()));
-        }
-        case Instruction::Undef:
-            return record_and_return(frame, *instruction, nullptr);
-        case Instruction::UnaryOp: {
-            const auto* unaryop = static_cast<const UnaryOpInstruction*>(instruction);
-            return record_and_return(frame, *instruction,
-                                     eval_unaryop(unaryop->op(),
-                                                  load_use_value(frame, nullptr,
-                                                                 unaryop->operand_ref())));
-        }
-        case Instruction::BinOp: {
-            const auto* binop = static_cast<const BinOpInstruction*>(instruction);
-            return record_and_return(frame, *instruction,
-                                     eval_binop(binop->op(),
-                                                load_use_value(frame, nullptr, binop->lhs_ref()),
-                                                load_use_value(frame, nullptr, binop->rhs_ref())));
-        }
-        case Instruction::Phi: {
-            if (!instruction->has_values()) {
-                throw std::runtime_error("phi 节点缺少结果值定义。");
-            }
-            const ValueRef ref = instruction->value_ref();
-            if (!ref.is_valid() || !frame.has_value(ref.id)) {
-                throw std::runtime_error("phi 节点必须在基本块入口先完成求值。");
-            }
-            return frame.load_value(ref);
-        }
-        case Instruction::Call: {
-            const auto* call = static_cast<const CallInstruction*>(instruction);
-            std::vector<Value> out_args = eval_call_instruction(*call, frame, 1);
-            if (out_args.empty()) {
-                return record_and_return(frame, *instruction, std::make_shared<ba_obj>());
-            }
-            return out_args.front();
-        }
-        case Instruction::Asgn:
-        case Instruction::CondJump:
-        case Instruction::Jump:
-        case Instruction::Return:
-            break;
-    }
-
-    throw std::runtime_error("该指令不能作为表达式求值。");
-}
-
-void exec_inst(Instruction* instruction, Frame& frame) {
-    if (instruction == nullptr) {
-        return;
-    }
-
-    switch (instruction->type()) {
-        case Instruction::Asgn: {
-            const auto* assign = static_cast<const AssignInstruction*>(instruction);
-            frame.store(assign->name(), load_use_value(frame, nullptr, assign->value_ref()));
-            return;
-        }
-        case Instruction::Call: {
-            const auto* call = static_cast<const CallInstruction*>(instruction);
-            (void)eval_call_instruction(*call, frame, 0);
-            return;
-        }
-        case Instruction::Phi:
-            throw std::runtime_error("phi 节点必须位于基本块入口，不能按普通指令执行。");
-        case Instruction::Text:
-        case Instruction::Binding:
-        case Instruction::Number:
-        case Instruction::Undef:
-        case Instruction::UnaryOp:
-        case Instruction::BinOp:
-            materialize_instruction_value(frame, *instruction);
-            return;
-        case Instruction::CondJump:
-        case Instruction::Jump:
-        case Instruction::Return:
-            break;
-    }
-
-    throw std::runtime_error("终结指令不能出现在基本块正文中。");
-}
-
-BasicBlock* exec_terminal(Instruction* instruction, Frame& frame) {
-    if (instruction == nullptr) {
-        frame.set_returned(true);
-        frame.set_outputs(collect_function_outputs(*frame.function(), frame));
-        return nullptr;
-    }
-
-    switch (instruction->type()) {
-        case Instruction::CondJump: {
-            const auto* cond_jump = static_cast<const CondJumpInstruction*>(instruction);
-            Value cond_value = load_use_value(frame, nullptr, cond_jump->cond_ref());
-            return condition_value_as_bool(cond_value) ? cond_jump->true_block()
-                                                       : cond_jump->false_block();
-        }
-        case Instruction::Jump: {
-            const auto* jump = static_cast<const JumpInstruction*>(instruction);
-            return jump->target();
-        }
-        case Instruction::Return:
-            frame.set_returned(true);
-            frame.set_outputs(
-                collect_return_values(*static_cast<const ReturnInstruction*>(instruction), frame));
-            return nullptr;
-        case Instruction::Text:
-        case Instruction::Binding:
-        case Instruction::Number:
-        case Instruction::Undef:
-        case Instruction::UnaryOp:
-        case Instruction::BinOp:
-        case Instruction::Phi:
-        case Instruction::Asgn:
-        case Instruction::Call:
-            break;
-    }
-
-    throw std::runtime_error("基本块的 terminal 不是合法的终结指令。");
-}
-
-Frame execute_function(Function& function, const std::vector<Value>& args, Frame* caller) {
-    if (function.entry_block() == nullptr) {
-        throw std::runtime_error("函数缺少入口基本块：" + function.name());
-    }
-    if (args.size() != function.input_names().size()) {
-        throw std::runtime_error("执行函数时参数个数不匹配：" + function.name());
-    }
-
-    Frame frame(&function, caller, static_cast<int>(args.size()),
-                static_cast<int>(function.output_names().size()));
-
-    for (std::size_t i = 0; i < function.input_names().size(); ++i) {
-        // MATLAB-like 函数参数更接近按值传递；这里复制一份 ba_obj 包装，
-        // 避免后续运行时调用意外共享并改写入口实参对象。
-        frame.store_value(function.input_ref(i).id,
-                          args[i] == nullptr ? nullptr : std::make_shared<ba_obj>(*args[i]));
-    }
-    for (const std::string& output_name : function.output_names()) {
-        frame.declare(output_name);
-    }
-
-    BasicBlock* block = function.entry_block();
-    BasicBlock* predecessor = nullptr;
-    while (block != nullptr && !frame.returned()) {
-        exec_phi_nodes(*block, predecessor, frame);
-
-        for (Instruction* instruction : block->instructions()) {
-            if (instruction != nullptr && instruction->type() == Instruction::Phi) {
-                continue;
-            }
-            exec_inst(instruction, frame);
-        }
-        BasicBlock* next_block = exec_terminal(block->terminal(), frame);
-        predecessor = block;
-        block = next_block;
-    }
-
-    if (!frame.returned()) {
-        frame.set_outputs(collect_function_outputs(function, frame));
-    }
-    return frame;
-}
-
-std::string value_text(const Value& value) {
-    if (value == nullptr) {
-        return "<null>";
-    }
-    return internal::obj2str(*value);
-}
-
-}  // namespace baltam
+}  // namespace baltam::interpreter

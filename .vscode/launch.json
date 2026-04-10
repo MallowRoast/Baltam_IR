@@ -2,23 +2,57 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Debug main",
+      "name": "Debug test_test0",
       "type": "cppdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/build/main",
+      "program": "${workspaceFolder}/build/test/test_test0",
       "args": [],
-      "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
       "environment": [
         {
+          "name": "BALTAM_FRONTEND",
+          "value": "console"
+        },
+        {
           "name": "LD_LIBRARY_PATH",
-          "value": "/opt/Baltamatica/lib"
+          "value": "${workspaceFolder}/deps/core/lib:/opt/Baltamatica/lib:${env:LD_LIBRARY_PATH}"
         }
       ],
+      "stopAtEntry": false,
       "externalConsole": false,
       "MIMode": "gdb",
       "miDebuggerPath": "/usr/bin/gdb",
-      "preLaunchTask": "CMake: build",
+      "preLaunchTask": "CMake: build test_test0",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ]
+    },
+    {
+      "name": "Debug interpreter_test",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/test/interpreter_test",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "environment": [
+        {
+          "name": "BALTAM_FRONTEND",
+          "value": "console"
+        },
+        {
+          "name": "LD_LIBRARY_PATH",
+          "value": "${workspaceFolder}/deps/core/lib:/opt/Baltamatica/lib:${env:LD_LIBRARY_PATH}"
+        }
+      ],
+      "stopAtEntry": false,
+      "externalConsole": false,
+      "MIMode": "gdb",
+      "miDebuggerPath": "/usr/bin/gdb",
+      "preLaunchTask": "CMake: build interpreter_test",
       "setupCommands": [
         {
           "description": "Enable pretty-printing for gdb",

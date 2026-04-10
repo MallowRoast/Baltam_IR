@@ -10,15 +10,11 @@
         "${workspaceFolder}",
         "-B",
         "${workspaceFolder}/build",
-        "-DCMAKE_PREFIX_PATH=${workspaceFolder}/deps/core",
         "-DCMAKE_BUILD_TYPE=Debug",
         "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
       ],
       "options": {
-        "cwd": "${workspaceFolder}",
-        "env": {
-          "LD_LIBRARY_PATH": "/opt/Baltamatica/lib"
-        }
+        "cwd": "${workspaceFolder}"
       },
       "problemMatcher": []
     },
@@ -31,10 +27,7 @@
         "${workspaceFolder}/build"
       ],
       "options": {
-        "cwd": "${workspaceFolder}",
-        "env": {
-          "LD_LIBRARY_PATH": "/opt/Baltamatica/lib"
-        }
+        "cwd": "${workspaceFolder}"
       },
       "dependsOn": [
         "CMake: configure"
@@ -44,6 +37,48 @@
         "kind": "build",
         "isDefault": true
       },
+      "problemMatcher": [
+        "$gcc"
+      ]
+    },
+    {
+      "label": "CMake: build test_test0",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--build",
+        "${workspaceFolder}/build",
+        "--target",
+        "test_test0"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": [
+        "CMake: configure"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": [
+        "$gcc"
+      ]
+    },
+    {
+      "label": "CMake: build interpreter_test",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--build",
+        "${workspaceFolder}/build",
+        "--target",
+        "interpreter_test"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": [
+        "CMake: configure"
+      ],
+      "dependsOrder": "sequence",
       "problemMatcher": [
         "$gcc"
       ]
@@ -59,35 +94,9 @@
         "clean"
       ],
       "options": {
-        "cwd": "${workspaceFolder}",
-        "env": {
-          "LD_LIBRARY_PATH": "/opt/Baltamatica/lib"
-        }
+        "cwd": "${workspaceFolder}"
       },
       "problemMatcher": []
-    },
-    {
-      "label": "CMake: rebuild",
-      "type": "shell",
-      "command": "cmake",
-      "args": [
-        "--build",
-        "${workspaceFolder}/build",
-        "--clean-first"
-      ],
-      "options": {
-        "cwd": "${workspaceFolder}",
-        "env": {
-          "LD_LIBRARY_PATH": "/opt/Baltamatica/lib"
-        }
-      },
-      "dependsOn": [
-        "CMake: configure"
-      ],
-      "dependsOrder": "sequence",
-      "problemMatcher": [
-        "$gcc"
-      ]
     }
   ]
 }

@@ -37,9 +37,45 @@ struct NamedValue {
     Type type = UserVariable;
 };
 
+using ValueId = std::uint32_t;
+constexpr ValueId InvalidValueId = 0;
+
+/**
+ * @brief 一元运算节点共享的操作码类型。
+ */
+enum class UnaryOpType {
+    Logic_Not,
+    UMinus,
+};
+
+/**
+ * @brief 二元运算节点共享的操作码类型。
+ */
+enum class BinOpType {
+    Add,
+    Subtract,
+    Eq,
+    Gt,
+    Lt,
+    Ne,
+    Or,
+    MPower,
+    Multiply,
+};
+
+class IRNode;
 class BasicBlock;
 class Function;
 class Module;
+
+/**
+ * @brief SSA 阶段里对一个值定义的轻量引用。
+ */
+struct ValueRef {
+    ValueId id = InvalidValueId;
+
+    bool valid() const;
+};
 
 /**
  * @brief 分阶段 IR 体系中的公共节点基类。
@@ -114,6 +150,34 @@ protected:
 };
 
 /**
+ * @brief 所有 untyped SSA 节点的公共基类。
+ */
+class UntypedSSANode : public SSANode {
+public:
+    enum Type {
+        SSA_Number,
+        SSA_Text,
+        SSA_Undef,
+        SSA_Phi,
+        SSA_Copy,
+        SSA_UnaryOp,
+        SSA_BinOp,
+        SSA_Call,
+        SSA_CondJump,
+        SSA_Jump,
+        SSA_Return,
+    };
+
+    Type type() const;
+
+protected:
+    explicit UntypedSSANode(Type type, std::optional<SourceLocation> location = std::nullopt);
+
+private:
+    Type type_ = SSA_Number;
+};
+
+/**
  * @brief 数值常量节点。
  */
 class NumberNode final : public NonSSANode {
@@ -169,10 +233,10 @@ private:
  */
 class UnaryOpNode final : public NonSSANode {
 public:
-    enum Op {
-        Logic_Not,
-        UMinus,
-    };
+    using Op = UnaryOpType;
+
+    static constexpr Op Logic_Not = Op::Logic_Not;
+    static constexpr Op UMinus = Op::UMinus;
 
     UnaryOpNode(Op op, NamedValue result, NamedValue operand,
                 std::optional<SourceLocation> location = std::nullopt);
@@ -182,7 +246,7 @@ public:
     const NamedValue& operand() const;
 
 private:
-    Op op_ = UMinus;
+    Op op_ = Op::UMinus;
     NamedValue result_;
     NamedValue operand_;
 };
@@ -192,17 +256,17 @@ private:
  */
 class BinOpNode final : public NonSSANode {
 public:
-    enum Op {
-        Add,
-        Subtract,
-        Eq,
-        Gt,
-        Lt,
-        Ne,
-        Or,
-        MPower,
-        Multiply,
-    };
+    using Op = BinOpType;
+
+    static constexpr Op Add = Op::Add;
+    static constexpr Op Subtract = Op::Subtract;
+    static constexpr Op Eq = Op::Eq;
+    static constexpr Op Gt = Op::Gt;
+    static constexpr Op Lt = Op::Lt;
+    static constexpr Op Ne = Op::Ne;
+    static constexpr Op Or = Op::Or;
+    static constexpr Op MPower = Op::MPower;
+    static constexpr Op Multiply = Op::Multiply;
 
     BinOpNode(Op op, NamedValue result, NamedValue lhs, NamedValue rhs,
               std::optional<SourceLocation> location = std::nullopt);
@@ -213,7 +277,7 @@ public:
     const NamedValue& rhs() const;
 
 private:
-    Op op_ = Add;
+    Op op_ = Op::Add;
     NamedValue result_;
     NamedValue lhs_;
     NamedValue rhs_;
@@ -293,9 +357,214 @@ private:
 };
 
 /**
- * @brief non-SSA 基本块。
+ * @brief untyped SSA 数值常量节点。
+ */
+class SSANumberNode final : public UntypedSSANode {
+public:
+    using NumberValue =
+        std::variant<bool, std::int64_t, std::uint64_t, double, std::complex<double>>;
+
+    SSANumberNode(ValueId result, NumberValue value,
+                  std::optional<SourceLocation> location = std::nullopt);
+
+    ValueId result() const;
+    const NumberValue& value() const;
+
+private:
+    ValueId result_ = InvalidValueId;
+    NumberValue value_;
+};
+
+/**
+ * @brief untyped SSA 文本常量节点。
+ */
+class SSATextNode final : public UntypedSSANode {
+public:
+    SSATextNode(ValueId result, std::string text,
+                std::optional<SourceLocation> location = std::nullopt);
+
+    ValueId result() const;
+    const std::string& text() const;
+
+private:
+    ValueId result_ = InvalidValueId;
+    std::string text_;
+};
+
+/**
+ * @brief untyped SSA 未定义值节点。
+ */
+class SSAUndefNode final : public UntypedSSANode {
+public:
+    explicit SSAUndefNode(ValueId result,
+                          std::optional<SourceLocation> location = std::nullopt);
+
+    ValueId result() const;
+
+private:
+    ValueId result_ = InvalidValueId;
+};
+
+/**
+ * @brief untyped SSA phi 节点。
+ */
+class SSAPhiNode final : public UntypedSSANode {
+public:
+    struct Incoming {
+        BasicBlock* predecessor = nullptr;
+        ValueRef value;
+    };
+
+    explicit SSAPhiNode(ValueId result, std::vector<Incoming> incomings = {},
+                        std::optional<SourceLocation> location = std::nullopt);
+
+    ValueId result() const;
+    const std::vector<Incoming>& incomings() const;
+    void add_incoming(BasicBlock* predecessor, ValueRef value);
+
+private:
+    ValueId result_ = InvalidValueId;
+    std::vector<Incoming> incomings_;
+};
+
+/**
+ * @brief untyped SSA 纯复制节点。
+ */
+class SSACopyNode final : public UntypedSSANode {
+public:
+    SSACopyNode(ValueId result, ValueRef src,
+                std::optional<SourceLocation> location = std::nullopt);
+
+    ValueId result() const;
+    ValueRef src() const;
+
+private:
+    ValueId result_ = InvalidValueId;
+    ValueRef src_;
+};
+
+/**
+ * @brief untyped SSA 单目运算节点。
+ */
+class SSAUnaryOpNode final : public UntypedSSANode {
+public:
+    using Op = UnaryOpType;
+
+    SSAUnaryOpNode(Op op, ValueId result, ValueRef operand,
+                   std::optional<SourceLocation> location = std::nullopt);
+
+    Op op() const;
+    ValueId result() const;
+    ValueRef operand() const;
+
+private:
+    Op op_ = Op::UMinus;
+    ValueId result_ = InvalidValueId;
+    ValueRef operand_;
+};
+
+/**
+ * @brief untyped SSA 二元运算节点。
+ */
+class SSABinOpNode final : public UntypedSSANode {
+public:
+    using Op = BinOpType;
+
+    SSABinOpNode(Op op, ValueId result, ValueRef lhs, ValueRef rhs,
+                 std::optional<SourceLocation> location = std::nullopt);
+
+    Op op() const;
+    ValueId result() const;
+    ValueRef lhs() const;
+    ValueRef rhs() const;
+
+private:
+    Op op_ = Op::Add;
+    ValueId result_ = InvalidValueId;
+    ValueRef lhs_;
+    ValueRef rhs_;
+};
+
+/**
+ * @brief untyped SSA 调用节点。
+ */
+class SSACallNode final : public UntypedSSANode {
+public:
+    struct Callee {
+        enum Type {
+            Direct,
+            Indirect,
+        };
+
+        Type type = Direct;
+        std::string direct_symbol;
+        ValueRef indirect_value;
+    };
+
+    SSACallNode(Callee callee, std::vector<ValueId> results, std::vector<ValueRef> inputs,
+                std::optional<SourceLocation> location = std::nullopt);
+
+    const Callee& callee() const;
+    const std::vector<ValueId>& results() const;
+    const std::vector<ValueRef>& inputs() const;
+
+private:
+    Callee callee_;
+    std::vector<ValueId> results_;
+    std::vector<ValueRef> inputs_;
+};
+
+/**
+ * @brief untyped SSA 条件跳转终结节点。
+ */
+class SSACondJumpNode final : public UntypedSSANode {
+public:
+    SSACondJumpNode(ValueRef cond, BasicBlock* true_block, BasicBlock* false_block,
+                    std::optional<SourceLocation> location = std::nullopt);
+
+    ValueRef cond() const;
+    BasicBlock* true_block() const;
+    BasicBlock* false_block() const;
+
+private:
+    ValueRef cond_;
+    BasicBlock* true_block_ = nullptr;
+    BasicBlock* false_block_ = nullptr;
+};
+
+/**
+ * @brief untyped SSA 无条件跳转终结节点。
+ */
+class SSAJumpNode final : public UntypedSSANode {
+public:
+    explicit SSAJumpNode(BasicBlock* target,
+                         std::optional<SourceLocation> location = std::nullopt);
+
+    BasicBlock* target() const;
+
+private:
+    BasicBlock* target_ = nullptr;
+};
+
+/**
+ * @brief untyped SSA 返回终结节点。
+ */
+class SSAReturnNode final : public UntypedSSANode {
+public:
+    explicit SSAReturnNode(std::vector<ValueRef> values,
+                           std::optional<SourceLocation> location = std::nullopt);
+
+    const std::vector<ValueRef>& values() const;
+
+private:
+    std::vector<ValueRef> values_;
+};
+
+/**
+ * @brief 分阶段 IR 共用的基本块容器。
  *
- * 结构保持和旧 IR 基本一致：线性节点序列加一个终结节点，以及前驱后继边。
+ * 当前实际主要承载 non-SSA 节点，但容器层本身不再把接口写死到
+ * `NonSSANode`，从而为后续复用到 SSA 阶段预留空间。
  */
 class BasicBlock {
 public:
@@ -305,14 +574,16 @@ public:
 
     Function* parent() const;
     const std::string& name() const;
-    const std::vector<NonSSANode*>& instructions() const;
+    const std::vector<IRNode*>& phi_nodes() const;
+    const std::vector<IRNode*>& instructions() const;
     const std::vector<BasicBlock*>& predecessors() const;
     const std::vector<BasicBlock*>& successors() const;
-    NonSSANode* terminal() const;
+    IRNode* terminal() const;
 
-    void append_instruction(NonSSANode* node);
+    void append_phi(IRNode* node);
+    void append_instruction(IRNode* node);
     void add_successor(BasicBlock* successor);
-    void set_terminal(NonSSANode* node);
+    void set_terminal(IRNode* node);
 
 private:
     friend class Function;
@@ -321,10 +592,11 @@ private:
 
     Function* parent_ = nullptr;
     std::string name_;
-    std::vector<NonSSANode*> instructions_;
+    std::vector<IRNode*> phi_nodes_;
+    std::vector<IRNode*> instructions_;
     std::vector<BasicBlock*> predecessors_;
     std::vector<BasicBlock*> successors_;
-    NonSSANode* terminal_ = nullptr;
+    IRNode* terminal_ = nullptr;
 };
 
 /**
@@ -343,15 +615,24 @@ public:
     const std::string& name() const;
     Module* parent() const;
     Type type() const;
+    IRNode::Stage stage() const;
     const std::vector<NamedValue>& inputs() const;
     const std::vector<NamedValue>& outputs() const;
+    const std::vector<ValueId>& argument_values() const;
+    std::size_t value_count() const;
+    bool has_value(ValueId id) const;
+    const std::string* find_value_debug_name(ValueId id) const;
     BasicBlock* entry_block() const;
     const std::vector<std::unique_ptr<BasicBlock>>& blocks() const;
 
     BasicBlock* create_block(std::string name);
     void set_entry_block(BasicBlock* block);
+    void set_stage(IRNode::Stage stage);
     void set_input_names(std::vector<std::string> names);
     void set_output_names(std::vector<std::string> names);
+    void set_argument_values(std::vector<ValueId> argument_values);
+    ValueId create_value(std::string debug_name = {});
+    void set_value_debug_name(ValueId id, std::string debug_name);
 
     template <typename T, typename... Args>
     T* create_node(Args&&... args) {
@@ -369,8 +650,11 @@ private:
     Module* parent_ = nullptr;
     std::string name_;
     Type type_ = PrimaryFunction;
+    IRNode::Stage stage_ = IRNode::NonSSA;
     std::vector<NamedValue> inputs_;
     std::vector<NamedValue> outputs_;
+    std::vector<ValueId> argument_values_;
+    std::vector<std::string> value_debug_names_;
     std::vector<std::unique_ptr<BasicBlock>> block_storage_;
     std::vector<std::unique_ptr<IRNode>> node_storage_;
     BasicBlock* entry_block_ = nullptr;
@@ -387,6 +671,11 @@ public:
     };
 
     Module(std::string name, std::string source_path, Type type);
+    Module(Module&& other) noexcept;
+    Module& operator=(Module&& other) noexcept;
+
+    Module(const Module&) = delete;
+    Module& operator=(const Module&) = delete;
 
     const std::string& name() const;
     Type type() const;
@@ -398,6 +687,8 @@ public:
     void set_entry_function(Function* function);
 
 private:
+    void rebind_function_parents();
+
     std::string name_;
     std::string source_path_;
     Type type_ = M_Function;

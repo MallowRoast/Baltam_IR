@@ -2,102 +2,80 @@
 
 ## 当前结论
 
-JIT 不是当前阶段的下一步。
+JIT 仍然不是当前阶段的下一步。
 
-当前最合理的路线是先完成：
+当前仓库已经走到了：
 
-`non-SSA IR -> analysis -> untyped SSA IR -> profile -> typed SSA IR -> LLVM IR`
+`non-SSA IR -> analyses -> untyped SSA IR -> verify -> print / execute`
 
-JIT 应该发生在这条链的后半段，而不是在 non-SSA IR 还没稳定时提前进入主线。
+但离适合进入 JIT 还有明显距离。
 
-## 当前仓库离 JIT 还差什么
+## 当前已经具备什么
 
 当前已经有：
 
 - AST parsing
 - non-SSA lowering
-- IR printer
-- 最小 verifier
-- AnalysisManager / PassManager 骨架
-
-当前还缺：
-
 - 5 个基础 analysis
-- untyped SSA IR
-- SSA 构建 pass
-- 任何正式优化 pass
+- untyped SSA 节点体系
+- non-SSA 到 untyped SSA 的构建器
+- 分阶段 verifier
+- untyped SSA 打印
+- untyped SSA 解释器
+
+也就是说，当前缺的已经不再是“IR 地基”。
+
+## 当前还缺什么
+
+当前真正还缺的是：
+
+- 正式优化 pass 管线
 - profile 基础设施
-- typed SSA IR
+- `TypedSSA`
 - LLVM IR lowering
+- JIT runtime / codegen 集成
 
 ## JIT 的推荐定位
 
-JIT 更适合作为 typed SSA IR 之后的热点后端，而不是当前项目的主 IR。
+JIT 更适合作为 `TypedSSA` 之后的热点后端，而不是当前项目的主 IR。
 
-建议定位为：
+建议定位仍然是：
 
-`typed SSA IR -> LLVM IR -> native code`
+`TypedSSA -> LLVM IR -> native code`
 
 而不是：
 
 `AST -> 直接 LLVM/MLIR`
 
-## 为什么不建议现在做 JIT
+## 为什么现在还不建议做 JIT
 
-原因很直接：
+原因已经从“没有 SSA”变成了：
 
-- 当前还没有 SSA
+- 还没有正式优化 pass
 - 还没有 profile
 - 还没有类型专门化
-- 还没有 optimizer pass
+- 还没有 LLVM lowering
 
-在这些基础设施没稳定前做 JIT，会把问题都推到更难调试的层次。
+如果现在直接进入 JIT，只会把调试难度转移到更低层，而不会减少上层 IR 的不确定性。
 
 ## 真正进入 JIT 前的前置条件
 
 至少应具备：
 
-1. 稳定 non-SSA IR
-2. 稳定 verifier
-3. CFG / dominator / liveness / def-use
-4. untyped SSA IR
-5. BuildPrunedSSA
-6. 基础优化 pass
-7. profile
-8. typed SSA specialization
-
-## 推荐路线
-
-### Phase 1
-
-完成 non-SSA IR 和 analysis 基建。
-
-### Phase 2
-
-完成 untyped SSA IR 和基础优化。
-
-### Phase 3
-
-在 untyped SSA IR 上加入 profile。
-
-### Phase 4
-
-将热点片段 specialized 为 typed SSA IR。
-
-### Phase 5
-
-把 typed SSA IR lowering 到 LLVM IR，再进入 JIT。
+1. 稳定的 `UntypedSSA` 优化管线
+2. 可回归的解释执行和端到端测试
+3. profile 数据采集方案
+4. `TypedSSA` 设计和实现
+5. LLVM IR lowering
+6. JIT runtime / codegen 集成
 
 ## 当前阶段更值得做的事
 
-当前真正值得投入的是：
+当前更值得投入的是：
 
-- CFGAnalysis
-- DominatorTree
-- DominanceFrontier
-- Liveness
-- DefUse
-- BuildPrunedSSA
-- verifier 扩充
+- 扩充 `UntypedSSA` 解释器与回归测试
+- 在 `UntypedSSA` 上增加正式优化 pass
+- 设计 profile 如何附着到 IR
+- 明确 `TypedSSA` 的 specialization 边界
 
-这些才是后续 JIT 的必要地基。
+这些工作完成后，JIT 才会有稳定输入，而不是变成另一个承压层。

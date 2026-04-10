@@ -7,97 +7,121 @@
 - [src/analysis/verifier.h](/home/zj/Desktop/Baltam_IR/src/analysis/verifier.h)
 - [src/analysis/verifier.cpp](/home/zj/Desktop/Baltam_IR/src/analysis/verifier.cpp)
 
-它现在面向的是当前唯一正式 IR：
+它现在已经面向两种正式 stage：
+
+- `NonSSA`
+- `UntypedSSA`
+
+对应地，当前 verifier 会校验：
 
 - `Module`
 - `Function`
 - `BasicBlock`
 - `NonSSANode`
+- `UntypedSSANode`
 
-也就是说，verifier 现在已经不再校验旧 hybrid/value-based IR。
+`TypedSSA` 当前仍未支持。
 
 ## 当前主线中的位置
 
 当前 CLI 主线是：
 
-`parse -> lower(non-SSA) -> print`
+`parse -> lower(non-SSA) -> verify -> analyses -> construct_untyped_ssa -> verify -> print`
 
-当前 verifier 已具备独立入口，但还没有默认接进 `main.cpp`。
+测试执行链则是：
 
-后续更合理的主线应是：
+`parse -> lower(non-SSA) -> verify -> construct_untyped_ssa -> verify -> execute`
 
-`parse -> lower(non-SSA) -> verify -> print`
+也就是说，verifier 现在不是“打印前的一次 non-SSA 结构检查”，而是已经覆盖：
+
+- lower 后的 non-SSA
+- SSA 构建后的 untyped SSA
 
 ## 当前 verifier 覆盖的检查
 
-当前 verifier 是“结构合法性”的第一版，不做复杂数据流分析。
-
-它当前主要检查：
+### 1. 容器级检查
 
 - `Module` 必须有入口函数
 - 入口函数必须属于当前模块
 - `Function` 必须有入口块
 - 入口块必须属于当前函数
 - `BasicBlock::parent()` 必须正确
-- `NonSSANode::parent()` 必须正确
-- 每个 block 都必须有 `terminal`
-- 正文里不能出现 terminator 节点
-- `terminal` 必须是：
-  - `CondJump`
-  - `Jump`
-  - `Return`
+
+### 2. 所有 stage 共享的结构检查
+
+- `IRNode::parent()` 必须正确
+- 节点 `stage` 必须和所属 `Function::stage()` 一致
+- 同一节点不能被重复挂接到多个位置
 - predecessor / successor 必须双向一致
-- jump / condjump 的目标块必须属于当前函数
-- `terminal` 的目标块必须出现在 successor 列表中
+- 跳转目标块必须属于当前函数
+- terminal 目标块必须出现在 successor 列表中
+
+### 3. `NonSSA` 阶段检查
+
+- `phi_nodes()` 区域必须为空
+- 正文里只能出现 `NonSSANode`
+- 正文里不能出现 terminator
+- `terminal` 必须是：
+  - `CondJumpNode`
+  - `JumpNode`
+  - `ReturnNode`
+- `NonSSA` 函数不应携带 SSA 参数槽位或 SSA value table
+
+### 4. `UntypedSSA` 阶段检查
+
+- `phi_nodes()` 区域里只能出现 `SSAPhiNode`
+- 正文里只能出现 `UntypedSSANode`
+- 正文里不能出现 `phi` 或 terminator
+- `terminal` 必须是：
+  - `SSACondJumpNode`
+  - `SSAJumpNode`
+  - `SSAReturnNode`
+- `phi incoming` 的前驱集合必须和块前驱列表一致
+- `argument_values()` 个数必须与输入签名一致
+- 每个 `ValueId` 必须要么是参数值，要么有且仅有一个定义
+- `ValueRef` 必须引用函数内已知的 SSA 值
+- 直接调用必须带 `direct_symbol`
+- 间接调用必须带有效的 `indirect_value`
+- `SSAReturnNode` 返回值个数必须与输出签名一致
 
 ## 当前 verifier 还没做的事情
 
-当前 verifier 还没有做这些更强的检查：
+当前 verifier 还没有覆盖这些更强的语义检查：
 
-- must-def 分析
-- 名字 live-in / live-out 分析
-- `NamedValue` 级 use-before-def 检查
-- helper 调用形状检查
-- 输入输出个数与所有 return 语句的一致性检查
+- `NonSSA` 的 must-def / use-before-def 分析
+- `UntypedSSA` 上更强的 dominance 约束检查
+- helper / builtin 的精细调用签名检查
+- `TypedSSA` 结构与值规则
+- 更高层的类型、别名或 effect 约束
 
-这些检查应放在后续 analysis 层稳定后再补。
+这些检查仍应逐步补在：
 
-## 推荐演进顺序
+- analysis
+- 更强的 stage-specific verifier
+- 后续 optimizer / typed SSA 层
 
-建议把 verifier 分成两层来做：
+## 推荐演进方式
 
-### 第一层：结构 verifier
+当前更合理的方向不是再做一个“单独的 SSA verifier”，而是继续维持统一入口：
 
-这就是当前已经落地的部分。
+- `verify_module(...)`
+- `verify_function(...)`
 
-重点是：
+再按 stage 分层扩充：
 
-- CFG
-- parent
-- terminator
-- 入口归属
+- `NonSSA`
+  - 补 must-def、名字级 use-before-def、helper 形状检查
+- `UntypedSSA`
+  - 补 dominance、effect、调用约束
+- `TypedSSA`
+  - 补类型一致性和 specialized 约束
 
-### 第二层：数据流 verifier
+## 当前结论
 
-后续补上：
+verifier 已经是当前 IR 主线里的基础护栏，而不是未来计划项。
 
-- 名字 must-def
-- `CallNode` 输入是否已定义
-- `CondJumpNode` 条件是否已定义
-- `ReturnNode` 返回值是否已定义
+它当前承担的职责是：
 
-这层会依赖：
-
-- CFGAnalysis
-- Liveness 或等价的数据流结果
-
-## 和后续 SSA verifier 的关系
-
-后续引入 SSA 以后，verifier 仍然应保留统一入口，但检查内容会分阶段变化：
-
-- non-SSA 阶段：
-  - 重点查 CFG 和 must-def
-- SSA 阶段：
-  - 重点查 CFG、def-use、phi、dominance 相关约束
-
-也就是说，verifier 不应被看成“只属于 SSA”的组件，而是所有 IR 阶段的统一正确性护栏。
+- 保证 `NonSSA` 和 `UntypedSSA` 的容器与节点结构合法
+- 保证 SSA 值定义/使用关系的基本一致性
+- 给打印、解释执行和后续优化 pass 提供一个统一的前置校验
