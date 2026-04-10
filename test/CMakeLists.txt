@@ -100,18 +100,7 @@ target_link_libraries(interpreter_test PRIVATE
 
 configure_baltam_runtime_binary(interpreter_test)
 
-set(BALTAM_IR_TEST_HOME "${CMAKE_BINARY_DIR}/ctest-home")
-set(BALTAM_IR_TEST_XDG_CACHE_HOME "${BALTAM_IR_TEST_HOME}/.cache")
-file(MAKE_DIRECTORY
-    "${BALTAM_IR_TEST_HOME}"
-    "${BALTAM_IR_TEST_XDG_CACHE_HOME}"
-    "${BALTAM_IR_TEST_XDG_CACHE_HOME}/baltamatica"
-)
-
 set(BALTAM_IR_TEST_LD_LIBRARY_PATH "${CMAKE_SOURCE_DIR}/deps/core/lib")
-if(BALTAM_LOGGER_LIBRARY_DIR)
-    string(APPEND BALTAM_IR_TEST_LD_LIBRARY_PATH ":${BALTAM_LOGGER_LIBRARY_DIR}")
-endif()
 set(BALTAM_IR_BUILTIN_LIBRARY_DIR "")
 foreach(candidate_dir IN ITEMS "$ENV{BALTAMATICA_LIB_DIR}" "$ENV{BALTAM_LIB_DIR}" "/opt/Baltamatica/lib")
     if(candidate_dir AND EXISTS "${candidate_dir}/libbt_builtin.so")
@@ -129,7 +118,7 @@ endif()
 function(configure_baltam_runtime_test test_name)
     set_tests_properties(${test_name} PROPERTIES
         ENVIRONMENT
-            "HOME=${BALTAM_IR_TEST_HOME};XDG_CACHE_HOME=${BALTAM_IR_TEST_XDG_CACHE_HOME};BALTAM_FRONTEND=console;LD_LIBRARY_PATH=${BALTAM_IR_TEST_LD_LIBRARY_PATH}"
+            "BALTAM_FRONTEND=console;LD_LIBRARY_PATH=${BALTAM_IR_TEST_LD_LIBRARY_PATH}"
     )
 endfunction()
 

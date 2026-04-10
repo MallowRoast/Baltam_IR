@@ -671,6 +671,11 @@ public:
     };
 
     Module(std::string name, std::string source_path, Type type);
+    Module(Module&& other) noexcept;
+    Module& operator=(Module&& other) noexcept;
+
+    Module(const Module&) = delete;
+    Module& operator=(const Module&) = delete;
 
     const std::string& name() const;
     Type type() const;
@@ -682,6 +687,8 @@ public:
     void set_entry_function(Function* function);
 
 private:
+    void rebind_function_parents();
+
     std::string name_;
     std::string source_path_;
     Type type_ = M_Function;

@@ -101,17 +101,17 @@ cmake --build build
 
 ## 作为库使用
 
-[baltam_ir.h](/home/zj/Desktop/Baltam_IR/src/baltam_ir.h) 当前暴露了几项高层入口：
+当前不再额外提供把 `.m` 文件一次性打包成完整 IR pipeline 的高层 helper。
 
-1. 解析 `.m` 文件
-2. 生成 non-SSA IR 并做 verifier
-3. 构建 untyped SSA IR 并做 verifier
+调用方直接按底层阶段接口组合：
 
-当前主要接口包括：
+1. `bt_ast_interface::parse_mfile(...)`
+2. `lower_parsed_units_to_ir(...)`
+3. `analysis::verify_module_or_throw(...)`
+4. `optimizer::construct_untyped_ssa_module(...)`
+5. `analysis::verify_module_or_throw(...)`
 
-- `build_mfile_ir_pipeline(...)`
-
-调用这个接口前，调用方仍需先执行 `bt_ast_interface::initialize()`，结束后再执行 `bt_ast_interface::finalize()`。
+调用这些接口前，调用方仍需先执行 `bt_ast_interface::initialize()`，结束后再执行 `bt_ast_interface::finalize()`。
 
 ## 测试
 
@@ -126,6 +126,11 @@ ctest --test-dir build
 - [test/construct_untyped_ssa_test.cpp](/home/zj/Desktop/Baltam_IR/test/construct_untyped_ssa_test.cpp)
 - [test/interpreter_test.cpp](/home/zj/Desktop/Baltam_IR/test/interpreter_test.cpp)
 - [test/test_test0.cpp](/home/zj/Desktop/Baltam_IR/test/test_test0.cpp)
+- [test/test_test1.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1.cpp)
+- [test/test_test1_2.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1_2.cpp)
+- [test/test_test1_3.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1_3.cpp)
+- [test/test_test1_4.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1_4.cpp)
+- [test/test_test1_5.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1_5.cpp)
 
 m 脚本回归测试统一放在 `test/test_*.cpp`；
 每适配一个 `.m` 脚本，就在 `test/` 下新增一个对应的 `test.cpp`，重新配置后即可被 `ctest` 发现。
@@ -160,10 +165,14 @@ m 脚本回归测试统一放在 `test/test_*.cpp`；
 - `phi`
 - 条件跳转、无条件跳转、返回
 - 直接调用和间接调用
-- 一部分 helper / 运行时入口：
+- 一部分 lowering helper / 运行时入口：
   - `__ir_make_cell__`
   - `__ir_make_function_handle__`
-  - `__ir_switch_match__`
+- 已知 internal function：
+  - `if_expr`
+  - `switch_case_match`
+  - `foreach_init`
+  - `foreach_iterate`
 
 ## 当前仓库布局
 

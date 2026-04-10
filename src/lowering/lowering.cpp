@@ -704,7 +704,7 @@ NamedValue build_switch_match_cond(const NamedValue& switch_value, const ast_ptr
     for (const ast_ptr& item : match_items) {
         const NamedValue rhs = lower_expr_to_operand(item, ctx);
         const NamedValue eq = ctx.create_temp("__switch.match");
-        ctx.append_node<CallNode>(CallNode::Direct, "__ir_switch_match__", std::vector<NamedValue>{eq},
+        ctx.append_node<CallNode>(CallNode::Direct, "switch_case_match", std::vector<NamedValue>{eq},
                                   std::vector<NamedValue>{switch_value, rhs}, source_location_from(item));
         ctx.mark_defined(eq);
 

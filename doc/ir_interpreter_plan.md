@@ -21,7 +21,7 @@
 
 ```cpp
 ExecResult execute_function(Function& function,
-                            const std::vector<RuntimeObject>& args = {},
+                            const std::vector<Value::Object>& args = {},
                             const ExecutionOptions& options = {});
 ```
 
@@ -45,20 +45,20 @@ ExecResult execute_function(Function& function,
 当前运行时仍然复用 Baltam 运行时对象：
 
 ```cpp
-using RuntimeObject = std::shared_ptr<ba_obj>;
+using Value::Object = std::shared_ptr<ba_obj>;
 ```
 
 解释器对 SSA 值再包一层：
 
 ```cpp
-struct RuntimeValue {
+struct Value {
     enum Type {
         Concrete,
         Undef,
     };
 
-    Type type;
-    RuntimeObject object;
+    Type type = Undef;
+    Object object;
 };
 ```
 
@@ -66,8 +66,9 @@ struct RuntimeValue {
 
 ```cpp
 struct ExecResult {
-    std::vector<RuntimeValue> outputs;
-    std::unordered_map<ValueId, RuntimeValue> values;
+    std::vector<Value> outputs;
+    std::unordered_map<ValueId, Value> values;
+    std::vector<NamedBindingSnapshot> final_named_bindings;
 };
 ```
 
@@ -119,7 +120,15 @@ struct ExecResult {
 
 - `__ir_make_cell__`
 - `__ir_make_function_handle__`
-- `__ir_switch_match__`
+
+当前已显式静态缓存的 internal function 有：
+
+- `if_expr`
+- `switch_case_match`
+- `foreach_init`
+- `foreach_iterate`
+
+这些 internal function 都是在 IR 生成阶段就已知的固定符号；解释器不再保留 generic internal lookup fallback。
 
 当前对函数句柄的支持范围是：
 
@@ -161,16 +170,22 @@ struct ExecResult {
 - 直接模块函数调用
 - 间接函数句柄调用
 
-端到端执行样例位于：
+端到端脚本回归测试位于：
 
-- [test/simple_demo_test.cpp](/home/zj/Desktop/Baltam_IR/test/simple_demo_test.cpp)
+- [test/test_test0.cpp](/home/zj/Desktop/Baltam_IR/test/test_test0.cpp)
+- [test/test_test1.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1.cpp)
+- [test/test_test1_2.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1_2.cpp)
+- [test/test_test1_3.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1_3.cpp)
+- [test/test_test1_4.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1_4.cpp)
+- [test/test_test1_5.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1_5.cpp)
 
-它覆盖：
+它们覆盖：
 
 - 解析 `.m`
 - lower 到 non-SSA
 - 构建 untyped SSA
-- 执行入口函数并校验输出
+- 打印两阶段 IR
+- 执行入口函数并校验输出和最终具名变量绑定
 
 ## 当前结论
 

@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "analysis/verifier.h"
+#include "baltam_worker/builtin_manager.h"
 #include "interpreter/interpreter.h"
 #include "ir/ir.h"
 
@@ -294,9 +295,47 @@ void test_indirect_function_handle_call() {
     expect_output_int(result, 11, "indirect function handle call");
 }
 
+void test_direct_module_call_after_module_move() {
+    Module module("moved_call_module", "test/m/moved_call_module.m", Module::M_Function);
+    Function* callee = module.create_function("callee", Function::LocalFunction);
+    callee->set_stage(IRNode::UntypedSSA);
+    callee->set_output_names({"out"});
+    BasicBlock* callee_entry = callee->create_block("entry");
+    callee->set_entry_block(callee_entry);
+    const ValueId callee_out = callee->create_value("out");
+    callee_entry->append_instruction(
+        callee->create_node<SSANumberNode>(callee_out, SSANumberNode::NumberValue{std::int64_t{13}}));
+    callee_entry->set_terminal(
+        callee->create_node<SSAReturnNode>(std::vector<ValueRef>{ValueRef{callee_out}}));
+
+    Function* caller = module.create_function("caller", Function::PrimaryFunction);
+    module.set_entry_function(caller);
+    caller->set_stage(IRNode::UntypedSSA);
+    caller->set_output_names({"out"});
+    BasicBlock* caller_entry = caller->create_block("entry");
+    caller->set_entry_block(caller_entry);
+
+    const ValueId out = caller->create_value("out");
+    caller_entry->append_instruction(caller->create_node<SSACallNode>(
+        SSACallNode::Callee{SSACallNode::Callee::Direct, "callee", ValueRef{}},
+        std::vector<ValueId>{out}, std::vector<ValueRef>{}));
+    caller_entry->set_terminal(
+        caller->create_node<SSAReturnNode>(std::vector<ValueRef>{ValueRef{out}}));
+
+    analysis::verify_module_or_throw(module);
+
+    Module moved_module = std::move(module);
+    expect(caller->parent() == &moved_module, "moved module should rebind function parents.");
+
+    const interpreter::ExecResult result = interpreter::execute_function(*caller);
+    expect_output_int(result, 13, "direct module call after module move");
+}
+
 }  // namespace
 
 int main() {
+    load_builtin_library();
+
     try {
         test_execute_constant_and_copy();
         test_execute_branch_phi();
@@ -304,11 +343,14 @@ int main() {
         test_returning_undef_throws();
         test_direct_module_function_call();
         test_indirect_function_handle_call();
+        test_direct_module_call_after_module_move();
     } catch (const std::exception& ex) {
+        close_builtin_library();
         std::cerr << "interpreter_test FAILED: " << ex.what() << '\n';
         return 1;
     }
 
+    close_builtin_library();
     std::cout << "interpreter_test PASSED\n";
     return 0;
 }

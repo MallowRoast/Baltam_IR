@@ -114,18 +114,6 @@ Value undef() {
     return Value{Value::Undef, nullptr};
 }
 
-bool condition_value_as_bool(const Value::Object& value) {
-    if (value == nullptr) {
-        throw std::runtime_error("条件值为空。");
-    }
-
-    try {
-        return value->as_bool();
-    } catch (const std::exception& ex) {
-        throw std::runtime_error(std::string("条件值不能转成 bool：") + ex.what());
-    }
-}
-
 const char* callable_type_text(CallableType type) {
     switch (type) {
         case CallableType::Builtin:
@@ -137,11 +125,6 @@ const char* callable_type_text(CallableType type) {
 }
 
 std::unordered_map<std::string, baFunPtr>& builtin_function_cache() {
-    static std::unordered_map<std::string, baFunPtr> cache;
-    return cache;
-}
-
-std::unordered_map<std::string, baFunPtr>& internal_function_cache() {
     static std::unordered_map<std::string, baFunPtr> cache;
     return cache;
 }
@@ -165,17 +148,14 @@ bool try_lookup_builtin_function_cached(const std::string& name, baFunPtr& funct
     return true;
 }
 
-bool try_lookup_internal_function_cached(const std::string& name, baFunPtr& function_ptr) {
-    auto& cache = internal_function_cache();
-    auto it = cache.find(name);
-    if (it != cache.end()) {
-        function_ptr = it->second;
-        return function_ptr != nullptr;
+baFunPtr require_internal_function_ptr(const char* name, baFunPtr& function_ptr) {
+    if (function_ptr == nullptr) {
+        function_ptr = lookup_internal_function(name);
     }
-
-    function_ptr = lookup_internal_function(name.c_str());
-    cache.emplace(name, function_ptr);
-    return function_ptr != nullptr;
+    if (function_ptr == nullptr) {
+        throw std::runtime_error("找不到内部函数 `" + std::string(name) + "`。");
+    }
+    return function_ptr;
 }
 
 std::size_t required_builtin_out_count(const std::string& name) {
@@ -212,6 +192,28 @@ std::vector<Value::Object> invoke_function_ptr(const std::string& name, baFunPtr
                                  "，原因: " + ex.what());
     }
     return out_args;
+}
+
+bool condition_value_as_bool(const Value::Object& value) {
+    if (value == nullptr) {
+        throw std::runtime_error("条件值为空。");
+    }
+
+    static baFunPtr if_expr_ptr = nullptr;
+    const baFunPtr function_ptr = require_internal_function_ptr("if_expr", if_expr_ptr);
+
+    std::vector<Value::Object> outputs =
+        invoke_function_ptr("if_expr", function_ptr, {value}, 1, CallableType::Internal);
+    if (outputs.empty() || outputs.front() == nullptr) {
+        throw std::runtime_error("内部函数 `if_expr` 未返回有效结果。");
+    }
+
+    try {
+        return outputs.front()->as_bool();
+    } catch (const std::exception& ex) {
+        throw std::runtime_error(std::string("内部函数 `if_expr` 返回值不能转成 bool：") +
+                                 ex.what());
+    }
 }
 
 Value::Object eval_binop(BinOpNode::Op op, Value::Object lhs, Value::Object rhs) {
@@ -290,6 +292,15 @@ std::vector<Value> wrap_outputs(std::vector<Value::Object> values, std::size_t e
     return outputs;
 }
 
+std::vector<Value> invoke_known_internal_call(const char* name, baFunPtr& function_ptr,
+                                              const std::vector<Value::Object>& in_args,
+                                              std::size_t expected_out_count) {
+    const baFunPtr resolved_ptr = require_internal_function_ptr(name, function_ptr);
+    return wrap_outputs(
+        invoke_function_ptr(name, resolved_ptr, in_args, expected_out_count, CallableType::Internal),
+        expected_out_count, name);
+}
+
 ExecResult execute_function_impl(Function& function, const std::vector<Value::Object>& args,
                                  const ExecutionOptions& options, std::size_t call_depth);
 
@@ -339,31 +350,22 @@ std::vector<Value> invoke_direct_call(const ExecutionState& caller_state,
         return {concrete(std::make_shared<ba_obj>(function_handle(fh_anonymous, function_name)))};
     }
 
-    if (callee_name == "__ir_switch_match__") {
-        if (in_args.size() != 2) {
-            throw std::runtime_error("switch 匹配比较需要两个输入。");
-        }
-        if (expected_out_count == 0) {
-            return {};
-        }
+    if (callee_name == "switch_case_match") {
+        static baFunPtr switch_case_match_ptr = nullptr;
+        return invoke_known_internal_call("switch_case_match", switch_case_match_ptr, in_args,
+                                          expected_out_count);
+    }
 
-        const Value::Object& lhs = in_args[0];
-        const Value::Object& rhs = in_args[1];
-        bool matched = false;
+    if (callee_name == "foreach_init") {
+        static baFunPtr foreach_init_ptr = nullptr;
+        return invoke_known_internal_call("foreach_init", foreach_init_ptr, in_args,
+                                          expected_out_count);
+    }
 
-        try {
-            if (lhs != nullptr && rhs != nullptr &&
-                ((lhs->_is_string() || lhs->is_char_vector()) &&
-                 (rhs->_is_string() || rhs->is_char_vector()))) {
-                matched = lhs->as_string() == rhs->as_string();
-            } else {
-                matched = eval_binop(BinOpNode::Eq, lhs, rhs)->as_bool();
-            }
-        } catch (const std::exception&) {
-            matched = false;
-        }
-
-        return {concrete(std::make_shared<ba_obj>(matched))};
+    if (callee_name == "foreach_iterate") {
+        static baFunPtr foreach_iterate_ptr = nullptr;
+        return invoke_known_internal_call("foreach_iterate", foreach_iterate_ptr, in_args,
+                                          expected_out_count);
     }
 
     Module* module = caller_state.function.parent();
@@ -384,12 +386,6 @@ std::vector<Value> invoke_direct_call(const ExecutionState& caller_state,
                 : std::max(expected_out_count, required_builtin_out_count(callee_name));
         return wrap_outputs(invoke_function_ptr(callee_name, function_ptr, in_args, actual_out_count,
                                                 CallableType::Builtin),
-                            expected_out_count, callee_name);
-    }
-
-    if (try_lookup_internal_function_cached(callee_name, function_ptr)) {
-        return wrap_outputs(invoke_function_ptr(callee_name, function_ptr, in_args,
-                                                expected_out_count, CallableType::Internal),
                             expected_out_count, callee_name);
     }
 
@@ -621,6 +617,7 @@ void print_final_named_bindings(const ExecutionState& state, const ExecResult& r
     os << indent << "; final named bindings for `" << state.function.name() << "`" << std::endl;
     if (result.final_named_bindings.empty()) {
         os << indent << "; <none>" << std::endl;
+        os << std::endl;
         return;
     }
 
@@ -632,6 +629,7 @@ void print_final_named_bindings(const ExecutionState& state, const ExecResult& r
         os << indent << binding.name << " = " << format_value(value_it->second)
            << "    ; " << value_label(state.function, binding.value_id) << std::endl;
     }
+    os << std::endl;
 }
 
 ExecResult execute_function_impl(Function& function, const std::vector<Value::Object>& args,

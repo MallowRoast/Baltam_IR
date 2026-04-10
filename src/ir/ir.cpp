@@ -533,6 +533,31 @@ const std::vector<ValueRef>& SSAReturnNode::values() const {
 Module::Module(std::string name, std::string source_path, Type type)
     : name_(std::move(name)), source_path_(std::move(source_path)), type_(type) {}
 
+Module::Module(Module&& other) noexcept
+    : name_(std::move(other.name_)),
+      source_path_(std::move(other.source_path_)),
+      type_(other.type_),
+      function_storage_(std::move(other.function_storage_)),
+      entry_function_(other.entry_function_) {
+    rebind_function_parents();
+    other.entry_function_ = nullptr;
+}
+
+Module& Module::operator=(Module&& other) noexcept {
+    if (this == &other) {
+        return *this;
+    }
+
+    name_ = std::move(other.name_);
+    source_path_ = std::move(other.source_path_);
+    type_ = other.type_;
+    function_storage_ = std::move(other.function_storage_);
+    entry_function_ = other.entry_function_;
+    rebind_function_parents();
+    other.entry_function_ = nullptr;
+    return *this;
+}
+
 const std::string& Module::name() const {
     return name_;
 }
@@ -563,6 +588,14 @@ Function* Module::create_function(std::string name, Function::Type type) {
 
 void Module::set_entry_function(Function* function) {
     entry_function_ = function;
+}
+
+void Module::rebind_function_parents() {
+    for (const auto& function : function_storage_) {
+        if (function != nullptr) {
+            function->set_parent(this);
+        }
+    }
 }
 
 }  // namespace baltam
