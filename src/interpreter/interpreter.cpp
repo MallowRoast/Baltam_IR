@@ -148,6 +148,16 @@ bool try_lookup_builtin_function_cached(const std::string& name, baFunPtr& funct
     return true;
 }
 
+baFunPtr require_builtin_function_ptr(const char* name, baFunPtr& function_ptr) {
+    if (function_ptr == nullptr && !try_lookup_builtin_function_cached(name, function_ptr)) {
+        throw std::runtime_error("找不到内置函数 `" + std::string(name) + "`。");
+    }
+    if (function_ptr == nullptr) {
+        throw std::runtime_error("找不到内置函数 `" + std::string(name) + "`。");
+    }
+    return function_ptr;
+}
+
 baFunPtr require_internal_function_ptr(const char* name, baFunPtr& function_ptr) {
     if (function_ptr == nullptr) {
         function_ptr = lookup_internal_function(name);
@@ -192,6 +202,24 @@ std::vector<Value::Object> invoke_function_ptr(const std::string& name, baFunPtr
                                  "，原因: " + ex.what());
     }
     return out_args;
+}
+
+void invoke_function_ptr_no_outputs(const std::string& name, baFunPtr function_ptr,
+                                    const std::vector<Value::Object>& in_args, CallableType type) {
+    std::vector<const_ba_obj_ptr> runtime_in_args;
+    runtime_in_args.reserve(in_args.size());
+    for (const Value::Object& arg : in_args) {
+        runtime_in_args.push_back(arg);
+    }
+
+    std::vector<Value::Object> out_args;
+    try {
+        function_ptr(runtime_in_args, out_args);
+    } catch (const std::exception& ex) {
+        throw std::runtime_error(std::string("调用") + callable_type_text(type) + "失败: " + name +
+                                 "，输入个数 = " + std::to_string(in_args.size()) +
+                                 "，输出个数 = 0，原因: " + ex.what());
+    }
 }
 
 bool condition_value_as_bool(const Value::Object& value) {
@@ -240,11 +268,17 @@ Value::Object eval_binop(BinOpNode::Op op, Value::Object lhs, Value::Object rhs)
         case BinOpNode::Or:
             name = "or";
             break;
+        case BinOpNode::Power:
+            name = "power";
+            break;
+        case BinOpNode::MLeftDivide:
+            name = "mldivide";
+            break;
         case BinOpNode::MPower:
             name = "mpower";
             break;
         case BinOpNode::Multiply:
-            name = "times";
+            name = "mtimes";
             break;
     }
 
@@ -266,6 +300,12 @@ Value::Object eval_unaryop(UnaryOpNode::Op op, Value::Object operand) {
             break;
         case UnaryOpNode::UMinus:
             name = "uminus";
+            break;
+        case UnaryOpNode::Transpose:
+            name = "transpose";
+            break;
+        case UnaryOpNode::CTranspose:
+            name = "ctranspose";
             break;
     }
 
@@ -299,6 +339,52 @@ std::vector<Value> invoke_known_internal_call(const char* name, baFunPtr& functi
     return wrap_outputs(
         invoke_function_ptr(name, resolved_ptr, in_args, expected_out_count, CallableType::Internal),
         expected_out_count, name);
+}
+
+std::vector<Value> invoke_runtime_paren_get(const Value::Object& base,
+                                            const std::vector<Value::Object>& index_args,
+                                            std::size_t expected_out_count) {
+    if (base == nullptr) {
+        throw std::runtime_error("调用圆括号取值时缺少 base 对象。");
+    }
+
+    static baFunPtr block_ptr = nullptr;
+    const baFunPtr function_ptr = require_builtin_function_ptr("block", block_ptr);
+
+    std::vector<Value::Object> block_in_args;
+    block_in_args.reserve(index_args.size() + 1);
+    block_in_args.push_back(base);
+    block_in_args.insert(block_in_args.end(), index_args.begin(), index_args.end());
+
+    const std::size_t actual_out_count = expected_out_count == 0 ? 1 : expected_out_count;
+    std::vector<Value::Object> results =
+        invoke_function_ptr("block", function_ptr, block_in_args, actual_out_count,
+                            CallableType::Builtin);
+    if (expected_out_count == 0) {
+        return {};
+    }
+    return wrap_outputs(std::move(results), expected_out_count, "block");
+}
+
+std::vector<Value> invoke_runtime_paren_set(const std::vector<Value::Object>& in_args,
+                                            std::size_t expected_out_count) {
+    if (in_args.empty() || in_args.front() == nullptr) {
+        throw std::runtime_error("调用 `__ir_paren_set__` 时缺少 base 对象。");
+    }
+
+    static baFunPtr block_ptr = nullptr;
+    const baFunPtr function_ptr = require_builtin_function_ptr("block", block_ptr);
+
+    std::vector<Value::Object> block_in_args = in_args;
+    // runtime `block set` 会原地修改传入的 A；
+    // 但在 SSA 语义里 `A.1` 和 `A.2` 必须是不同版本，因此这里先复制 base。
+    block_in_args.front() = std::make_shared<ba_obj>(*in_args.front());
+    invoke_function_ptr_no_outputs("block", function_ptr, block_in_args, CallableType::Builtin);
+
+    if (expected_out_count == 0) {
+        return {};
+    }
+    return {concrete(std::move(block_in_args.front()))};
 }
 
 ExecResult execute_function_impl(Function& function, const std::vector<Value::Object>& args,
@@ -350,6 +436,10 @@ std::vector<Value> invoke_direct_call(const ExecutionState& caller_state,
         return {concrete(std::make_shared<ba_obj>(function_handle(fh_anonymous, function_name)))};
     }
 
+    if (callee_name == "__ir_paren_set__") {
+        return invoke_runtime_paren_set(in_args, expected_out_count);
+    }
+
     if (callee_name == "switch_case_match") {
         static baFunPtr switch_case_match_ptr = nullptr;
         return invoke_known_internal_call("switch_case_match", switch_case_match_ptr, in_args,
@@ -399,8 +489,11 @@ std::vector<Value> invoke_indirect_call(const ExecutionState& caller_state,
     if (callee_value == nullptr) {
         throw std::runtime_error("调用目标为空。");
     }
+
     if (callee_value->type() != ba_function_handle) {
-        throw std::runtime_error("调用目标不是函数句柄。");
+        // 表达式位置的 `A(...)` 在 lowering 阶段不会提前区分语义；
+        // 只有运行时看到 `A` 不是函数句柄时，才能确定它应解释为圆括号取值。
+        return invoke_runtime_paren_get(callee_value, in_args, expected_out_count);
     }
 
     const auto* handle = callee_value->cget<function_handle>();

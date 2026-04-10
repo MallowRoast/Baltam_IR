@@ -139,6 +139,46 @@ struct ExecResult {
 
 `fh_variable` 仍未支持。
 
+## 圆括号应用语义
+
+当前对圆括号应用 `A(...)` 的处理刻意分成两类：
+
+- `A(...) = B`
+- 表达式位置的 `A(...)`
+
+设计边界如下：
+
+- `A(...) = B` 可以在 lowering 阶段直接唯一化成 `__ir_paren_set__`
+- 表达式位置的 `A(...)` 不能在 lowering 阶段直接唯一化成 `block get`
+
+原因是：
+
+- 对赋值左值来说，AST 已经给出了明确的赋值语境；`node_asgn(node_multiple_func, rhs)` 不再有“普通函数调用”的歧义
+- 对表达式位置来说，`A(...)` 既可能是：
+  - 普通函数调用
+  - 函数句柄变量调用
+  - 矩阵 / 元胞 / 其他运行时对象的圆括号取值
+
+因此当前实现采用：
+
+- lowering 遇到 `A(...) = B` 时，生成 `call @__ir_paren_set__(A, idx..., rhs)`
+- lowering 遇到表达式位置或语句位置的 `A(...)` 时，会先按静态名字绑定补一层分类：
+  - parser 已明确标成变量，或 lowering 已知这是当前函数里的用户变量名，则生成 `Indirect CallNode`
+  - 否则保留成 `Direct CallNode`
+- 解释器只在 indirect call 路径上，再根据 callee 的运行时动态类型分派：
+  - 若是 `function_handle`，按函数调用执行
+  - 若不是 `function_handle`，按 runtime `block get` 执行
+
+这意味着：
+
+- `block_set` 的语义在 lowering 阶段就可以区分
+- `block_get` 的语义仍然必须等到运行时才能最终区分
+- 但 `A(...)` 是否先走 direct / indirect call，不再完全留到运行时，而是会先利用 AST 和已知用户变量名做一次静态判定
+
+另外，`A(:, ...)` 里的 `node_magic_colon` 目前会在 lowering 阶段直接物化成字符矩阵 `":"`，作为 runtime `block` 识别“整维切片”的哨兵值。
+
+另外，runtime `block set` 本身是原地修改风格；解释器在桥接 `__ir_paren_set__` 时会先复制 base 对象，再调用 runtime `block set`，从而保持 SSA 里“旧版本值不被污染”的语义。
+
 ## 当前边界和限制
 
 当前解释器仍有这些明确边界：
@@ -178,6 +218,8 @@ struct ExecResult {
 - [test/test_test1_3.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1_3.cpp)
 - [test/test_test1_4.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1_4.cpp)
 - [test/test_test1_5.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1_5.cpp)
+- [test/test_test2.cpp](/home/zj/Desktop/Baltam_IR/test/test_test2.cpp)
+- [test/test_test2_2.cpp](/home/zj/Desktop/Baltam_IR/test/test_test2_2.cpp)
 
 它们覆盖：
 
@@ -186,6 +228,8 @@ struct ExecResult {
 - 构建 untyped SSA
 - 打印两阶段 IR
 - 执行入口函数并校验输出和最终具名变量绑定
+
+当前 `test/m/test2_1/test2_1.m` 还没有完成适配，也尚未接入对应的 `ctest` 回归项。
 
 ## 当前结论
 

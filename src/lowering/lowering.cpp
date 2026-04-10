@@ -318,6 +318,10 @@ BinOpNode::Op lower_binop_type(nodeType type) {
             return BinOpNode::Ne;
         case node_logic_or:
             return BinOpNode::Or;
+        case node_element_power:
+            return BinOpNode::Power;
+        case node_left_divide:
+            return BinOpNode::MLeftDivide;
         case node_power:
             return BinOpNode::MPower;
         case node_multiply:
@@ -327,6 +331,23 @@ BinOpNode::Op lower_binop_type(nodeType type) {
     }
 
     throw std::runtime_error("non-SSA lower 遇到了暂不支持的二元运算。");
+}
+
+UnaryOpNode::Op lower_unaryop_type(nodeType type) {
+    switch (type) {
+        case node_logic_not:
+            return UnaryOpNode::Logic_Not;
+        case node_negative:
+            return UnaryOpNode::UMinus;
+        case node_transpose:
+            return UnaryOpNode::Transpose;
+        case node_ctranspose:
+            return UnaryOpNode::CTranspose;
+        default:
+            break;
+    }
+
+    throw std::runtime_error("non-SSA lower 遇到了暂不支持的一元运算。");
 }
 
 NumberNode::NumberValue parse_number_value(const std::shared_ptr<numval>& number_node) {
@@ -373,6 +394,41 @@ void lower_return_stmt(const ast_ptr& node, LoweringContext& ctx) {
 void append_bool_assignment(const NamedValue& target, bool value, LoweringContext& ctx,
                             const ast_ptr& node) {
     ctx.append_node<NumberNode>(target, value, source_location_from(node));
+}
+
+bool should_treat_symref_as_user_value(const std::shared_ptr<symref>& sym,
+                                       const LoweringContext& ctx) {
+    return sym != nullptr &&
+           (sym->get_symbol_type() == symbol_variable || ctx.is_known_user_name(sym->name()));
+}
+
+std::vector<NamedValue> lower_call_inputs(const ast_ptr& input_args, LoweringContext& ctx) {
+    std::vector<NamedValue> inputs;
+    if (!input_args) {
+        return inputs;
+    }
+
+    if (input_args->nodetype == node_list || input_args->nodetype == node_horz_list) {
+        inputs.reserve(input_args->branch.size());
+        for (const ast_ptr& branch : input_args->branch) {
+            inputs.push_back(lower_expr_to_operand(branch, ctx));
+        }
+        return inputs;
+    }
+
+    inputs.push_back(lower_expr_to_operand(input_args, ctx));
+    return inputs;
+}
+
+CallNode::CalleeType lower_multiple_func_callee_type(const std::shared_ptr<multipleFuncCall>& call,
+                                                     const LoweringContext& ctx) {
+    if (!call || call->s() == nullptr || call->s()->nodetype != node_name) {
+        return CallNode::Direct;
+    }
+
+    const auto callee_sym = std::static_pointer_cast<symref>(call->s());
+    return should_treat_symref_as_user_value(callee_sym, ctx) ? CallNode::Indirect
+                                                              : CallNode::Direct;
 }
 
 void lower_short_circuit_expr_into(const ast_ptr& node, const NamedValue& target,
@@ -466,7 +522,7 @@ Function* create_anonymous_function(const ast_ptr& node, LoweringContext& ctx) {
 
 void lower_name_expr_into(const std::shared_ptr<symref>& sym, const NamedValue& target,
                           LoweringContext& ctx, const ast_ptr& node) {
-    if (ctx.is_known_user_name(sym->name()) || sym->get_symbol_type() == symbol_variable) {
+    if (should_treat_symref_as_user_value(sym, ctx)) {
         const NamedValue source = ctx.classify_name(sym->name());
         if (source.name != target.name || source.type != target.type) {
             ctx.append_node<AssignNode>(target, source, source_location_from(node));
@@ -486,23 +542,47 @@ void lower_call_stmt(const std::shared_ptr<multipleFuncCall>& call, LoweringCont
         outputs.push_back(ctx.classify_name(name));
     }
 
-    std::vector<NamedValue> inputs;
-    if (call->in_args()) {
-        if (call->in_args()->nodetype == node_list || call->in_args()->nodetype == node_horz_list) {
-            for (const ast_ptr& branch : call->in_args()->branch) {
-                inputs.push_back(lower_expr_to_operand(branch, ctx));
-            }
-        } else {
-            inputs.push_back(lower_expr_to_operand(call->in_args(), ctx));
-        }
-    }
-
-    const CallNode::CalleeType callee_type =
-        call->type() == symbol_variable ? CallNode::Indirect : CallNode::Direct;
+    std::vector<NamedValue> inputs = lower_call_inputs(call->in_args(), ctx);
+    const CallNode::CalleeType callee_type = lower_multiple_func_callee_type(call, ctx);
     const std::vector<NamedValue> defined_outputs = outputs;
     ctx.append_node<CallNode>(callee_type, call->name(), std::move(outputs), std::move(inputs),
                               source_location_from(call));
     ctx.mark_defined(defined_outputs);
+}
+
+bool is_block_assignment_lhs(const ast_ptr& node) {
+    if (node == nullptr || node->nodetype != node_multiple_func) {
+        return false;
+    }
+
+    const auto call = std::static_pointer_cast<multipleFuncCall>(node);
+    // `node_asgn` 左值是否表示 `A(...) = rhs`，只看：
+    //   1) 左值本身是 `node_multiple_func`
+    //   2) `node_multiple_func` 的 `branch[1]` / `s()` 是 `node_name`
+    // 不依赖 parser 是否把 `mfc_type` 标成 `mfc_name_element`。
+    return call->s() != nullptr && call->s()->nodetype == node_name;
+}
+
+void lower_block_assignment_stmt(const std::shared_ptr<symasgn>& assign, LoweringContext& ctx) {
+    const auto lhs_call = std::static_pointer_cast<multipleFuncCall>(assign->s());
+    const NamedValue target = ctx.classify_name(lhs_call->name());
+
+    // `A(...) = rhs` 在 AST 中会被编码成 `node_asgn(node_multiple_func, rhs)`；
+    // 这里可以在 lowering 阶段就唯一化成 `__ir_paren_set__`：
+    // 赋值语境已经保证它不是普通函数调用，只可能是圆括号下标写入。
+    // 后续由解释器桥接到 runtime `block set`，并返回新的 SSA 版本值。
+    std::vector<NamedValue> inputs;
+    inputs.push_back(target);
+
+    std::vector<NamedValue> block_indices = lower_call_inputs(lhs_call->in_args(), ctx);
+    inputs.insert(inputs.end(), std::make_move_iterator(block_indices.begin()),
+                  std::make_move_iterator(block_indices.end()));
+    inputs.push_back(lower_expr_to_operand(assign->v(), ctx));
+
+    ctx.append_node<CallNode>(CallNode::Direct, "__ir_paren_set__",
+                              std::vector<NamedValue>{target}, std::move(inputs),
+                              source_location_from(assign));
+    ctx.mark_defined(target);
 }
 
 void lower_expr_into(const ast_ptr& node, const NamedValue& target, LoweringContext& ctx) {
@@ -523,6 +603,9 @@ void lower_expr_into(const ast_ptr& node, const NamedValue& target, LoweringCont
             return;
         case node_horz_list:
         case node_vert_list: {
+            // TODO(opt): 在正式的 ConstantFold pass 中识别“所有元素都是常量”的
+            // `horzcat/vertcat`，例如 `[1 2 3]`、`[1; 2; 3]`，直接折叠成常量矩阵，
+            // 避免继续保留运行时 `horzcat/vertcat` 调用。这里先保持 lowering 只做语义展开。
             std::vector<NamedValue> inputs;
             inputs.reserve(node->branch.size());
             for (const ast_ptr& branch : node->branch) {
@@ -556,10 +639,11 @@ void lower_expr_into(const ast_ptr& node, const NamedValue& target, LoweringCont
             return;
         }
         case node_negative:
-        case node_logic_not: {
+        case node_logic_not:
+        case node_transpose:
+        case node_ctranspose: {
             const NamedValue operand = lower_expr_to_operand(node->branch[0], ctx);
-            const UnaryOpNode::Op op = node->nodetype == node_negative ? UnaryOpNode::UMinus
-                                                                       : UnaryOpNode::Logic_Not;
+            const UnaryOpNode::Op op = lower_unaryop_type(node->nodetype);
             ctx.append_node<UnaryOpNode>(op, target, operand, source_location_from(node));
             ctx.mark_defined(target);
             return;
@@ -567,6 +651,8 @@ void lower_expr_into(const ast_ptr& node, const NamedValue& target, LoweringCont
         case node_add:
         case node_subtract:
         case node_multiply:
+        case node_left_divide:
+        case node_element_power:
         case node_power:
         case node_eq:
         case node_greater_than:
@@ -586,19 +672,13 @@ void lower_expr_into(const ast_ptr& node, const NamedValue& target, LoweringCont
             return;
         case node_multiple_func: {
             const auto call = std::static_pointer_cast<multipleFuncCall>(node);
-            std::vector<NamedValue> inputs;
-            if (call->in_args()) {
-                if (call->in_args()->nodetype == node_list || call->in_args()->nodetype == node_horz_list) {
-                    for (const ast_ptr& branch : call->in_args()->branch) {
-                        inputs.push_back(lower_expr_to_operand(branch, ctx));
-                    }
-                } else {
-                    inputs.push_back(lower_expr_to_operand(call->in_args(), ctx));
-                }
-            }
+            std::vector<NamedValue> inputs = lower_call_inputs(call->in_args(), ctx);
 
-            const CallNode::CalleeType callee_type =
-                call->type() == symbol_variable ? CallNode::Indirect : CallNode::Direct;
+            // `A(...)` 在表达式位置不能提前 lower 成固定的 `block get`：
+            // 它既可能是函数/函数句柄调用，也可能是矩阵/元胞等对象的圆括号取值。
+            // 已知是“变量值”的裸名字会先 lower 成 indirect call；
+            // 运行时再根据该值是否是 `function_handle` 分派到函数调用或 `block get`。
+            const CallNode::CalleeType callee_type = lower_multiple_func_callee_type(call, ctx);
             ctx.append_node<CallNode>(callee_type, call->name(), std::vector<NamedValue>{target},
                                       std::move(inputs), source_location_from(node));
             ctx.mark_defined(target);
@@ -613,6 +693,13 @@ void lower_expr_into(const ast_ptr& node, const NamedValue& target, LoweringCont
                                       std::vector<NamedValue>{target},
                                       std::vector<NamedValue>{function_name},
                                       source_location_from(node));
+            ctx.mark_defined(target);
+            return;
+        }
+        case node_magic_colon: {
+            // `A(:, ...)` 里的裸 `:` 在 AST 中是独立的 `node_magic_colon`；
+            // runtime `block` 约定直接接收字符矩阵 `":"` 作为整维切片哨兵。
+            ctx.append_node<TextNode>(target, ":", source_location_from(node));
             ctx.mark_defined(target);
             return;
         }
@@ -647,7 +734,7 @@ NamedValue lower_expr_to_operand(const ast_ptr& node, LoweringContext& ctx) {
 
     if (node->nodetype == node_name) {
         const auto sym = std::static_pointer_cast<symref>(node);
-        if (ctx.is_known_user_name(sym->name()) || sym->get_symbol_type() == symbol_variable) {
+        if (should_treat_symref_as_user_value(sym, ctx)) {
             return ctx.classify_name(sym->name());
         }
 
@@ -906,6 +993,10 @@ void lower_stmt(const ast_ptr& node, LoweringContext& ctx) {
             return;
         case node_asgn: {
             const auto assign = std::static_pointer_cast<symasgn>(node);
+            if (is_block_assignment_lhs(assign->s())) {
+                lower_block_assignment_stmt(assign, ctx);
+                return;
+            }
             if (assign->s() == nullptr || assign->s()->nodetype != node_name) {
                 throw std::runtime_error("non-SSA lower 目前只支持名字左值赋值。");
             }

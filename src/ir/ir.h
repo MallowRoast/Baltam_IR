@@ -46,6 +46,8 @@ constexpr ValueId InvalidValueId = 0;
 enum class UnaryOpType {
     Logic_Not,
     UMinus,
+    Transpose,
+    CTranspose,
 };
 
 /**
@@ -59,6 +61,8 @@ enum class BinOpType {
     Lt,
     Ne,
     Or,
+    Power,
+    MLeftDivide,
     MPower,
     Multiply,
 };
@@ -237,6 +241,8 @@ public:
 
     static constexpr Op Logic_Not = Op::Logic_Not;
     static constexpr Op UMinus = Op::UMinus;
+    static constexpr Op Transpose = Op::Transpose;
+    static constexpr Op CTranspose = Op::CTranspose;
 
     UnaryOpNode(Op op, NamedValue result, NamedValue operand,
                 std::optional<SourceLocation> location = std::nullopt);
@@ -265,6 +271,8 @@ public:
     static constexpr Op Lt = Op::Lt;
     static constexpr Op Ne = Op::Ne;
     static constexpr Op Or = Op::Or;
+    static constexpr Op Power = Op::Power;
+    static constexpr Op MLeftDivide = Op::MLeftDivide;
     static constexpr Op MPower = Op::MPower;
     static constexpr Op Multiply = Op::Multiply;
 

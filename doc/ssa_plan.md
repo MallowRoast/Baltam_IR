@@ -104,6 +104,26 @@
 - 让 CFG、名字级 analysis、SSA 构建和优化各自独立
 - 让 verifier 和测试能分别覆盖 non-SSA 与 SSA 阶段
 
+这里还有一条和圆括号应用相关的阶段边界需要固定下来：
+
+- `A(...) = B` 可以在 lowering 阶段直接识别成下标写入语义
+- 表达式位置的 `A(...)` 不能在 lowering 阶段直接识别成下标读取语义
+
+原因是：
+
+- 赋值左值里的 `A(...)` 已经被 AST 的赋值语境唯一化，不再和普通函数调用混淆
+- 但表达式位置的 `A(...)` 仍然可能是函数调用、函数句柄调用，或者矩阵/元胞等对象的圆括号取值
+
+因此当前 IR 设计选择是：
+
+- lowering 把 `A(...) = B` 唯一化成 `__ir_paren_set__`
+- lowering 对表达式位置或语句位置的 `A(...)`，会先按静态名字绑定分类成 direct / indirect call：
+  - parser 已知是变量，或 lowering 已知该名字属于当前函数的用户变量，则走 indirect
+  - 否则保留 direct
+- indirect call 再由解释器在运行时根据 callee 的动态类型判断这次到底是函数调用还是 `block get`
+
+也就是说，`block_set` 可以静态区分；`block_get` 仍然必须动态区分，但 `A(...)` 是否先走 indirect call 已经会利用静态名字信息提前收窄。
+
 ## 当前已经有的基础设施
 
 当前仓库已经具备：
@@ -136,6 +156,12 @@
 - SimplifyCFG
 - ConstantFold
 - DCE
+
+其中 `ConstantFold` 的第一批高收益目标应优先覆盖：
+
+- 纯常量的一元 / 二元运算
+- 纯常量的 `horzcat/vertcat`，例如 `[1 2 3]`、`[1; 2; 3]`
+- 纯常量的 `colon` 表达式，例如 `1:3`、`1:2:5`
 
 ### Step 3
 
