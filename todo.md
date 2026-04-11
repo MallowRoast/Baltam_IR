@@ -42,4 +42,5 @@
 
 - 评估哪些 builtin 必须依赖 runtime 工作区，哪些可以继续只走解释器内部值表。
 - 在 `test7` / `test8` 打通后继续向 `test10+` 推进 m-script 适配。
+- 配置 GitHub CI，在每次 PR 上自动执行构建与测试流水线。
 - 后续考虑接入 REPL 与 `io_manager`。
