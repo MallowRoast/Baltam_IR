@@ -96,6 +96,16 @@ inline interpreter::ExecResult execute_function_with_test_trace(
     return interpreter::execute_function(function, args, options);
 }
 
+inline void execute_no_output_test_script(const std::string& script_name) {
+    Module ssa_module = build_untyped_ssa_module_for_test_script(script_name);
+    Function& entry_function = entry_function_or_fail(ssa_module, script_name);
+
+    const interpreter::ExecResult result = execute_function_with_test_trace(entry_function);
+    expect(result.outputs.empty(), script_name + " should not expose explicit outputs.");
+
+    std::cout << script_name << " outputs: none; script completed without runtime error\n";
+}
+
 template <typename TestBody>
 int run_runtime_test(const char* test_name, TestBody&& test_body) {
     int exit_code = 0;

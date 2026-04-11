@@ -3,7 +3,7 @@
 using namespace baltam::test_support;
 
 int main() {
-    return run_runtime_test("test_test5", [] {
-        execute_no_output_test_script("test5");
+    return run_runtime_test("test_test7", [] {
+        execute_no_output_test_script("test7");
     });
 }
