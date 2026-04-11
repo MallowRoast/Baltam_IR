@@ -1,6 +1,7 @@
 #include "interpreter/interpreter.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <ostream>
 #include <stdexcept>
@@ -13,6 +14,7 @@
 #include "ba_obj/ba_obj.h"
 #include "ba_obj/cell.h"
 #include "ba_obj/function_handle.h"
+#include "ba_obj/variable_list.h"
 #include "baltam_worker/builtin_manager.h"
 #include "print/obj2str.h"
 
@@ -341,6 +343,72 @@ std::vector<Value> invoke_known_internal_call(const char* name, baFunPtr& functi
         expected_out_count, name);
 }
 
+std::vector<Value::Object> flatten_call_inputs(const std::vector<Value::Object>& in_args) {
+    std::vector<Value::Object> flattened;
+    for (const Value::Object& arg : in_args) {
+        if (arg != nullptr && arg->is_var_list()) {
+            const auto* list = arg->cget<VariableList>();
+            flattened.insert(flattened.end(), list->data().begin(), list->data().end());
+            continue;
+        }
+        flattened.push_back(arg);
+    }
+    return flattened;
+}
+
+baIndex require_valid_linear_cell_index(double raw_index, baSize cell_size) {
+    const double rounded = std::round(raw_index);
+    if (std::abs(raw_index - rounded) > 1e-12) {
+        throw std::runtime_error("元胞索引必须是整数。");
+    }
+    if (rounded < 1.0 || rounded > static_cast<double>(cell_size)) {
+        throw std::runtime_error("元胞索引越界。");
+    }
+    return static_cast<baIndex>(rounded - 1.0);
+}
+
+std::vector<baIndex> linear_cell_indices_from_object(const Value::Object& index_object,
+                                                     baSize cell_size) {
+    if (index_object == nullptr) {
+        throw std::runtime_error("元胞索引不能为空。");
+    }
+
+    if (index_object->is_char_vector() && index_object->as_string() == ":") {
+        std::vector<baIndex> indices;
+        indices.reserve(cell_size);
+        for (baIndex i = 0; i < static_cast<baIndex>(cell_size); ++i) {
+            indices.push_back(i);
+        }
+        return indices;
+    }
+
+    if (index_object->is_scalar()) {
+        return {require_valid_linear_cell_index(index_object->as_double(), cell_size)};
+    }
+
+    if (index_object->type() != ba_double_mat) {
+        throw std::runtime_error("当前只支持双精度线性元胞索引。");
+    }
+
+    const auto* index_mat = index_object->cget<matrix<double>>();
+    std::vector<baIndex> indices;
+    indices.reserve(index_mat->size());
+    for (baIndex i = 0; i < index_mat->size(); ++i) {
+        indices.push_back(require_valid_linear_cell_index((*index_mat)[i], cell_size));
+    }
+    return indices;
+}
+
+std::vector<Value::Object> collect_cell_outputs(const cell_array& cell,
+                                                const std::vector<baIndex>& indices) {
+    std::vector<Value::Object> outputs;
+    outputs.reserve(indices.size());
+    for (const baIndex index : indices) {
+        outputs.push_back(cell[index]);
+    }
+    return outputs;
+}
+
 std::vector<Value> invoke_runtime_paren_get(const Value::Object& base,
                                             const std::vector<Value::Object>& index_args,
                                             std::size_t expected_out_count) {
@@ -385,6 +453,56 @@ std::vector<Value> invoke_runtime_paren_set(const std::vector<Value::Object>& in
         return {};
     }
     return {concrete(std::move(block_in_args.front()))};
+}
+
+std::vector<Value> invoke_runtime_cell_get(const std::vector<Value::Object>& in_args,
+                                           std::size_t expected_out_count) {
+    if (in_args.size() != 2 || in_args.front() == nullptr) {
+        throw std::runtime_error("调用 `__ir_cell_get__` 时参数不合法。");
+    }
+    if (in_args.front()->type() != ba_cell) {
+        throw std::runtime_error("`__ir_cell_get__` 的 base 不是元胞数组。");
+    }
+
+    const auto* cell = in_args.front()->cget<cell_array>();
+    const std::vector<baIndex> indices =
+        linear_cell_indices_from_object(in_args[1], cell->size());
+    std::vector<Value::Object> outputs = collect_cell_outputs(*cell, indices);
+
+    if (expected_out_count == 0) {
+        return {};
+    }
+    if (expected_out_count > 1) {
+        return wrap_outputs(std::move(outputs), expected_out_count, "__ir_cell_get__");
+    }
+    if (outputs.size() == 1) {
+        return {concrete(std::move(outputs.front()))};
+    }
+    return {concrete(std::make_shared<ba_obj>(new VariableList(std::move(outputs))))};
+}
+
+std::vector<Value> invoke_runtime_cell_set(const std::vector<Value::Object>& in_args,
+                                           std::size_t expected_out_count) {
+    if (in_args.size() != 3 || in_args.front() == nullptr) {
+        throw std::runtime_error("调用 `__ir_cell_set__` 时参数不合法。");
+    }
+    if (in_args.front()->type() != ba_cell) {
+        throw std::runtime_error("`__ir_cell_set__` 的 base 不是元胞数组。");
+    }
+
+    Value::Object base_copy = std::make_shared<ba_obj>(*in_args.front());
+    auto* cell = base_copy->get<cell_array>();
+    const std::vector<baIndex> indices =
+        linear_cell_indices_from_object(in_args[1], cell->size());
+    if (indices.size() != 1) {
+        throw std::runtime_error("当前只支持单元素元胞写入。");
+    }
+    (*cell)[indices.front()] = in_args.back();
+
+    if (expected_out_count == 0) {
+        return {};
+    }
+    return {concrete(std::move(base_copy))};
 }
 
 ExecResult execute_function_impl(Function& function, const std::vector<Value::Object>& args,
@@ -434,6 +552,14 @@ std::vector<Value> invoke_direct_call(const ExecutionState& caller_state,
         }
         const std::string function_name = in_args.front()->as_string();
         return {concrete(std::make_shared<ba_obj>(function_handle(fh_anonymous, function_name)))};
+    }
+
+    if (callee_name == "__ir_cell_get__") {
+        return invoke_runtime_cell_get(in_args, expected_out_count);
+    }
+
+    if (callee_name == "__ir_cell_set__") {
+        return invoke_runtime_cell_set(in_args, expected_out_count);
     }
 
     if (callee_name == "__ir_paren_set__") {
@@ -531,6 +657,7 @@ std::vector<Value> evaluate_call(const SSACallNode& call, ExecutionState& state)
     for (const ValueRef input : call.inputs()) {
         in_args.push_back(state.require_concrete_object(input, "调用实参"));
     }
+    in_args = flatten_call_inputs(in_args);
 
     const std::size_t expected_out_count = call.results().size();
     if (call.callee().type == SSACallNode::Callee::Direct) {

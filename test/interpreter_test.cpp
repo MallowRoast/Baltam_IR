@@ -331,6 +331,102 @@ void test_direct_module_call_after_module_move() {
     expect_output_int(result, 13, "direct module call after module move");
 }
 
+void test_runtime_cell_get_set() {
+    Function function("cell_runtime", Function::PrimaryFunction);
+    function.set_stage(IRNode::UntypedSSA);
+    function.set_output_names({"out"});
+
+    BasicBlock* entry = function.create_block("entry");
+    function.set_entry_block(entry);
+
+    const ValueId one = function.create_value("one");
+    const ValueId two = function.create_value("two");
+    const ValueId cell = function.create_value("cell");
+    const ValueId index = function.create_value("index");
+    const ValueId updated_value = function.create_value("updated_value");
+    const ValueId updated_cell = function.create_value("updated_cell");
+    const ValueId out = function.create_value("out");
+
+    entry->append_instruction(
+        function.create_node<SSANumberNode>(one, SSANumberNode::NumberValue{std::int64_t{1}}));
+    entry->append_instruction(
+        function.create_node<SSANumberNode>(two, SSANumberNode::NumberValue{std::int64_t{2}}));
+    entry->append_instruction(function.create_node<SSACallNode>(
+        SSACallNode::Callee{SSACallNode::Callee::Direct, "__ir_make_cell__", ValueRef{}},
+        std::vector<ValueId>{cell}, std::vector<ValueRef>{ValueRef{one}, ValueRef{two}}));
+    entry->append_instruction(
+        function.create_node<SSANumberNode>(index, SSANumberNode::NumberValue{std::int64_t{2}}));
+    entry->append_instruction(function.create_node<SSANumberNode>(
+        updated_value, SSANumberNode::NumberValue{std::int64_t{7}}));
+    entry->append_instruction(function.create_node<SSACallNode>(
+        SSACallNode::Callee{SSACallNode::Callee::Direct, "__ir_cell_set__", ValueRef{}},
+        std::vector<ValueId>{updated_cell},
+        std::vector<ValueRef>{ValueRef{cell}, ValueRef{index}, ValueRef{updated_value}}));
+    entry->append_instruction(function.create_node<SSACallNode>(
+        SSACallNode::Callee{SSACallNode::Callee::Direct, "__ir_cell_get__", ValueRef{}},
+        std::vector<ValueId>{out}, std::vector<ValueRef>{ValueRef{updated_cell}, ValueRef{index}}));
+    entry->set_terminal(function.create_node<SSAReturnNode>(std::vector<ValueRef>{ValueRef{out}}));
+
+    analysis::verify_function_or_throw(function);
+    const interpreter::ExecResult result = interpreter::execute_function(function);
+    expect_output_int(result, 7, "runtime cell get/set");
+}
+
+void test_var_list_call_input_flattening() {
+    Module module("var_list_expand_module", "test/m/var_list_expand_module.m", Module::M_Function);
+
+    Function* callee = module.create_function("sum2", Function::LocalFunction);
+    callee->set_stage(IRNode::UntypedSSA);
+    callee->set_input_names({"a", "b"});
+    callee->set_output_names({"out"});
+    const ValueId a = callee->create_value("a");
+    const ValueId b = callee->create_value("b");
+    callee->set_argument_values({a, b});
+    BasicBlock* callee_entry = callee->create_block("entry");
+    callee->set_entry_block(callee_entry);
+    const ValueId callee_out = callee->create_value("out");
+    callee_entry->append_instruction(callee->create_node<SSABinOpNode>(
+        BinOpType::Add, callee_out, ValueRef{a}, ValueRef{b}));
+    callee_entry->set_terminal(
+        callee->create_node<SSAReturnNode>(std::vector<ValueRef>{ValueRef{callee_out}}));
+
+    Function* caller = module.create_function("caller", Function::PrimaryFunction);
+    module.set_entry_function(caller);
+    caller->set_stage(IRNode::UntypedSSA);
+    caller->set_output_names({"out"});
+    BasicBlock* caller_entry = caller->create_block("entry");
+    caller->set_entry_block(caller_entry);
+
+    const ValueId four = caller->create_value("four");
+    const ValueId five = caller->create_value("five");
+    const ValueId args_cell = caller->create_value("args_cell");
+    const ValueId all_indices = caller->create_value("all_indices");
+    const ValueId packed_args = caller->create_value("packed_args");
+    const ValueId caller_out = caller->create_value("out");
+
+    caller_entry->append_instruction(
+        caller->create_node<SSANumberNode>(four, SSANumberNode::NumberValue{std::int64_t{4}}));
+    caller_entry->append_instruction(
+        caller->create_node<SSANumberNode>(five, SSANumberNode::NumberValue{std::int64_t{5}}));
+    caller_entry->append_instruction(caller->create_node<SSACallNode>(
+        SSACallNode::Callee{SSACallNode::Callee::Direct, "__ir_make_cell__", ValueRef{}},
+        std::vector<ValueId>{args_cell}, std::vector<ValueRef>{ValueRef{four}, ValueRef{five}}));
+    caller_entry->append_instruction(caller->create_node<SSATextNode>(all_indices, std::string(":")));
+    caller_entry->append_instruction(caller->create_node<SSACallNode>(
+        SSACallNode::Callee{SSACallNode::Callee::Direct, "__ir_cell_get__", ValueRef{}},
+        std::vector<ValueId>{packed_args},
+        std::vector<ValueRef>{ValueRef{args_cell}, ValueRef{all_indices}}));
+    caller_entry->append_instruction(caller->create_node<SSACallNode>(
+        SSACallNode::Callee{SSACallNode::Callee::Direct, "sum2", ValueRef{}},
+        std::vector<ValueId>{caller_out}, std::vector<ValueRef>{ValueRef{packed_args}}));
+    caller_entry->set_terminal(
+        caller->create_node<SSAReturnNode>(std::vector<ValueRef>{ValueRef{caller_out}}));
+
+    analysis::verify_module_or_throw(module);
+    const interpreter::ExecResult result = interpreter::execute_function(*caller);
+    expect_output_int(result, 9, "var_list call input flattening");
+}
+
 }  // namespace
 
 int main() {
@@ -344,6 +440,8 @@ int main() {
         test_direct_module_function_call();
         test_indirect_function_handle_call();
         test_direct_module_call_after_module_move();
+        test_runtime_cell_get_set();
+        test_var_list_call_input_flattening();
     } catch (const std::exception& ex) {
         close_builtin_library();
         std::cerr << "interpreter_test FAILED: " << ex.what() << '\n';
