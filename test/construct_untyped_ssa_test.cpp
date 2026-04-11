@@ -167,7 +167,7 @@ void test_loop_generates_header_phi() {
 
     expect_contains(text, "header:", "loop header should be preserved.");
     expect_contains(text, " = phi [ %out.", "loop-carried variable should create header phi.");
-    expect_contains(text, "add %out.", "loop body should read the header phi version.");
+    expect_contains(text, "plus %out.", "loop body should read the header phi version.");
 }
 
 void test_dead_temporary_does_not_generate_phi() {

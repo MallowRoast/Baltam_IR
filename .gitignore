@@ -1,3 +1,4 @@
 build/*
 deps/*
 .idea/*
+cmake-build-debug/*

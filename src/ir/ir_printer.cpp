@@ -559,6 +559,9 @@ std::string expr_text(const Function& function, const SSADisplayNames& display_n
         case UntypedSSANode::SSA_Call: {
             const auto& call = static_cast<const SSACallNode&>(node);
             std::ostringstream oss;
+            // 对 untyped SSA 来说，indirect `call %v(...)` 仍然保留运行时分派边界：
+            // `%v` 既可能是 function_handle 调用，也可能是 runtime `paren get`。
+            // 因此 printer 不能仅凭 indirect 形态就把它改写成 `paren_get`。
             oss << "call " << format_ssa_callee(function, display_names, call.callee()) << "("
                 << format_ssa_value_list(function, display_names, call.inputs()) << ")";
             return oss.str();

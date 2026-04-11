@@ -113,6 +113,89 @@ std::vector<std::string> collect_name_list(const ast_ptr& node) {
     throw std::runtime_error("non-SSA lower 遇到了无法收集名字的 AST 节点。");
 }
 
+std::vector<std::string> collect_assignment_target_name_list(const ast_ptr& node) {
+    if (!node) {
+        return {};
+    }
+
+    switch (node->nodetype) {
+        case node_nop:
+            return {};
+        case node_name: {
+            const auto sym = std::static_pointer_cast<symref>(node);
+            return {sym->name()};
+        }
+        case node_list:
+        case node_horz_list: {
+            std::vector<std::string> names;
+            for (const ast_ptr& branch : node->branch) {
+                std::vector<std::string> branch_names = collect_assignment_target_name_list(branch);
+                names.insert(names.end(), branch_names.begin(), branch_names.end());
+            }
+            return names;
+        }
+        case node_multiple_func: {
+            const auto call = std::static_pointer_cast<multipleFuncCall>(node);
+            // 多返回值左值里允许出现 `X(...)` 这类切片写入目标；
+            // predeclare 阶段这里只需要基名 `X`，不需要把索引结构继续展开。
+            if (call->s() != nullptr && call->s()->nodetype == node_name) {
+                return {call->name()};
+            }
+            break;
+        }
+        default:
+            break;
+    }
+
+    throw std::runtime_error("non-SSA lower 遇到了无法收集赋值左值名字的 AST 节点。");
+}
+
+struct CallOutputTargetSpec {
+    std::string name;
+    ast_ptr lhs;
+    bool requires_store_back = false;
+};
+
+std::vector<CallOutputTargetSpec> collect_call_output_target_specs(const ast_ptr& node) {
+    if (!node) {
+        return {};
+    }
+
+    switch (node->nodetype) {
+        case node_nop:
+            return {};
+        case node_name: {
+            const auto sym = std::static_pointer_cast<symref>(node);
+            return {{sym->name(), node, false}};
+        }
+        case node_list:
+        case node_horz_list: {
+            std::vector<CallOutputTargetSpec> specs;
+            for (const ast_ptr& branch : node->branch) {
+                std::vector<CallOutputTargetSpec> branch_specs =
+                    collect_call_output_target_specs(branch);
+                specs.insert(specs.end(),
+                             std::make_move_iterator(branch_specs.begin()),
+                             std::make_move_iterator(branch_specs.end()));
+            }
+            return specs;
+        }
+        case node_multiple_func: {
+            const auto call = std::static_pointer_cast<multipleFuncCall>(node);
+            // `[a, X(...)] = f(...)` 这种左值不能把 call 输出直接绑定到 `X`：
+            // 真正的语义是“先拿到该返回值，再把它写回 `X(...)` 指向的切片”。
+            if (call->s() != nullptr && call->s()->nodetype == node_name) {
+                return {{call->name(), node, true}};
+            }
+            break;
+        }
+        default:
+            break;
+    }
+
+    throw std::runtime_error("non-SSA lower 遇到了暂不支持的多返回值左值。");
+}
+
 ast_ptr script_body_from_unit(const pcdata& unit) {
     return unit.ast;
 }
@@ -184,7 +267,7 @@ void collect_predeclared_user_names(const ast_ptr& node,
         }
         case node_multiple_func: {
             const auto call = std::static_pointer_cast<multipleFuncCall>(node);
-            for (const std::string& name : collect_name_list(call->out_args())) {
+            for (const std::string& name : collect_assignment_target_name_list(call->out_args())) {
                 names.insert(name);
             }
             return;
@@ -537,17 +620,49 @@ void lower_name_expr_into(const std::shared_ptr<symref>& sym, const NamedValue& 
 }
 
 void lower_call_stmt(const std::shared_ptr<multipleFuncCall>& call, LoweringContext& ctx) {
+    const std::vector<CallOutputTargetSpec> output_specs =
+        collect_call_output_target_specs(call->out_args());
+
     std::vector<NamedValue> outputs;
-    for (const std::string& name : collect_name_list(call->out_args())) {
-        outputs.push_back(ctx.classify_name(name));
+    outputs.reserve(output_specs.size());
+    for (const CallOutputTargetSpec& spec : output_specs) {
+        // 纯名字左值可以直接接 call 输出；
+        // 带索引左值则必须先接到临时，后面再显式 lower 成 `__ir_paren_set__`。
+        outputs.push_back(spec.requires_store_back ? ctx.create_temp("__call.out")
+                                                  : ctx.classify_name(spec.name));
     }
 
     std::vector<NamedValue> inputs = lower_call_inputs(call->in_args(), ctx);
     const CallNode::CalleeType callee_type = lower_multiple_func_callee_type(call, ctx);
-    const std::vector<NamedValue> defined_outputs = outputs;
+    const std::vector<NamedValue> call_results = outputs;
     ctx.append_node<CallNode>(callee_type, call->name(), std::move(outputs), std::move(inputs),
                               source_location_from(call));
-    ctx.mark_defined(defined_outputs);
+    ctx.mark_defined(call_results);
+
+    for (std::size_t i = 0; i < output_specs.size(); ++i) {
+        const CallOutputTargetSpec& spec = output_specs[i];
+        if (!spec.requires_store_back) {
+            continue;
+        }
+
+        const auto lhs_call = std::static_pointer_cast<multipleFuncCall>(spec.lhs);
+        const NamedValue target = ctx.classify_name(spec.name);
+
+        std::vector<NamedValue> set_inputs;
+        set_inputs.push_back(target);
+
+        std::vector<NamedValue> block_indices = lower_call_inputs(lhs_call->in_args(), ctx);
+        set_inputs.insert(set_inputs.end(), std::make_move_iterator(block_indices.begin()),
+                          std::make_move_iterator(block_indices.end()));
+        // 返回值必须以“call 先全部完成，再按左值顺序回写”的方式展开：
+        // 这样既保留多返回值求值顺序，也复用已有 `__ir_paren_set__` 桥接语义。
+        set_inputs.push_back(call_results[i]);
+
+        ctx.append_node<CallNode>(CallNode::Direct, "__ir_paren_set__",
+                                  std::vector<NamedValue>{target}, std::move(set_inputs),
+                                  source_location_from(spec.lhs));
+        ctx.mark_defined(target);
+    }
 }
 
 bool is_block_assignment_lhs(const ast_ptr& node) {
