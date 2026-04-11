@@ -278,6 +278,22 @@ const std::vector<ValueId>& Function::argument_values() const {
     return argument_values_;
 }
 
+bool Function::has_varargin() const {
+    return has_varargin_;
+}
+
+bool Function::has_varargout() const {
+    return has_varargout_;
+}
+
+std::size_t Function::fixed_input_count() const {
+    return inputs_.size() - ((has_varargin_ && !inputs_.empty()) ? 1u : 0u);
+}
+
+std::size_t Function::fixed_output_count() const {
+    return outputs_.size() - ((has_varargout_ && !outputs_.empty()) ? 1u : 0u);
+}
+
 std::size_t Function::value_count() const {
     return value_debug_names_.size();
 }
@@ -338,6 +354,14 @@ void Function::set_output_names(std::vector<std::string> names) {
     for (std::string& name : names) {
         outputs_.push_back(NamedValue{std::move(name), NamedValue::UserVariable});
     }
+}
+
+void Function::set_has_varargin(bool has_varargin) {
+    has_varargin_ = has_varargin;
+}
+
+void Function::set_has_varargout(bool has_varargout) {
+    has_varargout_ = has_varargout;
 }
 
 void Function::set_argument_values(std::vector<ValueId> argument_values) {

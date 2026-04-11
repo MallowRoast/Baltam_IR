@@ -627,6 +627,10 @@ public:
     const std::vector<NamedValue>& inputs() const;
     const std::vector<NamedValue>& outputs() const;
     const std::vector<ValueId>& argument_values() const;
+    bool has_varargin() const;
+    bool has_varargout() const;
+    std::size_t fixed_input_count() const;
+    std::size_t fixed_output_count() const;
     std::size_t value_count() const;
     bool has_value(ValueId id) const;
     const std::string* find_value_debug_name(ValueId id) const;
@@ -638,6 +642,8 @@ public:
     void set_stage(IRNode::Stage stage);
     void set_input_names(std::vector<std::string> names);
     void set_output_names(std::vector<std::string> names);
+    void set_has_varargin(bool has_varargin);
+    void set_has_varargout(bool has_varargout);
     void set_argument_values(std::vector<ValueId> argument_values);
     ValueId create_value(std::string debug_name = {});
     void set_value_debug_name(ValueId id, std::string debug_name);
@@ -661,6 +667,8 @@ private:
     IRNode::Stage stage_ = IRNode::NonSSA;
     std::vector<NamedValue> inputs_;
     std::vector<NamedValue> outputs_;
+    bool has_varargin_ = false;
+    bool has_varargout_ = false;
     std::vector<ValueId> argument_values_;
     std::vector<std::string> value_debug_names_;
     std::vector<std::unique_ptr<BasicBlock>> block_storage_;

@@ -464,6 +464,8 @@ Function* clone_function_header(const Function& src_function, Module& dst_module
     dst_function->set_stage(IRNode::UntypedSSA);
     dst_function->set_input_names(collect_name_list(src_function.inputs()));
     dst_function->set_output_names(collect_name_list(src_function.outputs()));
+    dst_function->set_has_varargin(src_function.has_varargin());
+    dst_function->set_has_varargout(src_function.has_varargout());
     return dst_function;
 }
 

@@ -289,6 +289,10 @@ std::vector<std::string> to_sorted_name_list(const std::unordered_set<std::strin
     return result;
 }
 
+bool has_trailing_name(const std::vector<NamedValue>& values, const char* expected_name) {
+    return !values.empty() && values.back().name == expected_name;
+}
+
 void populate_function_signature(Function& function, const pcdata& unit) {
     if (unit.m_in_arg_names != nullptr && !unit.m_in_arg_names->empty()) {
         function.set_input_names(*unit.m_in_arg_names);
@@ -303,6 +307,9 @@ void populate_function_signature(Function& function, const pcdata& unit) {
         const auto func_ast = std::static_pointer_cast<mFileFunc>(unit.ast);
         function.set_output_names(collect_name_list(func_ast->out_args()));
     }
+
+    function.set_has_varargin(has_trailing_name(function.inputs(), "varargin"));
+    function.set_has_varargout(has_trailing_name(function.outputs(), "varargout"));
 }
 
 struct LoweringContext {
