@@ -289,11 +289,12 @@ std::vector<std::string> to_sorted_name_list(const std::unordered_set<std::strin
     return result;
 }
 
-bool has_trailing_name(const std::vector<NamedValue>& values, const char* expected_name) {
-    return !values.empty() && values.back().name == expected_name;
-}
-
 void populate_function_signature(Function& function, const pcdata& unit) {
+    const auto has_trailing_name = [](const std::vector<NamedValue>& values,
+                                      const char* expected_name) {
+        return !values.empty() && values.back().name == expected_name;
+    };
+
     if (unit.m_in_arg_names != nullptr && !unit.m_in_arg_names->empty()) {
         function.set_input_names(*unit.m_in_arg_names);
     } else if (unit.ast && unit.ast->nodetype == node_mfile_func) {

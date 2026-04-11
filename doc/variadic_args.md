@@ -5,7 +5,7 @@
 这份文档分两部分：
 
 - 先说明 MATLAB 中 `varargin` / `varargout` / `nargin` / `nargout` 的语义边界
-- 再给出 `Baltam_IR` 中如何表达和执行这套语义的方案
+- 再给出 `Baltam_IR` 中如何表达和执行这套语义，以及当前实现状态
 
 本文只讨论函数级可变参数，不讨论 classdef、arguments block、method dispatch 等更高层语义。
 
@@ -220,8 +220,7 @@ function [varargout1, c] = h(varargin)
 
 - [test4.m](/home/zj/Desktop/Baltam_IR/test/m/test4/test4.m)
 - [test4_2.m](/home/zj/Desktop/Baltam_IR/test/m/test4_2/test4_2.m)
-
-## Baltam_IR 处理方案
+- [test4_3.m](/home/zj/Desktop/Baltam_IR/test/m/test4_3/test4_3.m)
 
 ## 总体原则
 
@@ -245,6 +244,30 @@ function [varargout1, c] = h(varargin)
 - `ReturnNode`
 - `SSACallNode`
 - `SSAReturnNode`
+
+## 当前实现状态
+
+当前仓库里，可变参数的最小闭环已经接通：
+
+- `Function` 保留 `has_varargin` / `has_varargout` 两个签名标志
+- lowering 会根据函数签名最后一个输入/输出名字识别 variadic 约定
+- untyped SSA 构造会保留这份 variadic 签名信息
+- 解释器执行帧会记录 `actual_nargin` / `requested_nargout`
+- 少传固定参数时会绑定为 `MissingInput`，只有真正读取时才报错
+- `varargin` 会在入口打包成 `cell_array`
+- `varargout` 会在入口初始化为空 `cell_array`，并在返回时按请求输出数展开
+- `nargin` / `nargout` 优先走 runtime builtin；若 runtime 因缺少 M 函数上下文无法回答，则回退到解释器执行帧记录的调用边界信息
+- `__ir_cell_get__` / `__ir_cell_set__` 直接桥接到 runtime 的 `brace_get` / `brace_set`
+- `VariableList` 已经能桥接 `C{:}` 这类展开语义
+
+当前已经覆盖的主要回归包括：
+
+- [test_variadic_signature.cpp](/home/zj/Desktop/Baltam_IR/test/test_variadic_signature.cpp)
+- [interpreter_test.cpp](/home/zj/Desktop/Baltam_IR/test/interpreter_test.cpp)
+- [test_cell_index_lowering.cpp](/home/zj/Desktop/Baltam_IR/test/test_cell_index_lowering.cpp)
+- [test_test4.cpp](/home/zj/Desktop/Baltam_IR/test/test_test4.cpp)
+- [test_test4_2.cpp](/home/zj/Desktop/Baltam_IR/test/test_test4_2.cpp)
+- [test_test4_3.cpp](/home/zj/Desktop/Baltam_IR/test/test_test4_3.cpp)
 
 ## 为什么不单独增加 variadic IR 节点
 
@@ -510,98 +533,69 @@ function [a, varargout] = f(...)
 
 ## `nargin` / `nargout` 的处理方式
 
-当前更适合把它们当作解释器内建的特殊读取语义，而不是普通 builtin。
+当前更合适的做法是：
 
-理由：
+- 优先尝试调用 runtime 的 `nargin` / `nargout`
+- 如果 runtime 因为缺少 M 函数执行上下文而不能直接回答，则回退到解释器执行帧中的 `actual_nargin` / `requested_nargout`
 
-- 它们读的是“当前执行帧”的动态信息
-- 不应依赖外部 builtin table 或 runtime 工作区查找
+原因是：
 
-建议：
-
-- 在解释器里把 `nargin` / `nargout` 作为特殊名字或特殊 direct-call 处理
-- 它们直接返回当前执行帧中的 `actual_nargin` / `requested_nargout`
+- 从 MATLAB 语义上看，`nargin` / `nargout` 的确是函数
+- 但当前解释器并不完全复用 runtime 的 M 函数调用栈
+- 因此纯 runtime 调用在当前环境下不总是可用，需要保留执行帧回退路径
 
 ## 与现有仓库结构的对应关系
 
 ### 1. IR
 
-需要改动：
+当前实现文件：
 
 - [src/ir/ir.h](/home/zj/Desktop/Baltam_IR/src/ir/ir.h)
 - [src/ir/ir.cpp](/home/zj/Desktop/Baltam_IR/src/ir/ir.cpp)
 
-增加 `Function` 的 variadic 标志。
+当前状态：
+
+- `Function` 已增加 `has_varargin` / `has_varargout`
+- 固定输入/输出个数通过 `fixed_input_count()` / `fixed_output_count()` 现算
 
 ### 2. lowering
 
-需要改动：
+当前实现文件：
 
 - [src/lowering/lowering.cpp](/home/zj/Desktop/Baltam_IR/src/lowering/lowering.cpp)
 
-责任是：
+当前状态：
 
 - 从函数签名中识别 `varargin` / `varargout`
 - 把 variadic 信息写进 `Function`
 
 ### 3. SSA 构造
 
-需要改动：
+当前实现文件：
 
 - [src/optimizer/construct_untyped_ssa.cpp](/home/zj/Desktop/Baltam_IR/src/optimizer/construct_untyped_ssa.cpp)
 
-责任是：
+当前状态：
 
 - 把 `Function` 的 variadic 信息从 non-SSA 复制到 untyped SSA
 
 ### 4. 解释器
 
-需要改动：
+当前实现文件：
 
 - [src/interpreter/interpreter.cpp](/home/zj/Desktop/Baltam_IR/src/interpreter/interpreter.cpp)
 - [src/interpreter/interpreter.h](/home/zj/Desktop/Baltam_IR/src/interpreter/interpreter.h)
 
-责任是：
+当前状态：
 
 - 记录 `actual_nargin`
 - 记录 `requested_nargout`
 - 支持缺失固定参数
 - 支持 `varargin` 打包
 - 支持 `varargout` 展开
-- 支持 `nargin` / `nargout` 读取
+- 支持 `nargin` / `nargout` 的 runtime-first / frame-fallback 读取
+- `__ir_cell_get__` / `__ir_cell_set__` 直接桥到 `brace_get` / `brace_set`
+- 表达式位置的 builtin 调用按调用点请求的输出个数执行，不会因为 builtin 本身支持更多输出就自动升级为多输出调用
 
-## 推荐实施顺序
-
-### Phase 1
-
-补 `Function` 的 variadic 签名标志，并让 lowering / SSA builder 传递这份信息。
-
-### Phase 2
-
-修改解释器入口绑定逻辑：
-
-- 去掉“实参数量必须等于形参数量”的假设
-- 支持缺失固定参数
-- 支持 `varargin` 打包
-
-### Phase 3
-
-修改解释器返回逻辑：
-
-- 支持按请求输出数展开 `varargout`
-
-### Phase 4
-
-补 `nargin` / `nargout` 的执行帧读取逻辑，并补对应回归测试。
-
-## 当前结论
-
-当前更合适的方案是：
-
-- 在 IR 的 `Function` 上显式保留“是否存在 `varargin/varargout`”这类签名信息
-- 不为 variadic 新增专门 IR 节点
-- 函数体内部统一把 `varargin/varargout` 当普通 `cell_array`
-- 把 `var_list` 限定为展开桥接层的临时表现
-- 在解释器调用边界实现真正的可变参数语义
-
-这样既能保住当前 IR 结构的简洁性，也能把 MATLAB 可变参数的特殊性限制在真正需要特殊处理的边界位置。
+这最后一点对 [test4_2.m](/home/zj/Desktop/Baltam_IR/test/m/test4_2/test4_2.m) 很重要。
+例如 `min(nargout - 1, nargin)` 在表达式位置必须按一输出求值，不能因为 `min` 支持可选第二输出就被解释成双输出调用。

@@ -1,7 +1,6 @@
 #include "interpreter/interpreter.h"
 
 #include <algorithm>
-#include <cmath>
 #include <cstdint>
 #include <ostream>
 #include <stdexcept>
@@ -362,68 +361,18 @@ std::vector<Value::Object> flatten_call_inputs(const std::vector<Value::Object>&
     return flattened;
 }
 
-baIndex require_valid_linear_cell_index(double raw_index, baSize cell_size) {
-    const double rounded = std::round(raw_index);
-    if (std::abs(raw_index - rounded) > 1e-12) {
-        throw std::runtime_error("元胞索引必须是整数。");
+baFunPtr lookup_runtime_brace_function(const char* name, baFunPtr& builtin_ptr,
+                                       baFunPtr& internal_ptr) {
+    // `brace_get` / `brace_set` 当前在 runtime 里注册为 builtin。
+    // 如果后续 runtime 把它们改成 internal，这里保留 internal fallback，
+    // 这样解释器调用约定不需要再改一轮。
+    if (try_lookup_builtin_function_cached(name, builtin_ptr)) {
+        return builtin_ptr;
     }
-    if (rounded < 1.0 || rounded > static_cast<double>(cell_size)) {
-        throw std::runtime_error("元胞索引越界。");
+    if (internal_ptr == nullptr) {
+        internal_ptr = lookup_internal_function(name);
     }
-    return static_cast<baIndex>(rounded - 1.0);
-}
-
-baIndex require_valid_one_based_integer_index(double raw_index) {
-    const double rounded = std::round(raw_index);
-    if (std::abs(raw_index - rounded) > 1e-12) {
-        throw std::runtime_error("元胞索引必须是整数。");
-    }
-    if (rounded < 1.0) {
-        throw std::runtime_error("元胞索引越界。");
-    }
-    return static_cast<baIndex>(rounded - 1.0);
-}
-
-std::vector<baIndex> linear_cell_indices_from_object(const Value::Object& index_object,
-                                                     baSize cell_size) {
-    if (index_object == nullptr) {
-        throw std::runtime_error("元胞索引不能为空。");
-    }
-
-    if (index_object->is_char_vector() && index_object->as_string() == ":") {
-        std::vector<baIndex> indices;
-        indices.reserve(cell_size);
-        for (baIndex i = 0; i < static_cast<baIndex>(cell_size); ++i) {
-            indices.push_back(i);
-        }
-        return indices;
-    }
-
-    if (index_object->is_scalar()) {
-        return {require_valid_linear_cell_index(index_object->as_double(), cell_size)};
-    }
-
-    if (index_object->type() != ba_double_mat) {
-        throw std::runtime_error("当前只支持双精度线性元胞索引。");
-    }
-
-    const auto* index_mat = index_object->cget<matrix<double>>();
-    std::vector<baIndex> indices;
-    indices.reserve(index_mat->size());
-    for (baIndex i = 0; i < index_mat->size(); ++i) {
-        indices.push_back(require_valid_linear_cell_index((*index_mat)[i], cell_size));
-    }
-    return indices;
-}
-
-std::vector<Value::Object> collect_cell_outputs(const cell_array& cell,
-                                                const std::vector<baIndex>& indices) {
-    std::vector<Value::Object> outputs;
-    outputs.reserve(indices.size());
-    for (const baIndex index : indices) {
-        outputs.push_back(cell[index]);
-    }
-    return outputs;
+    return internal_ptr;
 }
 
 std::vector<Value> invoke_runtime_paren_get(const Value::Object& base,
@@ -481,21 +430,22 @@ std::vector<Value> invoke_runtime_cell_get(const std::vector<Value::Object>& in_
         throw std::runtime_error("`__ir_cell_get__` 的 base 不是元胞数组。");
     }
 
-    const auto* cell = in_args.front()->cget<cell_array>();
-    const std::vector<baIndex> indices =
-        linear_cell_indices_from_object(in_args[1], cell->size());
-    std::vector<Value::Object> outputs = collect_cell_outputs(*cell, indices);
-
     if (expected_out_count == 0) {
         return {};
     }
-    if (expected_out_count > 1) {
+
+    static baFunPtr brace_get_builtin_ptr = nullptr;
+    static baFunPtr brace_get_internal_ptr = nullptr;
+    if (const baFunPtr function_ptr = lookup_runtime_brace_function(
+            "brace_get", brace_get_builtin_ptr, brace_get_internal_ptr)) {
+        std::vector<Value::Object> outputs =
+            invoke_function_ptr("brace_get", function_ptr, in_args, expected_out_count,
+                                function_ptr == brace_get_builtin_ptr ? CallableType::Builtin
+                                                                     : CallableType::Internal);
         return wrap_outputs(std::move(outputs), expected_out_count, "__ir_cell_get__");
     }
-    if (outputs.size() == 1) {
-        return {concrete(std::move(outputs.front()))};
-    }
-    return {concrete(std::make_shared<ba_obj>(new VariableList(std::move(outputs))))};
+
+    throw std::runtime_error("当前运行时找不到 `brace_get`，无法执行 `__ir_cell_get__`。");
 }
 
 std::vector<Value> invoke_runtime_cell_set(const std::vector<Value::Object>& in_args,
@@ -508,24 +458,21 @@ std::vector<Value> invoke_runtime_cell_set(const std::vector<Value::Object>& in_
     }
 
     Value::Object base_copy = std::make_shared<ba_obj>(*in_args.front());
-    auto* cell = base_copy->get<cell_array>();
+    std::vector<Value::Object> brace_in_args = in_args;
+    // runtime `brace set` 会原地修改传入的 cell；
+    // 但在 SSA 语义里 cell 的每次写回都必须产生新版本，因此这里先复制 base。
+    brace_in_args.front() = base_copy;
 
-    baIndex target_index = 0;
-    if (in_args[1] != nullptr && in_args[1]->is_scalar()) {
-        target_index = require_valid_one_based_integer_index(in_args[1]->as_double());
-        if (target_index >= cell->size()) {
-            cell->data().conservative_resize(1, static_cast<baSize>(target_index + 1));
-        }
+    static baFunPtr brace_set_builtin_ptr = nullptr;
+    static baFunPtr brace_set_internal_ptr = nullptr;
+    if (const baFunPtr function_ptr = lookup_runtime_brace_function(
+            "brace_set", brace_set_builtin_ptr, brace_set_internal_ptr)) {
+        (void)invoke_function_ptr("brace_set", function_ptr, brace_in_args, 1,
+                                  function_ptr == brace_set_builtin_ptr ? CallableType::Builtin
+                                                                       : CallableType::Internal);
     } else {
-        const std::vector<baIndex> indices =
-            linear_cell_indices_from_object(in_args[1], cell->size());
-        if (indices.size() != 1) {
-            throw std::runtime_error("当前只支持单元素元胞写入。");
-        }
-        target_index = indices.front();
+        throw std::runtime_error("当前运行时找不到 `brace_set`，无法执行 `__ir_cell_set__`。");
     }
-
-    (*cell)[target_index] = in_args.back();
 
     if (expected_out_count == 0) {
         return {};
@@ -599,20 +546,26 @@ std::vector<Value> invoke_direct_call(const ExecutionState& caller_state,
         return {concrete(std::make_shared<ba_obj>(function_handle(fh_anonymous, function_name)))};
     }
 
-    if (callee_name == "nargin") {
+    if (callee_name == "nargin" || callee_name == "nargout") {
+        baFunPtr function_ptr = nullptr;
+        if (try_lookup_builtin_function_cached(callee_name, function_ptr)) {
+            try {
+                return wrap_outputs(
+                    invoke_function_ptr(callee_name, function_ptr, in_args, expected_out_count,
+                                        CallableType::Builtin),
+                    expected_out_count, callee_name);
+            } catch (const std::exception&) {
+                // runtime `nargin/nargout` 依赖 M 函数执行上下文；
+                // 在当前解释器里若 runtime 无法直接回答，则退回到执行帧记录的调用边界信息。
+            }
+        }
         if (expected_out_count == 0) {
             return {};
         }
-        return {concrete(std::make_shared<ba_obj>(
-            static_cast<std::int64_t>(caller_state.actual_nargin)))};
-    }
-
-    if (callee_name == "nargout") {
-        if (expected_out_count == 0) {
-            return {};
-        }
-        return {concrete(std::make_shared<ba_obj>(
-            static_cast<std::int64_t>(caller_state.requested_nargout)))};
+        const std::int64_t value =
+            callee_name == "nargin" ? static_cast<std::int64_t>(caller_state.actual_nargin)
+                                    : static_cast<std::int64_t>(caller_state.requested_nargout);
+        return {concrete(std::make_shared<ba_obj>(value))};
     }
 
     if (callee_name == "__ir_cell_get__") {

@@ -16,6 +16,9 @@
 | `test2_1` | `test_test2_1` | 已通过 | 已补齐“多返回值直接写入切片左值”的 lowering 支持。 |
 | `test2_2` | `test_test2_2` | 已通过 | 已接入运行时回归测试。 |
 | `test3` | `test_test3` | 未通过 | 已补测试入口，但当前解释器不会把用户变量同步回运行时符号表，导致 `save(mat_path, 'a', 'b')` 这类按变量名从 runtime 符号表取值的 builtin 在运行时找不到 `a` / `b`。 |
+| `test4` | `test_test4` | 已通过 | 已补齐 `varargin` / `nargin`、cell 展开和 cell 写回相关回归。 |
+| `test4_2` | `test_test4_2` | 已通过 | 已补齐 `varargout` / `nargout` 回归，并修正表达式位置 builtin 的输出个数按调用点请求值执行。 |
+| `test4_3` | `test_test4_3` | 已通过 | 已接入函数实参 alias / 按值返回语义回归。 |
 
 ## `test3` 当前阻塞点
 
