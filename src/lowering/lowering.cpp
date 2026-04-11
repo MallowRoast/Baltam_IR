@@ -470,6 +470,7 @@ NamedValue lower_expr_to_operand(const ast_ptr& node, LoweringContext& ctx);
 void lower_expr_into(const ast_ptr& node, const NamedValue& target, LoweringContext& ctx);
 void lower_stmt(const ast_ptr& node, LoweringContext& ctx);
 std::vector<ast_ptr> collect_cell_elements(const ast_ptr& node);
+std::vector<ast_ptr> collect_cell_index_nodes(const ast_ptr& node, bool has_assignment_value);
 void ensure_fallthrough_to(LoweringContext& ctx, BasicBlock* target, const ast_ptr& node);
 
 void lower_return_stmt(const ast_ptr& node, LoweringContext& ctx) {
@@ -753,6 +754,19 @@ void lower_expr_into(const ast_ptr& node, const NamedValue& target, LoweringCont
             ctx.mark_defined(target);
             return;
         }
+        case node_cell_get: {
+            std::vector<NamedValue> inputs;
+            inputs.push_back(lower_expr_to_operand(node->branch[0], ctx));
+            for (const ast_ptr& index_node : collect_cell_index_nodes(node, false)) {
+                inputs.push_back(lower_expr_to_operand(index_node, ctx));
+            }
+
+            ctx.append_node<CallNode>(CallNode::Direct, "__ir_cell_get__",
+                                      std::vector<NamedValue>{target}, std::move(inputs),
+                                      source_location_from(node));
+            ctx.mark_defined(target);
+            return;
+        }
         case node_text:
         case node_char_mat: {
             const auto text = std::static_pointer_cast<textNode>(node);
@@ -893,6 +907,27 @@ std::vector<ast_ptr> collect_cell_elements(const ast_ptr& node) {
 
     items.push_back(node);
     return items;
+}
+
+std::vector<ast_ptr> collect_cell_index_nodes(const ast_ptr& node, bool has_assignment_value) {
+    std::vector<ast_ptr> indices;
+    if (!node || node->branch.size() <= 1) {
+        return indices;
+    }
+
+    const std::size_t end =
+        has_assignment_value ? node->branch.size() - 1 : node->branch.size();
+    for (std::size_t i = 1; i < end; ++i) {
+        const ast_ptr& branch = node->branch[i];
+        if (branch != nullptr &&
+            (branch->nodetype == node_list || branch->nodetype == node_horz_list)) {
+            indices.insert(indices.end(), branch->branch.begin(), branch->branch.end());
+            continue;
+        }
+        indices.push_back(branch);
+    }
+
+    return indices;
 }
 
 NamedValue build_switch_match_cond(const NamedValue& switch_value, const ast_ptr& match_node,
@@ -1123,6 +1158,28 @@ void lower_stmt(const ast_ptr& node, LoweringContext& ctx) {
                 throw std::runtime_error("non-SSA lower 目前只支持名字左值赋值。");
             }
             lower_expr_into(assign->v(), ctx.classify_name(assign->name()), ctx);
+            return;
+        }
+        case node_cell_set: {
+            if (node->branch.empty() || node->branch[0] == nullptr ||
+                node->branch[0]->nodetype != node_name) {
+                throw std::runtime_error("non-SSA lower 目前只支持名字基对象的元胞写入。");
+            }
+
+            const auto base_sym = std::static_pointer_cast<symref>(node->branch[0]);
+            const NamedValue target = ctx.classify_name(base_sym->name());
+
+            std::vector<NamedValue> inputs;
+            inputs.push_back(target);
+            for (const ast_ptr& index_node : collect_cell_index_nodes(node, true)) {
+                inputs.push_back(lower_expr_to_operand(index_node, ctx));
+            }
+            inputs.push_back(lower_expr_to_operand(node->branch.back(), ctx));
+
+            ctx.append_node<CallNode>(CallNode::Direct, "__ir_cell_set__",
+                                      std::vector<NamedValue>{target}, std::move(inputs),
+                                      source_location_from(node));
+            ctx.mark_defined(target);
             return;
         }
         case node_flow_if:
