@@ -185,15 +185,6 @@ baFunPtr require_internal_function_ptr(const char* name, baFunPtr& function_ptr)
     return function_ptr;
 }
 
-std::size_t required_builtin_out_count(const std::string& name) {
-    const auto [declared_nargin, declared_nargout] = lookup_builtin_function_narg(name);
-    (void)declared_nargin;
-    if (declared_nargout < 0) {
-        return 0;
-    }
-    return static_cast<std::size_t>(declared_nargout);
-}
-
 std::vector<Value::Object> invoke_function_ptr(const std::string& name, baFunPtr function_ptr,
                                                const std::vector<Value::Object>& in_args,
                                                std::size_t out_count, CallableType type) {
@@ -666,12 +657,8 @@ std::vector<Value> invoke_direct_call(const ExecutionState& caller_state,
 
     baFunPtr function_ptr = nullptr;
     if (try_lookup_builtin_function_cached(callee_name, function_ptr)) {
-        const std::size_t actual_out_count =
-            expected_out_count == 0
-                ? 0
-                : std::max(expected_out_count, required_builtin_out_count(callee_name));
-        return wrap_outputs(invoke_function_ptr(callee_name, function_ptr, in_args, actual_out_count,
-                                                CallableType::Builtin),
+        return wrap_outputs(invoke_function_ptr(callee_name, function_ptr, in_args,
+                                                expected_out_count, CallableType::Builtin),
                             expected_out_count, callee_name);
     }
 
@@ -704,12 +691,8 @@ std::vector<Value> invoke_indirect_call(const ExecutionState& caller_state,
             if (!try_lookup_builtin_function_cached(handle->data(), function_ptr)) {
                 throw std::runtime_error("找不到内置函数句柄 `" + handle->data() + "`。");
             }
-            const std::size_t actual_out_count =
-                expected_out_count == 0
-                    ? 0
-                    : std::max(expected_out_count, required_builtin_out_count(handle->data()));
             return wrap_outputs(
-                invoke_function_ptr(handle->data(), function_ptr, in_args, actual_out_count,
+                invoke_function_ptr(handle->data(), function_ptr, in_args, expected_out_count,
                                     CallableType::Builtin),
                 expected_out_count, handle->data());
         }
