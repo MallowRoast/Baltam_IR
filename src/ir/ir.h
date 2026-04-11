@@ -45,6 +45,7 @@ constexpr ValueId InvalidValueId = 0;
  */
 enum class UnaryOpType {
     Logic_Not,
+    UPlus,
     UMinus,
     Transpose,
     CTranspose,
@@ -57,14 +58,21 @@ enum class BinOpType {
     Add,
     Subtract,
     Eq,
+    Ge,
     Gt,
+    Le,
     Lt,
     Ne,
+    And,
     Or,
     Power,
+    LDivide,
     MLeftDivide,
     MPower,
+    MRightDivide,
+    Times,
     Multiply,
+    RDivide,
 };
 
 class IRNode;
@@ -240,6 +248,7 @@ public:
     using Op = UnaryOpType;
 
     static constexpr Op Logic_Not = Op::Logic_Not;
+    static constexpr Op UPlus = Op::UPlus;
     static constexpr Op UMinus = Op::UMinus;
     static constexpr Op Transpose = Op::Transpose;
     static constexpr Op CTranspose = Op::CTranspose;
@@ -267,14 +276,21 @@ public:
     static constexpr Op Add = Op::Add;
     static constexpr Op Subtract = Op::Subtract;
     static constexpr Op Eq = Op::Eq;
+    static constexpr Op Ge = Op::Ge;
     static constexpr Op Gt = Op::Gt;
+    static constexpr Op Le = Op::Le;
     static constexpr Op Lt = Op::Lt;
     static constexpr Op Ne = Op::Ne;
+    static constexpr Op And = Op::And;
     static constexpr Op Or = Op::Or;
     static constexpr Op Power = Op::Power;
+    static constexpr Op LDivide = Op::LDivide;
     static constexpr Op MLeftDivide = Op::MLeftDivide;
     static constexpr Op MPower = Op::MPower;
+    static constexpr Op MRightDivide = Op::MRightDivide;
+    static constexpr Op Times = Op::Times;
     static constexpr Op Multiply = Op::Multiply;
+    static constexpr Op RDivide = Op::RDivide;
 
     BinOpNode(Op op, NamedValue result, NamedValue lhs, NamedValue rhs,
               std::optional<SourceLocation> location = std::nullopt);

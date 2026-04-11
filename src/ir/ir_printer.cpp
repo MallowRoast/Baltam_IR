@@ -406,6 +406,8 @@ std::string unary_opcode(UnaryOpNode::Op op) {
     switch (op) {
         case UnaryOpNode::Logic_Not:
             return "not";
+        case UnaryOpNode::UPlus:
+            return "uplus";
         case UnaryOpNode::UMinus:
             return "uminus";
         case UnaryOpNode::Transpose:
@@ -425,22 +427,36 @@ std::string binop_opcode(BinOpNode::Op op) {
             return "minus";
         case BinOpNode::Eq:
             return "eq";
+        case BinOpNode::Ge:
+            return "ge";
         case BinOpNode::Gt:
             return "gt";
+        case BinOpNode::Le:
+            return "le";
         case BinOpNode::Lt:
             return "lt";
         case BinOpNode::Ne:
             return "ne";
+        case BinOpNode::And:
+            return "and";
         case BinOpNode::Or:
             return "or";
         case BinOpNode::Power:
             return "power";
+        case BinOpNode::LDivide:
+            return "ldivide";
         case BinOpNode::MLeftDivide:
             return "mldivide";
         case BinOpNode::MPower:
             return "mpower";
+        case BinOpNode::MRightDivide:
+            return "mrdivide";
+        case BinOpNode::Times:
+            return "times";
         case BinOpNode::Multiply:
             return "mtimes";
+        case BinOpNode::RDivide:
+            return "rdivide";
     }
 
     return "unknown.binop";

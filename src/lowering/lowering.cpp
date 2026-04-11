@@ -401,22 +401,36 @@ BinOpNode::Op lower_binop_type(nodeType type) {
             return BinOpNode::Subtract;
         case node_eq:
             return BinOpNode::Eq;
+        case node_geq:
+            return BinOpNode::Ge;
         case node_greater_than:
             return BinOpNode::Gt;
+        case node_leq:
+            return BinOpNode::Le;
         case node_less_than:
             return BinOpNode::Lt;
         case node_noteq:
             return BinOpNode::Ne;
+        case node_logic_and:
+            return BinOpNode::And;
         case node_logic_or:
             return BinOpNode::Or;
+        case node_element_ldiv:
+            return BinOpNode::LDivide;
         case node_element_power:
             return BinOpNode::Power;
         case node_left_divide:
             return BinOpNode::MLeftDivide;
         case node_power:
             return BinOpNode::MPower;
+        case node_right_divide:
+            return BinOpNode::MRightDivide;
+        case node_element_mul:
+            return BinOpNode::Times;
         case node_multiply:
             return BinOpNode::Multiply;
+        case node_element_rdiv:
+            return BinOpNode::RDivide;
         default:
             break;
     }
@@ -428,6 +442,8 @@ UnaryOpNode::Op lower_unaryop_type(nodeType type) {
     switch (type) {
         case node_logic_not:
             return UnaryOpNode::Logic_Not;
+        case node_uplus:
+            return UnaryOpNode::UPlus;
         case node_negative:
             return UnaryOpNode::UMinus;
         case node_transpose:
@@ -775,6 +791,7 @@ void lower_expr_into(const ast_ptr& node, const NamedValue& target, LoweringCont
             ctx.mark_defined(target);
             return;
         }
+        case node_uplus:
         case node_negative:
         case node_logic_not:
         case node_transpose:
@@ -787,14 +804,21 @@ void lower_expr_into(const ast_ptr& node, const NamedValue& target, LoweringCont
         }
         case node_add:
         case node_subtract:
+        case node_element_ldiv:
+        case node_element_mul:
+        case node_element_rdiv:
         case node_multiply:
         case node_left_divide:
+        case node_right_divide:
         case node_element_power:
         case node_power:
         case node_eq:
+        case node_geq:
         case node_greater_than:
+        case node_leq:
         case node_less_than:
         case node_noteq:
+        case node_logic_and:
         case node_logic_or: {
             const NamedValue lhs = lower_expr_to_operand(node->branch[0], ctx);
             const NamedValue rhs = lower_expr_to_operand(node->branch[1], ctx);

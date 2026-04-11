@@ -263,8 +263,14 @@ Value::Object eval_binop(BinOpNode::Op op, Value::Object lhs, Value::Object rhs)
         case BinOpNode::Eq:
             name = "eq";
             break;
+        case BinOpNode::Ge:
+            name = "ge";
+            break;
         case BinOpNode::Gt:
             name = "gt";
+            break;
+        case BinOpNode::Le:
+            name = "le";
             break;
         case BinOpNode::Lt:
             name = "lt";
@@ -272,11 +278,17 @@ Value::Object eval_binop(BinOpNode::Op op, Value::Object lhs, Value::Object rhs)
         case BinOpNode::Ne:
             name = "ne";
             break;
+        case BinOpNode::And:
+            name = "and";
+            break;
         case BinOpNode::Or:
             name = "or";
             break;
         case BinOpNode::Power:
             name = "power";
+            break;
+        case BinOpNode::LDivide:
+            name = "ldivide";
             break;
         case BinOpNode::MLeftDivide:
             name = "mldivide";
@@ -284,8 +296,17 @@ Value::Object eval_binop(BinOpNode::Op op, Value::Object lhs, Value::Object rhs)
         case BinOpNode::MPower:
             name = "mpower";
             break;
+        case BinOpNode::MRightDivide:
+            name = "mrdivide";
+            break;
+        case BinOpNode::Times:
+            name = "times";
+            break;
         case BinOpNode::Multiply:
             name = "mtimes";
+            break;
+        case BinOpNode::RDivide:
+            name = "rdivide";
             break;
     }
 
@@ -304,6 +325,9 @@ Value::Object eval_unaryop(UnaryOpNode::Op op, Value::Object operand) {
     switch (op) {
         case UnaryOpNode::Logic_Not:
             name = "not";
+            break;
+        case UnaryOpNode::UPlus:
+            name = "uplus";
             break;
         case UnaryOpNode::UMinus:
             name = "uminus";
