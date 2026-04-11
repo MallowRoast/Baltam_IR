@@ -1,26 +1,14 @@
 # Baltam_IR DefUse 说明
 
-## 当前背景
+本文说明当前 `DefUse` analysis 的数据模型和使用边界。
 
-当前仓库的实际 IR 主线已经是：
+当前实现位于：
 
-`AST -> non-SSA IR -> verify -> analyses -> untyped SSA IR -> verify -> print / execute`
+- [src/analysis/def_use.h](/home/zj/Desktop/Baltam_IR/src/analysis/def_use.h)
+- [src/analysis/def_use.cpp](/home/zj/Desktop/Baltam_IR/src/analysis/def_use.cpp)
+- [src/analysis/name_analysis_utils.h](/home/zj/Desktop/Baltam_IR/src/analysis/name_analysis_utils.h)
 
-当前已经落地的相关基础设施包括：
-
-- IR 容器定义在 [src/ir/ir.h](/home/zj/Desktop/Baltam_IR/src/ir/ir.h)
-- CFGAnalysis 定义在 [src/analysis/cfg_analysis.h](/home/zj/Desktop/Baltam_IR/src/analysis/cfg_analysis.h)
-- DefUse 定义在 [src/analysis/def_use.h](/home/zj/Desktop/Baltam_IR/src/analysis/def_use.h)
-- 名字级 def/use 提取辅助定义在 [src/analysis/name_analysis_utils.h](/home/zj/Desktop/Baltam_IR/src/analysis/name_analysis_utils.h)
-
-本文描述的 DefUse analysis 仍然运行在 `NonSSA` 上；当前 SSA 构建器会消费它的结果。
-
-也就是说，当前 DefUse analysis 不是在 SSA use-def 链上工作，而是建立在：
-
-- 已验证的显式 CFG
-- non-SSA 节点里的名字读写关系
-
-之上。
+它运行在已经通过 verifier 的 `NonSSA` CFG 上，分析对象是名字级读写关系，而不是 SSA value use-def 链。
 
 ## DefUse 的基础概念
 

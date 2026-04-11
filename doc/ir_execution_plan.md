@@ -1,35 +1,11 @@
 # Baltam_IR 执行链说明
 
-## 当前状态
+本文只记录当前仓库里已经跑通的执行链，以及它在整体 IR 流程中的定位。
 
-当前仓库已经有两条实际存在的链路。
+当前实际存在两条链路：
 
-CLI 主线：
-
-`parse -> lower(non-SSA) -> verify -> analyses -> construct_untyped_ssa -> verify -> print`
-
-测试执行链：
-
-`parse -> lower(non-SSA) -> verify -> construct_untyped_ssa -> verify -> execute(UntypedSSA)`
-
-也就是说，仓库已经不再是“只有 IR、不具备执行能力”的状态；只是执行入口目前主要在测试侧，而不是 `main.cpp`。
-
-## 当前主线包含什么
-
-当前正式主线已经包含：
-
-- non-SSA lowering
-- CFG / Dominator / DominanceFrontier / Liveness / DefUse
-- untyped SSA 构建
-- 分阶段 verifier
-- non-SSA / untyped SSA 打印
-
-对应实现分别位于：
-
-- [src/lowering/lowering.cpp](/home/zj/Desktop/Baltam_IR/src/lowering/lowering.cpp)
-- [src/analysis](/home/zj/Desktop/Baltam_IR/src/analysis): 目录中的 5 个基础 analysis 与 verifier
-- [src/optimizer/construct_untyped_ssa.cpp](/home/zj/Desktop/Baltam_IR/src/optimizer/construct_untyped_ssa.cpp)
-- [src/ir/ir_printer.cpp](/home/zj/Desktop/Baltam_IR/src/ir/ir_printer.cpp)
+- CLI 主线：`parse -> lower(non-SSA) -> verify -> analyses -> construct_untyped_ssa -> verify -> print`
+- 测试执行链：`parse -> lower(non-SSA) -> verify -> construct_untyped_ssa -> verify -> execute(UntypedSSA)`
 
 ## 当前执行链的定位
 

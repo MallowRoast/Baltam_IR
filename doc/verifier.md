@@ -1,41 +1,16 @@
 # Baltam_IR Verifier 说明
 
-## 当前状态
-
 当前 verifier 位于：
 
 - [src/analysis/verifier.h](/home/zj/Desktop/Baltam_IR/src/analysis/verifier.h)
 - [src/analysis/verifier.cpp](/home/zj/Desktop/Baltam_IR/src/analysis/verifier.cpp)
 
-它现在已经面向两种正式 stage：
+它当前面向两种正式 stage：
 
 - `NonSSA`
 - `UntypedSSA`
 
-对应地，当前 verifier 会校验：
-
-- `Module`
-- `Function`
-- `BasicBlock`
-- `NonSSANode`
-- `UntypedSSANode`
-
-`TypedSSA` 当前仍未支持。
-
-## 当前主线中的位置
-
-当前 CLI 主线是：
-
-`parse -> lower(non-SSA) -> verify -> analyses -> construct_untyped_ssa -> verify -> print`
-
-测试执行链则是：
-
-`parse -> lower(non-SSA) -> verify -> construct_untyped_ssa -> verify -> execute`
-
-也就是说，verifier 现在不是“打印前的一次 non-SSA 结构检查”，而是已经覆盖：
-
-- lower 后的 non-SSA
-- SSA 构建后的 untyped SSA
+它负责校验 `Module / Function / BasicBlock / NonSSANode / UntypedSSANode`，是当前 IR 主线里的基础结构护栏。`TypedSSA` 仍未接入。
 
 ## 当前 verifier 覆盖的检查
 

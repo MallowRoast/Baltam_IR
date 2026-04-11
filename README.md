@@ -1,94 +1,55 @@
 # Baltam_IR
 
-`Baltam_IR` 当前处于 IR 前端、中端和 SSA 执行基础设施并行落地阶段。
+`Baltam_IR` 当前维护的是一条以 `NonSSA` 和 `UntypedSSA` 为中心的 IR 主线：
 
-当前仓库已经跑通的主线是：
+`M 源码 -> AST -> NonSSA -> verify -> analyses -> UntypedSSA -> verify -> print / execute`
 
-`M 源码 -> AST -> non-SSA IR -> verify -> analyses -> untyped SSA IR -> verify -> print`
+目前仓库已经具备：
 
-另外，测试里已经覆盖了一条 SSA 执行链：
+- AST 到 `NonSSA` 的 lowering
+- 显式 CFG 容器与分阶段 verifier
+- `CFG / DominatorTree / DominanceFrontier / Liveness / DefUse`
+- `NonSSA -> UntypedSSA` 构建
+- non-SSA / untyped SSA 文本打印
+- 面向 `UntypedSSA` 的解释执行
 
-`parse -> lower(non-SSA) -> verify -> construct_untyped_ssa -> verify -> execute(UntypedSSA)`
+## 核心模块
 
-## 当前已落地的部分
+- [src/ir/ir.h](/home/zj/Desktop/Baltam_IR/src/ir/ir.h)
+  统一 IR 定义，包含 `NonSSA` 与 `UntypedSSA`
+- [src/lowering/lowering.cpp](/home/zj/Desktop/Baltam_IR/src/lowering/lowering.cpp)
+  AST 到 non-SSA 的 lowering
+- [src/analysis](/home/zj/Desktop/Baltam_IR/src/analysis)
+  CFG 与名字级 analysis、verifier
+- [src/optimizer/construct_untyped_ssa.cpp](/home/zj/Desktop/Baltam_IR/src/optimizer/construct_untyped_ssa.cpp)
+  `NonSSA -> UntypedSSA`
+- [src/interpreter/interpreter.cpp](/home/zj/Desktop/Baltam_IR/src/interpreter/interpreter.cpp)
+  `UntypedSSA` 解释器
+- [src/ir/ir_printer.cpp](/home/zj/Desktop/Baltam_IR/src/ir/ir_printer.cpp)
+  IR 打印器
 
-- 统一的 IR 定义：
-  - [src/ir/ir.h](/home/zj/Desktop/Baltam_IR/src/ir/ir.h)
-- 显式 CFG 容器：
-  - `Module`
-  - `Function`
-  - `BasicBlock`
-- non-SSA 节点体系：
-  - `NumberNode`
-  - `TextNode`
-  - `AssignNode`
-  - `UnaryOpNode`
-  - `BinOpNode`
-  - `CallNode`
-  - `CondJumpNode`
-  - `JumpNode`
-  - `ReturnNode`
-- untyped SSA 节点体系：
-  - `SSANumberNode`
-  - `SSATextNode`
-  - `SSAUndefNode`
-  - `SSAPhiNode`
-  - `SSACopyNode`
-  - `SSAUnaryOpNode`
-  - `SSABinOpNode`
-  - `SSACallNode`
-  - `SSACondJumpNode`
-  - `SSAJumpNode`
-  - `SSAReturnNode`
-- AST lowering：
-  - [src/lowering/lowering.cpp](/home/zj/Desktop/Baltam_IR/src/lowering/lowering.cpp)
-- 5 个基础 analysis：
-  - [src/analysis/cfg_analysis.cpp](/home/zj/Desktop/Baltam_IR/src/analysis/cfg_analysis.cpp)
-  - [src/analysis/dominator_tree.cpp](/home/zj/Desktop/Baltam_IR/src/analysis/dominator_tree.cpp)
-  - [src/analysis/dominance_frontier.cpp](/home/zj/Desktop/Baltam_IR/src/analysis/dominance_frontier.cpp)
-  - [src/analysis/liveness.cpp](/home/zj/Desktop/Baltam_IR/src/analysis/liveness.cpp)
-  - [src/analysis/def_use.cpp](/home/zj/Desktop/Baltam_IR/src/analysis/def_use.cpp)
-- non-SSA 到 untyped SSA 的构建器：
-  - [src/optimizer/construct_untyped_ssa.cpp](/home/zj/Desktop/Baltam_IR/src/optimizer/construct_untyped_ssa.cpp)
-- LLVM 风格文本打印：
-  - [src/ir/ir_printer.cpp](/home/zj/Desktop/Baltam_IR/src/ir/ir_printer.cpp)
-- 分阶段 verifier：
-  - [src/analysis/verifier.cpp](/home/zj/Desktop/Baltam_IR/src/analysis/verifier.cpp)
-- 面向 `UntypedSSA` 的解释器：
-  - [src/interpreter/interpreter.cpp](/home/zj/Desktop/Baltam_IR/src/interpreter/interpreter.cpp)
-- AnalysisManager / PassManager 骨架：
-  - [src/analysis/analysis_manager.h](/home/zj/Desktop/Baltam_IR/src/analysis/analysis_manager.h)
-  - [src/optimizer/pass_manager.h](/home/zj/Desktop/Baltam_IR/src/optimizer/pass_manager.h)
+## 当前范围
 
-## 当前还没完成或没接入主入口的部分
+当前已经覆盖的主要语义包括：
+
+- 基础赋值、常量、文本、一元/二元表达式
+- 直接调用、间接调用、匿名函数
+- `if / elseif / else`
+- `switch / case / otherwise`
+- `for / while / break / continue`
+- 短路逻辑
+- cell 字面量、cell 取值与写回
+- 圆括号索引写回与运行时分派
+- `varargin / varargout / nargin / nargout`
+- `end` 在索引表达式中的 lowering 与执行
+
+当前仍未完成或未接入主入口的部分包括：
 
 - `TypedSSA`
-- 正式优化 pass
+- 正式优化 pass 管线
 - profile 基础设施
 - LLVM IR lowering / JIT
-- CLI 级别的 `execute` 入口
-
-## 当前 IR
-
-当前仓库已经在同一套容器层上同时使用两种 IR stage：
-
-- `NonSSA`
-  - 用 `NamedValue` 传递源码变量名和 lowering 临时量名
-  - 仍允许同名值被多次定义
-  - 是 lowering 的直接输出
-- `UntypedSSA`
-  - 用 `ValueId / ValueRef` 表达显式值流
-  - `phi` 放在 `BasicBlock::phi_nodes()`
-  - 是当前中端分析之后的统一执行和打印对象
-
-容器层 `Module / Function / BasicBlock` 在两个 stage 之间复用。
-
-当前职责边界也已经比较明确：
-
-- lowering 只负责生成 `NonSSA`
-- `optimizer::construct_untyped_ssa_module(...)` 负责把 `NonSSA` 重写成新的 `UntypedSSA` 模块
-- verifier 和 printer 同时支持这两个 stage
-- interpreter 目前只执行 `UntypedSSA`
+- CLI 级别的执行入口
 
 ## 构建
 
@@ -97,13 +58,21 @@ cmake -S . -B build
 cmake --build build
 ```
 
-主产物现在是库目标 `BALTAM_IR`。
+主产物是库目标 `BALTAM_IR`。测试打开后可运行：
+
+```bash
+ctest --test-dir build
+```
+
+如果只验证单个脚本回归，可直接运行对应测试，例如：
+
+```bash
+ctest --test-dir build --output-on-failure -R '^test_test8$'
+```
 
 ## 作为库使用
 
-当前不再额外提供把 `.m` 文件一次性打包成完整 IR pipeline 的高层 helper。
-
-调用方直接按底层阶段接口组合：
+当前推荐直接按阶段接口组合：
 
 1. `bt_ast_interface::parse_mfile(...)`
 2. `lower_parsed_units_to_ir(...)`
@@ -111,95 +80,19 @@ cmake --build build
 4. `optimizer::construct_untyped_ssa_module(...)`
 5. `analysis::verify_module_or_throw(...)`
 
-调用这些接口前，调用方仍需先执行 `bt_ast_interface::initialize()`，结束后再执行 `bt_ast_interface::finalize()`。
+调用方在进入这条链路前仍需先执行 `bt_ast_interface::initialize()`，结束后执行
+`bt_ast_interface::finalize()`。
 
-## 测试
+## 文档
 
-打开 `BUILD_TEST=ON` 后，可直接运行：
+`README` 只保留仓库总览。专题说明放在 [doc](/home/zj/Desktop/Baltam_IR/doc)：
 
-```bash
-ctest --test-dir build
-```
+- analysis / verifier / SSA / interpreter 的现状说明
+- 短路逻辑、可变参数等专题设计记录
+- `UntypedSSA` 优化与 JIT 的后续方向
 
-当前和 IR 主线最相关的测试包括：
+## 已知边界
 
-- [test/construct_untyped_ssa_test.cpp](/home/zj/Desktop/Baltam_IR/test/construct_untyped_ssa_test.cpp)
-- [test/interpreter_test.cpp](/home/zj/Desktop/Baltam_IR/test/interpreter_test.cpp)
-- [test/test_test0.cpp](/home/zj/Desktop/Baltam_IR/test/test_test0.cpp)
-- [test/test_test1.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1.cpp)
-- [test/test_test1_2.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1_2.cpp)
-- [test/test_test1_3.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1_3.cpp)
-- [test/test_test1_4.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1_4.cpp)
-- [test/test_test1_5.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1_5.cpp)
-
-m 脚本回归测试统一放在 `test/test_*.cpp`；
-每适配一个 `.m` 脚本，就在 `test/` 下新增一个对应的 `test.cpp`，重新配置后即可被 `ctest` 发现。
-
-## 当前支持的 lowering / 执行范围
-
-当前 non-SSA lowering 已覆盖一批基础语法：
-
-- 赋值
-- 一元和二元表达式
-- 直接调用和间接调用
-- `if / elseif / else`
-- `switch / case / otherwise`
-- `for`
-- `while`
-- `break`
-- `continue`
-- 匿名函数
-- 横向/纵向列表
-- 元胞字面量
-
-当前 `for` 语义通过运行时 helper 表达：
-
-- `foreach_init`
-- `foreach_iterate`
-
-当前 `UntypedSSA` 解释器已支持执行：
-
-- 常量、文本、`undef`
-- `copy`
-- 一元/二元运算
-- `phi`
-- 条件跳转、无条件跳转、返回
-- 直接调用和间接调用
-- 一部分 lowering helper / 运行时入口：
-  - `__ir_make_cell__`
-  - `__ir_make_function_handle__`
-- 已知 internal function：
-  - `if_expr`
-  - `switch_case_match`
-  - `foreach_init`
-  - `foreach_iterate`
-
-## 当前仓库布局
-
-- [src/ir/ir.h](/home/zj/Desktop/Baltam_IR/src/ir/ir.h)
-  当前唯一正式 IR 定义
-- [src/ir/ir.cpp](/home/zj/Desktop/Baltam_IR/src/ir/ir.cpp)
-  IR 实现
-- [src/ir/ir_printer.cpp](/home/zj/Desktop/Baltam_IR/src/ir/ir_printer.cpp)
-  non-SSA / untyped SSA 打印器
-- [src/lowering/lowering.cpp](/home/zj/Desktop/Baltam_IR/src/lowering/lowering.cpp)
-  AST 到 non-SSA IR 的 lowering
-- [src/analysis/verifier.cpp](/home/zj/Desktop/Baltam_IR/src/analysis/verifier.cpp)
-  分阶段 verifier
-- [src/optimizer/construct_untyped_ssa.cpp](/home/zj/Desktop/Baltam_IR/src/optimizer/construct_untyped_ssa.cpp)
-  non-SSA 到 untyped SSA 的构建器
-- [src/interpreter/interpreter.cpp](/home/zj/Desktop/Baltam_IR/src/interpreter/interpreter.cpp)
-  `UntypedSSA` 解释器
-- [src/analysis/analysis_manager.h](/home/zj/Desktop/Baltam_IR/src/analysis/analysis_manager.h)
-  analysis 缓存框架
-- [src/optimizer/pass_manager.h](/home/zj/Desktop/Baltam_IR/src/optimizer/pass_manager.h)
-  pass manager 骨架
-
-## 下一步
-
-当前更合理的路线是：
-
-1. 在 `UntypedSSA` 上补正式优化 pass
-2. 扩大解释器覆盖范围和端到端测试，并决定是否给 CLI 加执行入口
-3. 明确 `TypedSSA` 和 profile 方案
-4. 再进入 LLVM IR lowering / JIT
+- `test3` 仍依赖 runtime 工作区语义，当前解释器没有完整同步这套模型
+- `test7` 仍缺复杂左值与短路组合路径的 lowering
+- 一部分文档仍保留历史设计背景，但已去掉与 `README` 重复的总览信息

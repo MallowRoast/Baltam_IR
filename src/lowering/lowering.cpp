@@ -486,9 +486,109 @@ NumberNode::NumberValue parse_number_value(const std::shared_ptr<numval>& number
 NamedValue lower_expr_to_operand(const ast_ptr& node, LoweringContext& ctx);
 void lower_expr_into(const ast_ptr& node, const NamedValue& target, LoweringContext& ctx);
 void lower_stmt(const ast_ptr& node, LoweringContext& ctx);
+bool should_treat_symref_as_user_value(const std::shared_ptr<symref>& sym,
+                                       const LoweringContext& ctx);
 std::vector<ast_ptr> collect_cell_elements(const ast_ptr& node);
 std::vector<ast_ptr> collect_cell_index_nodes(const ast_ptr& node, bool has_assignment_value);
 void ensure_fallthrough_to(LoweringContext& ctx, BasicBlock* target, const ast_ptr& node);
+
+struct MagicEndIndexInfo {
+    NamedValue base;
+    std::size_t index_position = 0;
+    std::size_t total_index_count = 0;
+};
+
+MagicEndIndexInfo resolve_magic_end_index_info(const ast* end_node, LoweringContext& ctx) {
+    const ast* index_root = nullptr;
+    for (const ast* cursor = end_node != nullptr ? end_node->parent : nullptr; cursor != nullptr;
+         cursor = cursor->parent) {
+        if (cursor->nodetype == node_cell_get || cursor->nodetype == node_cell_set) {
+            index_root = cursor;
+            break;
+        }
+        if (cursor->nodetype == node_multiple_func) {
+            const ast_ptr& callee_node = cursor->branch.size() > 1 ? cursor->branch[1] : ast_ptr{};
+            if (callee_node != nullptr && callee_node->nodetype == node_name &&
+                should_treat_symref_as_user_value(std::static_pointer_cast<symref>(callee_node),
+                                                  ctx)) {
+                index_root = cursor;
+                break;
+            }
+        }
+    }
+
+    if (index_root == nullptr) {
+        throw std::runtime_error("non-SSA lower `end` 只能出现在索引表达式中。");
+    }
+
+    MagicEndIndexInfo info;
+    std::vector<const ast*> index_nodes;
+    const auto append_index_nodes = [&index_nodes](const ast* node) {
+        if (node == nullptr) {
+            return;
+        }
+
+        if (node->nodetype == node_list || node->nodetype == node_horz_list) {
+            for (const ast_ptr& branch : node->branch) {
+                if (branch != nullptr) {
+                    index_nodes.push_back(branch.get());
+                }
+            }
+            return;
+        }
+
+        index_nodes.push_back(node);
+    };
+
+    switch (index_root->nodetype) {
+        case node_cell_get:
+        case node_cell_set: {
+            const ast_ptr& base_node = index_root->branch[0];
+            if (base_node != nullptr && base_node->nodetype == node_name &&
+                should_treat_symref_as_user_value(std::static_pointer_cast<symref>(base_node), ctx)) {
+                info.base = ctx.classify_name(std::static_pointer_cast<symref>(base_node)->name());
+            } else {
+                info.base = lower_expr_to_operand(base_node, ctx);
+            }
+            append_index_nodes(index_root->branch[1].get());
+            break;
+        }
+        case node_multiple_func: {
+            const ast_ptr& callee_node = index_root->branch[1];
+            if (callee_node->nodetype != node_name) {
+                break;
+            }
+            const auto callee_sym = std::static_pointer_cast<symref>(callee_node);
+            if (!should_treat_symref_as_user_value(callee_sym, ctx)) {
+                break;
+            }
+            info.base = ctx.classify_name(callee_sym->name());
+            append_index_nodes(index_root->branch[2].get());
+            break;
+        }
+        default:
+            break;
+    }
+
+    if (index_nodes.empty()) {
+        throw std::runtime_error("non-SSA lower 无法为 `end` 找到索引表达式列表。");
+    }
+
+    for (std::size_t i = 0; i < index_nodes.size(); ++i) {
+        for (const ast* cursor = end_node; cursor != nullptr; cursor = cursor->parent) {
+            if (cursor == index_nodes[i]) {
+                info.index_position = i;
+                info.total_index_count = index_nodes.size();
+                return info;
+            }
+            if (cursor == index_root) {
+                break;
+            }
+        }
+    }
+
+    throw std::runtime_error("non-SSA lower 无法从原 AST 中定位 `end` 的索引位置。");
+}
 
 void lower_return_stmt(const ast_ptr& node, LoweringContext& ctx) {
     if (ctx.function == nullptr || ctx.current_block == nullptr) {
@@ -834,7 +934,6 @@ void lower_expr_into(const ast_ptr& node, const NamedValue& target, LoweringCont
         case node_multiple_func: {
             const auto call = std::static_pointer_cast<multipleFuncCall>(node);
             std::vector<NamedValue> inputs = lower_call_inputs(call->in_args(), ctx);
-
             // `A(...)` 在表达式位置不能提前 lower 成固定的 `block get`：
             // 它既可能是函数/函数句柄调用，也可能是矩阵/元胞等对象的圆括号取值。
             // 已知是“变量值”的裸名字会先 lower 成 indirect call；
@@ -842,6 +941,30 @@ void lower_expr_into(const ast_ptr& node, const NamedValue& target, LoweringCont
             const CallNode::CalleeType callee_type = lower_multiple_func_callee_type(call, ctx);
             ctx.append_node<CallNode>(callee_type, call->name(), std::vector<NamedValue>{target},
                                       std::move(inputs), source_location_from(node));
+            ctx.mark_defined(target);
+            return;
+        }
+        case node_magic_end: {
+            const MagicEndIndexInfo index_info = resolve_magic_end_index_info(node.get(), ctx);
+            const NamedValue index_position_literal =
+                ctx.create_hidden_name("magic_end.index.literal");
+            ctx.append_node<NumberNode>(
+                index_position_literal, static_cast<std::int64_t>(index_info.index_position),
+                source_location_from(node));
+            ctx.mark_defined(index_position_literal);
+
+            const NamedValue total_index_count_literal =
+                ctx.create_hidden_name("magic_end.total.literal");
+            ctx.append_node<NumberNode>(
+                total_index_count_literal, static_cast<std::int64_t>(index_info.total_index_count),
+                source_location_from(node));
+            ctx.mark_defined(total_index_count_literal);
+
+            ctx.append_node<CallNode>(
+                CallNode::Direct, "magic_end", std::vector<NamedValue>{target},
+                std::vector<NamedValue>{index_info.base, index_position_literal,
+                                        total_index_count_literal},
+                source_location_from(node));
             ctx.mark_defined(target);
             return;
         }

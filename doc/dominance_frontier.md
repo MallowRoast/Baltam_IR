@@ -1,26 +1,13 @@
 # Baltam_IR DominanceFrontier 说明
 
-## 当前背景
+本文说明当前 `DominanceFrontier` analysis 的定义、算法前提和使用位置。
 
-当前仓库的实际 IR 主线已经是：
+当前实现位于：
 
-`AST -> non-SSA IR -> verify -> analyses -> untyped SSA IR -> verify -> print / execute`
+- [src/analysis/dominance_frontier.h](/home/zj/Desktop/Baltam_IR/src/analysis/dominance_frontier.h)
+- [src/analysis/dominance_frontier.cpp](/home/zj/Desktop/Baltam_IR/src/analysis/dominance_frontier.cpp)
 
-当前已经落地的相关基础设施包括：
-
-- IR 容器定义在 [src/ir/ir.h](/home/zj/Desktop/Baltam_IR/src/ir/ir.h)
-- CFGAnalysis 定义在 [src/analysis/cfg_analysis.h](/home/zj/Desktop/Baltam_IR/src/analysis/cfg_analysis.h)
-- DominatorTree 定义在 [src/analysis/dominator_tree.h](/home/zj/Desktop/Baltam_IR/src/analysis/dominator_tree.h)
-- DominanceFrontier 定义在 [src/analysis/dominance_frontier.h](/home/zj/Desktop/Baltam_IR/src/analysis/dominance_frontier.h)
-
-本文描述的 DominanceFrontier 仍然运行在 `NonSSA` CFG 上，并直接服务于当前 untyped SSA 构建器。
-
-也就是说，当前 dominance frontier analysis 不是孤立计算的，而是建立在：
-
-- 已验证的显式 CFG
-- 已计算好的支配关系
-
-之上。
+它运行在已经通过 verifier 的 `NonSSA` CFG 上，依赖 `CFGAnalysis` 与 `DominatorTree` 的结果，直接服务于当前 SSA 构建器。
 
 ## DominanceFrontier 的基础概念
 

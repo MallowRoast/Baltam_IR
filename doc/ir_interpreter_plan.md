@@ -1,17 +1,11 @@
 # Baltam_IR 解释器说明
 
-## 当前状态
-
 当前仓库已经有一版启用中的 IR 解释器：
 
 - [src/interpreter/interpreter.h](/home/zj/Desktop/Baltam_IR/src/interpreter/interpreter.h)
 - [src/interpreter/interpreter.cpp](/home/zj/Desktop/Baltam_IR/src/interpreter/interpreter.cpp)
 
-它当前面向的不是旧 hybrid/value-based IR，而是：
-
-- `UntypedSSA`
-
-当前 CLI 主入口还没有直接调用解释器，但测试里已经覆盖：
+它当前面向的是 `UntypedSSA`。CLI 主入口还没有直接调用解释器，但测试已经覆盖：
 
 `parse -> lower(non-SSA) -> verify -> construct_untyped_ssa -> verify -> execute(UntypedSSA)`
 

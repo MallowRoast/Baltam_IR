@@ -1,27 +1,17 @@
 # Baltam_IR SSA 方案整理
 
-## 当前架构
+本文记录当前仓库的 SSA 分层现状，以及后续 `TypedSSA` 的位置。
 
-当前仓库的实际 IR 主线已经是：
+当前主线已经稳定到：
 
-`M 源码 -> AST -> non-SSA IR -> analyses -> untyped SSA IR`
+`M 源码 -> AST -> NonSSA -> analyses -> UntypedSSA`
 
-对应实现包括：
+对应实现主要在：
 
-- non-SSA lowering：
-  - [src/lowering/lowering.cpp](/home/zj/Desktop/Baltam_IR/src/lowering/lowering.cpp)
-- 统一 IR 定义：
-  - [src/ir/ir.h](/home/zj/Desktop/Baltam_IR/src/ir/ir.h)
-- 5 个基础 analysis：
-  - [src/analysis/cfg_analysis.cpp](/home/zj/Desktop/Baltam_IR/src/analysis/cfg_analysis.cpp)
-  - [src/analysis/dominator_tree.cpp](/home/zj/Desktop/Baltam_IR/src/analysis/dominator_tree.cpp)
-  - [src/analysis/dominance_frontier.cpp](/home/zj/Desktop/Baltam_IR/src/analysis/dominance_frontier.cpp)
-  - [src/analysis/liveness.cpp](/home/zj/Desktop/Baltam_IR/src/analysis/liveness.cpp)
-  - [src/analysis/def_use.cpp](/home/zj/Desktop/Baltam_IR/src/analysis/def_use.cpp)
-- SSA 构建器：
-  - [src/optimizer/construct_untyped_ssa.cpp](/home/zj/Desktop/Baltam_IR/src/optimizer/construct_untyped_ssa.cpp)
-
-也就是说，当前仓库已经不再是“只有 non-SSA，没有正式 SSA”的状态。
+- [src/lowering/lowering.cpp](/home/zj/Desktop/Baltam_IR/src/lowering/lowering.cpp)
+- [src/analysis](/home/zj/Desktop/Baltam_IR/src/analysis)
+- [src/optimizer/construct_untyped_ssa.cpp](/home/zj/Desktop/Baltam_IR/src/optimizer/construct_untyped_ssa.cpp)
+- [src/ir/ir.h](/home/zj/Desktop/Baltam_IR/src/ir/ir.h)
 
 ## 当前已落地的 SSA 能力
 

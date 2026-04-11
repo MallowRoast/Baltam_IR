@@ -1,29 +1,8 @@
 # Baltam_IR JIT 方案整理
 
-## 当前结论
+本文记录当前仓库与 JIT 的距离，以及为什么它仍然不是下一步。
 
-JIT 仍然不是当前阶段的下一步。
-
-当前仓库已经走到了：
-
-`non-SSA IR -> analyses -> untyped SSA IR -> verify -> print / execute`
-
-但离适合进入 JIT 还有明显距离。
-
-## 当前已经具备什么
-
-当前已经有：
-
-- AST parsing
-- non-SSA lowering
-- 5 个基础 analysis
-- untyped SSA 节点体系
-- non-SSA 到 untyped SSA 的构建器
-- 分阶段 verifier
-- untyped SSA 打印
-- untyped SSA 解释器
-
-也就是说，当前缺的已经不再是“IR 地基”。
+当前主线已经具备 `NonSSA -> UntypedSSA -> print / execute`，但还没有进入适合做 JIT 的阶段。
 
 ## 当前还缺什么
 

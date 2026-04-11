@@ -1,25 +1,12 @@
 # Baltam_IR UntypedSSA 优化 Pass 规划
 
-## 当前结论
+本文只讨论当前阶段为什么优先在 `UntypedSSA` 上补优化 pass，以及第一批 pass 的推荐顺序。
 
-当前更合适的优化主战场是：
+前提很简单：
 
-`UntypedSSA`
-
-而不是直接跳到 `TypedSSA` 或 LLVM IR。
-
-原因很直接：
-
-- `UntypedSSA` 已经是当前统一的执行和打印对象
+- `UntypedSSA` 已经是当前统一的打印和执行对象
 - 解释器已经能作为语义回归基线
-- 当前 5 个基础 analysis 主要仍服务于 `NonSSA -> UntypedSSA` 构建
-- `TypedSSA`、LLVM IR lowering 和 JIT runtime 还没有正式落地
-
-因此当前阶段最值得推进的是：
-
-1. 继续扩充 `UntypedSSA` 解释器和端到端回归
-2. 在 `UntypedSSA` 上增加类型无关、结构导向的优化 pass
-3. 在此基础上再设计 profile、`TypedSSA` 和 LLVM IR 路线
+- `TypedSSA`、LLVM IR lowering 和 JIT 还没有正式落地
 
 ## 当前 `UntypedSSA` 上适合优先优化的对象
 

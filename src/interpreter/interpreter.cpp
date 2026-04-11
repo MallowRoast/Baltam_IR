@@ -552,6 +552,28 @@ std::vector<Value> invoke_direct_call(const ExecutionState& caller_state,
                                       const std::string& callee_name,
                                       const std::vector<Value::Object>& in_args,
                                       std::size_t expected_out_count) {
+    if (callee_name == "magic_end") {
+        if (in_args.size() != 3 || in_args[0] == nullptr || in_args[1] == nullptr ||
+            in_args[2] == nullptr) {
+            throw std::runtime_error("调用 `magic_end` 时参数不合法。");
+        }
+
+        std::vector<Value::Object> coerced_args = in_args;
+        const int index_position = static_cast<int>(in_args[1]->as_int());
+        const int total_index_count = static_cast<int>(in_args[2]->as_int());
+        coerced_args[1] = std::make_shared<ba_obj>(index_position);
+        coerced_args[2] = std::make_shared<ba_obj>(total_index_count);
+
+        baFunPtr function_ptr = nullptr;
+        if (try_lookup_builtin_function_cached(callee_name, function_ptr)) {
+            return wrap_outputs(
+                invoke_function_ptr(callee_name, function_ptr, coerced_args, expected_out_count,
+                                    CallableType::Builtin),
+                expected_out_count, callee_name);
+        }
+        throw std::runtime_error("找不到可调用的函数 `" + callee_name + "`。");
+    }
+
     if (callee_name == "__ir_make_cell__") {
         if (expected_out_count == 0) {
             return {};

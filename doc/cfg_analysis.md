@@ -1,27 +1,13 @@
-# Baltam_IR CFGAnalysis 方案
+# Baltam_IR CFGAnalysis 说明
 
-## 当前背景
+本文只说明当前仓库里 `CFGAnalysis` 的职责、输入前提和结果结构。
 
-当前仓库的实际 IR 主线已经是：
+当前实现位于：
 
-`AST -> non-SSA IR -> verify -> analyses -> untyped SSA IR -> verify -> print / execute`
+- [src/analysis/cfg_analysis.h](/home/zj/Desktop/Baltam_IR/src/analysis/cfg_analysis.h)
+- [src/analysis/cfg_analysis.cpp](/home/zj/Desktop/Baltam_IR/src/analysis/cfg_analysis.cpp)
 
-其中：
-
-- IR 容器定义在 [src/ir/ir.h](/home/zj/Desktop/Baltam_IR/src/ir/ir.h)
-- verifier 定义在 [src/analysis/verifier.h](/home/zj/Desktop/Baltam_IR/src/analysis/verifier.h)
-- verifier 实现在 [src/analysis/verifier.cpp](/home/zj/Desktop/Baltam_IR/src/analysis/verifier.cpp)
-- analysis 缓存骨架定义在 [src/analysis/analysis_manager.h](/home/zj/Desktop/Baltam_IR/src/analysis/analysis_manager.h)
-
-当前 IR 已经是显式 CFG 形式：
-
-- `Function` 持有 `entry_block()` 和 `blocks()`
-- `BasicBlock` 持有 `predecessors()` 和 `successors()`
-- verifier 已负责检查 CFG 结构是否 basic well-formed
-
-本文讨论的 CFGAnalysis 仍运行在 `NonSSA` 函数上，并作为当前 untyped SSA 构建链路的前置 analysis。
-
-因此，CFGAnalysis 不应重新“推导 CFG”，而应在已验证的显式 CFG 之上，提取后续 analysis 复用的遍历信息和索引信息。
+它运行在已经通过 verifier 的 `NonSSA` 函数上，直接读取显式 CFG，不负责重新推导或修复控制流边。
 
 ## 目标与定位
 
