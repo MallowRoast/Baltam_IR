@@ -517,6 +517,61 @@ void test_varargin_and_nargin_binding() {
     expect_output_int(result, 33, "varargin packing and nargin");
 }
 
+void test_varargout_and_nargout_binding() {
+    Module module("varargout_nargout_module", "test/m/varargout_nargout_module.m",
+                  Module::M_Function);
+
+    Function* callee = module.create_function("report_outputs", Function::LocalFunction);
+    callee->set_stage(IRNode::UntypedSSA);
+    callee->set_output_names({"fixed", "varargout"});
+    callee->set_has_varargout(true);
+    BasicBlock* callee_entry = callee->create_block("entry");
+    callee->set_entry_block(callee_entry);
+
+    const ValueId count = callee->create_value("count");
+    const ValueId fixed = callee->create_value("fixed");
+    const ValueId first_extra_index = callee->create_value("first_extra_index");
+    const ValueId varargout_seed = callee->create_value("varargout");
+    const ValueId updated_varargout = callee->create_value("varargout");
+
+    callee_entry->append_instruction(callee->create_node<SSACallNode>(
+        SSACallNode::Callee{SSACallNode::Callee::Direct, "nargout", ValueRef{}},
+        std::vector<ValueId>{count}, std::vector<ValueRef>{}));
+    callee_entry->append_instruction(callee->create_node<SSACopyNode>(fixed, ValueRef{count}));
+    callee_entry->append_instruction(callee->create_node<SSANumberNode>(
+        first_extra_index, SSANumberNode::NumberValue{std::int64_t{1}}));
+    callee_entry->append_instruction(callee->create_node<SSAUndefNode>(varargout_seed));
+    callee_entry->append_instruction(callee->create_node<SSACallNode>(
+        SSACallNode::Callee{SSACallNode::Callee::Direct, "__ir_cell_set__", ValueRef{}},
+        std::vector<ValueId>{updated_varargout},
+        std::vector<ValueRef>{ValueRef{varargout_seed}, ValueRef{first_extra_index}, ValueRef{count}}));
+    callee_entry->set_terminal(callee->create_node<SSAReturnNode>(
+        std::vector<ValueRef>{ValueRef{fixed}, ValueRef{updated_varargout}}));
+
+    Function* caller = module.create_function("caller", Function::PrimaryFunction);
+    module.set_entry_function(caller);
+    caller->set_stage(IRNode::UntypedSSA);
+    caller->set_output_names({"out"});
+    BasicBlock* caller_entry = caller->create_block("entry");
+    caller->set_entry_block(caller_entry);
+
+    const ValueId first = caller->create_value("first");
+    const ValueId second = caller->create_value("second");
+    const ValueId out = caller->create_value("out");
+
+    caller_entry->append_instruction(caller->create_node<SSACallNode>(
+        SSACallNode::Callee{SSACallNode::Callee::Direct, "report_outputs", ValueRef{}},
+        std::vector<ValueId>{first, second}, std::vector<ValueRef>{}));
+    caller_entry->append_instruction(caller->create_node<SSABinOpNode>(
+        BinOpType::Add, out, ValueRef{first}, ValueRef{second}));
+    caller_entry->set_terminal(
+        caller->create_node<SSAReturnNode>(std::vector<ValueRef>{ValueRef{out}}));
+
+    analysis::verify_module_or_throw(module);
+    const interpreter::ExecResult result = interpreter::execute_function(*caller);
+    expect_output_int(result, 4, "varargout expansion and nargout");
+}
+
 }  // namespace
 
 int main() {
@@ -535,6 +590,7 @@ int main() {
         test_missing_fixed_input_is_lazy();
         test_reading_missing_fixed_input_throws();
         test_varargin_and_nargin_binding();
+        test_varargout_and_nargout_binding();
     } catch (const std::exception& ex) {
         close_builtin_library();
         std::cerr << "interpreter_test FAILED: " << ex.what() << '\n';

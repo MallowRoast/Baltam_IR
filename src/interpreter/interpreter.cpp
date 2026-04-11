@@ -382,6 +382,17 @@ baIndex require_valid_linear_cell_index(double raw_index, baSize cell_size) {
     return static_cast<baIndex>(rounded - 1.0);
 }
 
+baIndex require_valid_one_based_integer_index(double raw_index) {
+    const double rounded = std::round(raw_index);
+    if (std::abs(raw_index - rounded) > 1e-12) {
+        throw std::runtime_error("元胞索引必须是整数。");
+    }
+    if (rounded < 1.0) {
+        throw std::runtime_error("元胞索引越界。");
+    }
+    return static_cast<baIndex>(rounded - 1.0);
+}
+
 std::vector<baIndex> linear_cell_indices_from_object(const Value::Object& index_object,
                                                      baSize cell_size) {
     if (index_object == nullptr) {
@@ -507,12 +518,23 @@ std::vector<Value> invoke_runtime_cell_set(const std::vector<Value::Object>& in_
 
     Value::Object base_copy = std::make_shared<ba_obj>(*in_args.front());
     auto* cell = base_copy->get<cell_array>();
-    const std::vector<baIndex> indices =
-        linear_cell_indices_from_object(in_args[1], cell->size());
-    if (indices.size() != 1) {
-        throw std::runtime_error("当前只支持单元素元胞写入。");
+
+    baIndex target_index = 0;
+    if (in_args[1] != nullptr && in_args[1]->is_scalar()) {
+        target_index = require_valid_one_based_integer_index(in_args[1]->as_double());
+        if (target_index >= cell->size()) {
+            cell->data().conservative_resize(1, static_cast<baSize>(target_index + 1));
+        }
+    } else {
+        const std::vector<baIndex> indices =
+            linear_cell_indices_from_object(in_args[1], cell->size());
+        if (indices.size() != 1) {
+            throw std::runtime_error("当前只支持单元素元胞写入。");
+        }
+        target_index = indices.front();
     }
-    (*cell)[indices.front()] = in_args.back();
+
+    (*cell)[target_index] = in_args.back();
 
     if (expected_out_count == 0) {
         return {};
@@ -525,6 +547,14 @@ Value::Object pack_varargin_objects(const std::vector<Value::Object>& extra_args
         return std::make_shared<ba_obj>(new cell_array(1, 0));
     }
     return std::make_shared<ba_obj>(new cell_array(extra_args, false));
+}
+
+bool is_variadic_output_seed(const ExecutionState& state, ValueId id) {
+    if (!state.function.has_varargout()) {
+        return false;
+    }
+    const std::string* debug_name = state.function.find_value_debug_name(id);
+    return debug_name != nullptr && *debug_name == "varargout";
 }
 
 ExecResult execute_function_impl(Function& function, const std::vector<Value::Object>& args,
@@ -584,6 +614,14 @@ std::vector<Value> invoke_direct_call(const ExecutionState& caller_state,
         }
         return {concrete(std::make_shared<ba_obj>(
             static_cast<std::int64_t>(caller_state.actual_nargin)))};
+    }
+
+    if (callee_name == "nargout") {
+        if (expected_out_count == 0) {
+            return {};
+        }
+        return {concrete(std::make_shared<ba_obj>(
+            static_cast<std::int64_t>(caller_state.requested_nargout)))};
     }
 
     if (callee_name == "__ir_cell_get__") {
@@ -753,7 +791,12 @@ void execute_instruction(const IRNode& node, ExecutionState& state) {
         }
         case UntypedSSANode::SSA_Undef: {
             const auto& undef_node = static_cast<const SSAUndefNode&>(ssa);
-            state.store_value(undef_node.result(), undef());
+            if (is_variadic_output_seed(state, undef_node.result())) {
+                state.store_value(undef_node.result(),
+                                  concrete(std::make_shared<ba_obj>(new cell_array(1, 0))));
+            } else {
+                state.store_value(undef_node.result(), undef());
+            }
             return;
         }
         case UntypedSSANode::SSA_Copy: {
@@ -818,9 +861,33 @@ BasicBlock* execute_terminal(const BasicBlock& block, ExecutionState& state) {
         case UntypedSSANode::SSA_Return: {
             const auto& ret = static_cast<const SSAReturnNode&>(terminal);
             state.outputs.clear();
-            state.outputs.reserve(ret.values().size());
-            for (const ValueRef value : ret.values()) {
-                state.outputs.push_back(state.require_concrete_value(value, "返回值"));
+
+            const std::size_t fixed_output_count = state.function.fixed_output_count();
+            const std::size_t requested_fixed_output_count =
+                std::min(state.requested_nargout, fixed_output_count);
+            state.outputs.reserve(state.requested_nargout);
+
+            for (std::size_t i = 0; i < requested_fixed_output_count; ++i) {
+                state.outputs.push_back(state.require_concrete_value(ret.values()[i], "返回值"));
+            }
+
+            if (state.function.has_varargout() && state.requested_nargout > fixed_output_count) {
+                const Value::Object varargout_object = state.require_concrete_object(
+                    ret.values()[fixed_output_count], "varargout 返回值");
+                if (varargout_object == nullptr || varargout_object->type() != ba_cell) {
+                    throw std::runtime_error("函数 `" + state.function.name() +
+                                             "` 的 varargout 不是元胞数组。");
+                }
+
+                const auto* varargout_cell = varargout_object->cget<cell_array>();
+                const std::size_t extra_output_count = state.requested_nargout - fixed_output_count;
+                if (varargout_cell->size() < static_cast<baSize>(extra_output_count)) {
+                    throw std::runtime_error("函数 `" + state.function.name() +
+                                             "` 的 varargout 输出个数不足。");
+                }
+                for (std::size_t i = 0; i < extra_output_count; ++i) {
+                    state.outputs.push_back(concrete((*varargout_cell)[static_cast<baIndex>(i)]));
+                }
             }
             return nullptr;
         }
