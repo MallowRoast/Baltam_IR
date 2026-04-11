@@ -27,6 +27,8 @@ struct ExecutionState {
     Function& function;
     const ExecutionOptions& options;
     std::size_t call_depth = 0;
+    std::size_t actual_nargin = 0;
+    std::size_t requested_nargout = 0;
     ValueTable values;
     std::unordered_map<std::string, ValueId> active_named_values;
     std::vector<Value> outputs;
@@ -59,6 +61,9 @@ std::string format_value(const Value& value) {
     if (value.type == Value::Undef) {
         return "undef";
     }
+    if (value.type == Value::MissingInput) {
+        return "<missing-input>";
+    }
     if (value.object == nullptr) {
         return "<null>";
     }
@@ -89,6 +94,12 @@ const Value& ExecutionState::require_concrete_value(ValueRef ref, const char* co
                                  " 使用了 `undef` SSA 值 `" +
                                  value_label(function, ref.id) + "`。");
     }
+    if (value.type == Value::MissingInput) {
+        throw std::runtime_error("函数 `" + function.name() + "` 在 " + context +
+                                 " 读取了缺失的输入参数 `" +
+                                 value_label(function, ref.id) +
+                                 "`。Not enough input arguments.");
+    }
     return value;
 }
 
@@ -114,6 +125,10 @@ Value concrete(Value::Object object) {
 
 Value undef() {
     return Value{Value::Undef, nullptr};
+}
+
+Value missing_input() {
+    return Value{Value::MissingInput, nullptr};
 }
 
 const char* callable_type_text(CallableType type) {
@@ -505,8 +520,16 @@ std::vector<Value> invoke_runtime_cell_set(const std::vector<Value::Object>& in_
     return {concrete(std::move(base_copy))};
 }
 
+Value::Object pack_varargin_objects(const std::vector<Value::Object>& extra_args) {
+    if (extra_args.empty()) {
+        return std::make_shared<ba_obj>(new cell_array(1, 0));
+    }
+    return std::make_shared<ba_obj>(new cell_array(extra_args, false));
+}
+
 ExecResult execute_function_impl(Function& function, const std::vector<Value::Object>& args,
-                                 const ExecutionOptions& options, std::size_t call_depth);
+                                 const ExecutionOptions& options, std::size_t call_depth,
+                                 std::size_t requested_nargout);
 
 std::vector<Value> invoke_module_function(const ExecutionState& caller_state,
                                           const std::string& function_name,
@@ -520,7 +543,8 @@ std::vector<Value> invoke_module_function(const ExecutionState& caller_state,
     for (const auto& function : module->functions()) {
         if (function != nullptr && function->name() == function_name) {
             ExecResult callee_result = execute_function_impl(
-                *function, in_args, caller_state.options, caller_state.call_depth + 1);
+                *function, in_args, caller_state.options, caller_state.call_depth + 1,
+                expected_out_count);
             if (callee_result.outputs.size() < expected_out_count) {
                 throw std::runtime_error("函数 `" + function_name + "` 的输出个数不足。");
             }
@@ -552,6 +576,14 @@ std::vector<Value> invoke_direct_call(const ExecutionState& caller_state,
         }
         const std::string function_name = in_args.front()->as_string();
         return {concrete(std::make_shared<ba_obj>(function_handle(fh_anonymous, function_name)))};
+    }
+
+    if (callee_name == "nargin") {
+        if (expected_out_count == 0) {
+            return {};
+        }
+        return {concrete(std::make_shared<ba_obj>(
+            static_cast<std::int64_t>(caller_state.actual_nargin)))};
     }
 
     if (callee_name == "__ir_cell_get__") {
@@ -853,7 +885,8 @@ void print_final_named_bindings(const ExecutionState& state, const ExecResult& r
 }
 
 ExecResult execute_function_impl(Function& function, const std::vector<Value::Object>& args,
-                                 const ExecutionOptions& options, std::size_t call_depth) {
+                                 const ExecutionOptions& options, std::size_t call_depth,
+                                 std::size_t requested_nargout) {
     if (function.stage() != IRNode::UntypedSSA) {
         throw std::runtime_error("解释器只支持执行 `UntypedSSA` 函数 `" + function.name() + "`。");
     }
@@ -865,13 +898,32 @@ ExecResult execute_function_impl(Function& function, const std::vector<Value::Ob
     if (function.argument_values().size() != function.inputs().size()) {
         throw std::runtime_error("函数 `" + function.name() + "` 的输入签名与 SSA 参数槽位个数不一致。");
     }
-    if (args.size() != function.argument_values().size()) {
-        throw std::runtime_error("执行函数 `" + function.name() + "` 时实参数量不匹配。");
+
+    const std::size_t fixed_input_count = function.fixed_input_count();
+    if (!function.has_varargin() && args.size() > fixed_input_count) {
+        throw std::runtime_error("执行函数 `" + function.name() + "` 时传入了过多实参。");
     }
 
-    ExecutionState state{function, options, call_depth, {}, {}, {}, nullptr};
-    for (std::size_t i = 0; i < args.size(); ++i) {
-        state.store_value(function.argument_values()[i], concrete(args[i]));
+    ExecutionState state{function, options, call_depth, args.size(), requested_nargout, {}, {}, {},
+                         nullptr};
+    for (std::size_t i = 0; i < fixed_input_count; ++i) {
+        if (i < args.size()) {
+            state.store_value(function.argument_values()[i], concrete(args[i]));
+        } else {
+            state.store_value(function.argument_values()[i], missing_input());
+        }
+    }
+
+    if (function.has_varargin()) {
+        std::vector<Value::Object> extra_args;
+        if (args.size() > fixed_input_count) {
+            extra_args.reserve(args.size() - fixed_input_count);
+            for (std::size_t i = fixed_input_count; i < args.size(); ++i) {
+                extra_args.push_back(args[i]);
+            }
+        }
+        state.store_value(function.argument_values()[fixed_input_count],
+                          concrete(pack_varargin_objects(extra_args)));
     }
 
     BasicBlock* current_block = function.entry_block();
@@ -900,7 +952,7 @@ ExecResult execute_function_impl(Function& function, const std::vector<Value::Ob
 
 ExecResult execute_function(Function& function, const std::vector<Value::Object>& args,
                             const ExecutionOptions& options) {
-    return execute_function_impl(function, args, options, 0);
+    return execute_function_impl(function, args, options, 0, function.outputs().size());
 }
 
 }  // namespace baltam::interpreter

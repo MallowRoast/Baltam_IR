@@ -427,6 +427,96 @@ void test_var_list_call_input_flattening() {
     expect_output_int(result, 9, "var_list call input flattening");
 }
 
+void test_missing_fixed_input_is_lazy() {
+    Function function("missing_input_lazy", Function::PrimaryFunction);
+    function.set_stage(IRNode::UntypedSSA);
+    function.set_input_names({"x", "y"});
+    function.set_output_names({"out"});
+
+    const ValueId x = function.create_value("x");
+    const ValueId y = function.create_value("y");
+    (void)y;
+    function.set_argument_values({x, y});
+
+    BasicBlock* entry = function.create_block("entry");
+    function.set_entry_block(entry);
+    entry->set_terminal(function.create_node<SSAReturnNode>(std::vector<ValueRef>{ValueRef{x}}));
+
+    analysis::verify_function_or_throw(function);
+    const interpreter::ExecResult result =
+        interpreter::execute_function(function, {std::make_shared<ba_obj>(std::int64_t{42})});
+    expect_output_int(result, 42, "missing fixed input should be lazy");
+}
+
+void test_reading_missing_fixed_input_throws() {
+    Function function("missing_input_throw", Function::PrimaryFunction);
+    function.set_stage(IRNode::UntypedSSA);
+    function.set_input_names({"x", "y"});
+    function.set_output_names({"out"});
+
+    const ValueId x = function.create_value("x");
+    const ValueId y = function.create_value("y");
+    (void)x;
+    function.set_argument_values({x, y});
+
+    BasicBlock* entry = function.create_block("entry");
+    function.set_entry_block(entry);
+    entry->set_terminal(function.create_node<SSAReturnNode>(std::vector<ValueRef>{ValueRef{y}}));
+
+    analysis::verify_function_or_throw(function);
+
+    bool threw = false;
+    try {
+        (void)interpreter::execute_function(function, {std::make_shared<ba_obj>(std::int64_t{1})});
+    } catch (const std::exception& ex) {
+        threw = true;
+        expect_contains(ex.what(), "Not enough input arguments",
+                        "reading missing fixed input should mention missing arguments");
+    }
+    expect(threw, "reading missing fixed input should throw");
+}
+
+void test_varargin_and_nargin_binding() {
+    Function function("varargin_nargin", Function::PrimaryFunction);
+    function.set_stage(IRNode::UntypedSSA);
+    function.set_input_names({"a", "varargin"});
+    function.set_has_varargin(true);
+    function.set_output_names({"out"});
+
+    const ValueId a = function.create_value("a");
+    const ValueId varargin = function.create_value("varargin");
+    function.set_argument_values({a, varargin});
+
+    BasicBlock* entry = function.create_block("entry");
+    function.set_entry_block(entry);
+
+    const ValueId argc = function.create_value("argc");
+    const ValueId second_extra_index = function.create_value("second_extra_index");
+    const ValueId second_extra = function.create_value("second_extra");
+    const ValueId out = function.create_value("out");
+
+    entry->append_instruction(function.create_node<SSACallNode>(
+        SSACallNode::Callee{SSACallNode::Callee::Direct, "nargin", ValueRef{}},
+        std::vector<ValueId>{argc}, std::vector<ValueRef>{}));
+    entry->append_instruction(function.create_node<SSANumberNode>(
+        second_extra_index, SSANumberNode::NumberValue{std::int64_t{2}}));
+    entry->append_instruction(function.create_node<SSACallNode>(
+        SSACallNode::Callee{SSACallNode::Callee::Direct, "__ir_cell_get__", ValueRef{}},
+        std::vector<ValueId>{second_extra},
+        std::vector<ValueRef>{ValueRef{varargin}, ValueRef{second_extra_index}}));
+    entry->append_instruction(function.create_node<SSABinOpNode>(
+        BinOpType::Add, out, ValueRef{argc}, ValueRef{second_extra}));
+    entry->set_terminal(function.create_node<SSAReturnNode>(std::vector<ValueRef>{ValueRef{out}}));
+
+    analysis::verify_function_or_throw(function);
+
+    const interpreter::ExecResult result = interpreter::execute_function(
+        function, {std::make_shared<ba_obj>(std::int64_t{10}),
+                   std::make_shared<ba_obj>(std::int64_t{20}),
+                   std::make_shared<ba_obj>(std::int64_t{30})});
+    expect_output_int(result, 33, "varargin packing and nargin");
+}
+
 }  // namespace
 
 int main() {
@@ -442,6 +532,9 @@ int main() {
         test_direct_module_call_after_module_move();
         test_runtime_cell_get_set();
         test_var_list_call_input_flattening();
+        test_missing_fixed_input_is_lazy();
+        test_reading_missing_fixed_input_throws();
+        test_varargin_and_nargin_binding();
     } catch (const std::exception& ex) {
         close_builtin_library();
         std::cerr << "interpreter_test FAILED: " << ex.what() << '\n';

@@ -26,6 +26,7 @@ struct Value {
     enum Type {
         Concrete,
         Undef,
+        MissingInput,
     };
 
     Type type = Undef;
