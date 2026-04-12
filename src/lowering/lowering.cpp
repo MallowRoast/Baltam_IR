@@ -134,6 +134,9 @@ std::vector<std::string> collect_assignment_target_name_list(const ast_ptr& node
             }
             return names;
         }
+        case node_struct_get:
+        case node_cell_get:
+            return collect_assignment_target_name_list(node->branch[0]);
         case node_multiple_func: {
             const auto call = std::static_pointer_cast<multipleFuncCall>(node);
             // 多返回值左值里允许出现 `X(...)` 这类切片写入目标；
@@ -240,6 +243,14 @@ void collect_predeclared_user_names(const ast_ptr& node,
                 names.erase(name);
             }
             return;
+        case node_struct_set:
+            for (const std::string& name :
+                 collect_assignment_target_name_list(node->branch[0])) {
+                if (global_names.find(name) == global_names.end()) {
+                    names.insert(name);
+                }
+            }
+            return;
         case node_flow_if: {
             const auto if_node = std::static_pointer_cast<if_flow>(node);
             collect_predeclared_user_names(if_node->tl(), names, global_names);
@@ -295,11 +306,16 @@ void collect_predeclared_user_names(const ast_ptr& node,
     }
 }
 
-std::unordered_set<std::string> collect_function_predeclared_names(const pcdata& unit) {
-    std::unordered_set<std::string> names;
+struct CollectedFunctionNames {
+    std::unordered_set<std::string> user_names;
     std::unordered_set<std::string> global_names;
-    collect_predeclared_user_names(function_body_from_unit(unit), names, global_names);
-    return names;
+};
+
+CollectedFunctionNames collect_function_predeclared_names(const pcdata& unit) {
+    CollectedFunctionNames result;
+    collect_predeclared_user_names(function_body_from_unit(unit), result.user_names,
+                                   result.global_names);
+    return result;
 }
 
 std::vector<std::string> to_sorted_name_list(const std::unordered_set<std::string>& names) {
@@ -778,6 +794,80 @@ void lower_name_expr_into(const std::shared_ptr<symref>& sym, const NamedValue& 
     ctx.mark_defined(target);
 }
 
+NamedValue lower_struct_field_selector_to_operand(const ast_ptr& node, LoweringContext& ctx) {
+    if (!node) {
+        throw std::runtime_error("non-SSA lower struct 字段名不能为空。");
+    }
+
+    if (node->nodetype == node_name) {
+        const auto sym = std::static_pointer_cast<symref>(node);
+        if (!node->paren && !should_treat_symref_as_user_value(sym, ctx)) {
+            const NamedValue field_name = ctx.create_hidden_name("struct.field");
+            ctx.append_node<TextNode>(field_name, sym->name(), source_location_from(node));
+            ctx.mark_defined(field_name);
+            return field_name;
+        }
+    }
+
+    return lower_expr_to_operand(node, ctx);
+}
+
+NamedValue lower_struct_set_result(const ast_ptr& base_node, const ast_ptr& field_node,
+                                   const NamedValue& value, LoweringContext& ctx,
+                                   const ast_ptr& location_node) {
+    if (!base_node || !field_node) {
+        throw std::runtime_error("non-SSA lower 遇到了不完整的 struct 写回节点。");
+    }
+
+    const NamedValue base = lower_expr_to_operand(base_node, ctx);
+    const NamedValue field = lower_struct_field_selector_to_operand(field_node, ctx);
+    const NamedValue updated_base = ctx.create_temp("__struct.set");
+
+    std::vector<NamedValue> inputs;
+    inputs.push_back(base);
+    inputs.push_back(field);
+    inputs.push_back(value);
+
+    ctx.append_node<CallNode>(CallNode::Direct, "setfield",
+                              std::vector<NamedValue>{updated_base}, std::move(inputs),
+                              source_location_from(location_node));
+    ctx.mark_defined(updated_base);
+    return updated_base;
+}
+
+void lower_store_back_to_lvalue(const ast_ptr& lhs, const NamedValue& value, LoweringContext& ctx) {
+    if (!lhs) {
+        throw std::runtime_error("non-SSA lower 不能把值写回到空左值。");
+    }
+
+    switch (lhs->nodetype) {
+        case node_name: {
+            const auto sym = std::static_pointer_cast<symref>(lhs);
+            if (ctx.is_active_global_name(sym->name())) {
+                ctx.append_node<GlobalStoreNode>(sym->name(), value, source_location_from(lhs));
+                return;
+            }
+
+            const NamedValue target = ctx.classify_name(sym->name());
+            if (target.name != value.name || target.type != value.type) {
+                ctx.append_node<AssignNode>(target, value, source_location_from(lhs));
+            }
+            ctx.mark_defined(target);
+            return;
+        }
+        case node_struct_get: {
+            const NamedValue updated_base =
+                lower_struct_set_result(lhs->branch[0], lhs->branch[1], value, ctx, lhs);
+            lower_store_back_to_lvalue(lhs->branch[0], updated_base, ctx);
+            return;
+        }
+        default:
+            break;
+    }
+
+    throw std::runtime_error("non-SSA lower phase2 暂不支持该左值写回形式。");
+}
+
 void lower_call_stmt(const std::shared_ptr<multipleFuncCall>& call, LoweringContext& ctx) {
     const std::vector<CallOutputTargetSpec> output_specs =
         collect_call_output_target_specs(call->out_args());
@@ -785,10 +875,14 @@ void lower_call_stmt(const std::shared_ptr<multipleFuncCall>& call, LoweringCont
     std::vector<NamedValue> outputs;
     outputs.reserve(output_specs.size());
     for (const CallOutputTargetSpec& spec : output_specs) {
+        const bool requires_store_back =
+            spec.requires_store_back ||
+            (spec.lhs != nullptr && spec.lhs->nodetype == node_name &&
+             ctx.is_active_global_name(spec.name));
         // 纯名字左值可以直接接 call 输出；
         // 带索引左值则必须先接到临时，后面再显式 lower 成 `__ir_paren_set__`。
-        outputs.push_back(spec.requires_store_back ? ctx.create_temp("__call.out")
-                                                  : ctx.classify_name(spec.name));
+        outputs.push_back(requires_store_back ? ctx.create_temp("__call.out")
+                                              : ctx.classify_name(spec.name));
     }
 
     std::vector<NamedValue> inputs = lower_call_inputs(call->in_args(), ctx);
@@ -800,7 +894,14 @@ void lower_call_stmt(const std::shared_ptr<multipleFuncCall>& call, LoweringCont
 
     for (std::size_t i = 0; i < output_specs.size(); ++i) {
         const CallOutputTargetSpec& spec = output_specs[i];
-        if (!spec.requires_store_back) {
+        if (!spec.requires_store_back &&
+            !(spec.lhs != nullptr && spec.lhs->nodetype == node_name &&
+              ctx.is_active_global_name(spec.name))) {
+            continue;
+        }
+
+        if (spec.lhs != nullptr && spec.lhs->nodetype == node_name && !spec.requires_store_back) {
+            lower_store_back_to_lvalue(spec.lhs, call_results[i], ctx);
             continue;
         }
 
@@ -919,6 +1020,20 @@ void lower_expr_into(const ast_ptr& node, const NamedValue& target, LoweringCont
             }
 
             ctx.append_node<CallNode>(CallNode::Direct, "__ir_cell_get__",
+                                      std::vector<NamedValue>{target}, std::move(inputs),
+                                      source_location_from(node));
+            ctx.mark_defined(target);
+            return;
+        }
+        case node_struct_get: {
+            std::vector<NamedValue> inputs;
+            // `a.b.c` 会解析成嵌套的 `node_struct_get`：
+            // 外层 `branch[0]` 仍然是一个 `node_struct_get(a, b)`，
+            // 这里通过递归 lower base，把整条 dot 访问链逐层展开成 `getfield`。
+            inputs.push_back(lower_expr_to_operand(node->branch[0], ctx));
+            inputs.push_back(lower_struct_field_selector_to_operand(node->branch[1], ctx));
+
+            ctx.append_node<CallNode>(CallNode::Direct, "getfield",
                                       std::vector<NamedValue>{target}, std::move(inputs),
                                       source_location_from(node));
             ctx.mark_defined(target);
@@ -1358,6 +1473,16 @@ void lower_stmt(const ast_ptr& node, LoweringContext& ctx) {
             lower_expr_into(assign->v(), ctx.classify_name(assign->name()), ctx);
             return;
         }
+        case node_struct_set: {
+            const NamedValue value = lower_expr_to_operand(node->branch[2], ctx);
+            // 这里保留 lhs base 的 AST，而不是先 lower 成单个值：
+            // `setfield` 需要读取当前 base 值，而后续 store-back 还要沿着
+            // `a` / `a.b` / `global a` 这条左值链逐层写回。
+            const NamedValue updated_base =
+                lower_struct_set_result(node->branch[0], node->branch[1], value, ctx, node);
+            lower_store_back_to_lvalue(node->branch[0], updated_base, ctx);
+            return;
+        }
         case node_global:
             for (const ast_ptr& branch : node->branch) {
                 if (branch == nullptr || branch->nodetype != node_name) {
@@ -1441,11 +1566,11 @@ void lower_stmt(const ast_ptr& node, LoweringContext& ctx) {
 void lower_unit_into_function(const pcdata& unit, Module& module) {
     Function* function =
         module.create_function(function_name_from_unit(unit), function_type_from_unit(unit));
-    const std::unordered_set<std::string> predeclared_user_names =
+    const CollectedFunctionNames collected_names =
         collect_function_predeclared_names(unit);
     populate_function_signature(*function, unit);
     if (function->type() == Function::Script && function->outputs().empty()) {
-        function->set_output_names(to_sorted_name_list(predeclared_user_names));
+        function->set_output_names(to_sorted_name_list(collected_names.user_names));
     }
     if (function->type() == Function::Script ||
         function->type() == Function::PrimaryFunction) {
@@ -1458,7 +1583,8 @@ void lower_unit_into_function(const pcdata& unit, Module& module) {
     LoweringContext ctx;
     ctx.function = function;
     ctx.current_block = entry;
-    ctx.defined_user_names = predeclared_user_names;
+    ctx.defined_user_names = collected_names.user_names;
+    ctx.active_global_names = collected_names.global_names;
     ctx.mark_defined(function->inputs());
     ctx.mark_defined(function->outputs());
 
