@@ -58,6 +58,10 @@ std::string node_label(const NonSSANode* node) {
         return block_name + ":Text";
     case NonSSANode::Assign:
         return block_name + ":Assign";
+    case NonSSANode::GlobalLoad:
+        return block_name + ":GlobalLoad";
+    case NonSSANode::GlobalStore:
+        return block_name + ":GlobalStore";
     case NonSSANode::UnaryOp:
         return block_name + ":UnaryOp";
     case NonSSANode::BinOp:

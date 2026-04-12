@@ -17,6 +17,10 @@ const char* node_type_name(NonSSANode::Type type) {
             return "Text";
         case NonSSANode::Assign:
             return "Assign";
+        case NonSSANode::GlobalLoad:
+            return "GlobalLoad";
+        case NonSSANode::GlobalStore:
+            return "GlobalStore";
         case NonSSANode::UnaryOp:
             return "UnaryOp";
         case NonSSANode::BinOp:
@@ -46,6 +50,10 @@ const char* node_type_name(UntypedSSANode::Type type) {
             return "SSAPhi";
         case UntypedSSANode::SSA_Copy:
             return "SSACopy";
+        case UntypedSSANode::SSA_GlobalLoad:
+            return "SSAGlobalLoad";
+        case UntypedSSANode::SSA_GlobalStore:
+            return "SSAGlobalStore";
         case UntypedSSANode::SSA_UnaryOp:
             return "SSAUnaryOp";
         case UntypedSSANode::SSA_BinOp:
@@ -289,6 +297,8 @@ void verify_non_ssa_block(VerificationResult& result, const Function& function,
         case NonSSANode::Number:
         case NonSSANode::Text:
         case NonSSANode::Assign:
+        case NonSSANode::GlobalLoad:
+        case NonSSANode::GlobalStore:
         case NonSSANode::UnaryOp:
         case NonSSANode::BinOp:
         case NonSSANode::Call:
@@ -449,6 +459,8 @@ void verify_untyped_ssa_block(VerificationResult& result, const Function& functi
         case UntypedSSANode::SSA_Undef:
         case UntypedSSANode::SSA_Phi:
         case UntypedSSANode::SSA_Copy:
+        case UntypedSSANode::SSA_GlobalLoad:
+        case UntypedSSANode::SSA_GlobalStore:
         case UntypedSSANode::SSA_UnaryOp:
         case UntypedSSANode::SSA_BinOp:
         case UntypedSSANode::SSA_Call:
@@ -598,6 +610,26 @@ void verify_untyped_ssa_values(VerificationResult& result, const Function& funct
                                          used_values);
                     break;
                 }
+                case UntypedSSANode::SSA_GlobalLoad: {
+                    const auto* load = static_cast<const SSAGlobalLoadNode*>(ssa);
+                    if (load->symbol().empty()) {
+                        add_error(result, "函数 `" + function.name() +
+                                              "` 的 global.load 缺少符号名。");
+                    }
+                    verify_ssa_value_def(result, function, load->result(), *ssa,
+                                         "global.load 节点", argument_values, node_defs);
+                    break;
+                }
+                case UntypedSSANode::SSA_GlobalStore: {
+                    const auto* store = static_cast<const SSAGlobalStoreNode*>(ssa);
+                    if (store->symbol().empty()) {
+                        add_error(result, "函数 `" + function.name() +
+                                              "` 的 global.store 缺少符号名。");
+                    }
+                    verify_ssa_value_use(result, function, store->value(), "global.store 输入值",
+                                         used_values);
+                    break;
+                }
                 case UntypedSSANode::SSA_UnaryOp: {
                     const auto* unary = static_cast<const SSAUnaryOpNode*>(ssa);
                     verify_ssa_value_def(result, function, unary->result(), *ssa, "单目运算节点",
@@ -674,6 +706,8 @@ void verify_untyped_ssa_values(VerificationResult& result, const Function& funct
             case UntypedSSANode::SSA_Undef:
             case UntypedSSANode::SSA_Phi:
             case UntypedSSANode::SSA_Copy:
+            case UntypedSSANode::SSA_GlobalLoad:
+            case UntypedSSANode::SSA_GlobalStore:
             case UntypedSSANode::SSA_UnaryOp:
             case UntypedSSANode::SSA_BinOp:
             case UntypedSSANode::SSA_Call:

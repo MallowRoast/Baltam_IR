@@ -38,9 +38,14 @@ struct NamedBindingSnapshot {
     ValueId value_id = InvalidValueId;
 };
 
+struct RuntimeWorkspace {
+    std::unordered_map<std::string, Value::Object> globals;
+};
+
 struct ExecutionOptions {
     std::ostream* trace_stream = nullptr;
     bool print_final_named_bindings = false;
+    std::shared_ptr<RuntimeWorkspace> workspace;
 };
 
 /**

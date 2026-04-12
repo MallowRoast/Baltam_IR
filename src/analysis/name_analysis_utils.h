@@ -46,6 +46,17 @@ void for_each_node_use(const NonSSANode& node, Callback&& callback) {
         return;
     }
 
+    case NonSSANode::GlobalLoad:
+        return;
+
+    case NonSSANode::GlobalStore: {
+        const GlobalStoreNode& store = static_cast<const GlobalStoreNode&>(node);
+        if (!store.value().name.empty()) {
+            callback(store.value().name);
+        }
+        return;
+    }
+
     case NonSSANode::UnaryOp: {
         const UnaryOpNode& unary = static_cast<const UnaryOpNode&>(node);
         if (!unary.operand().name.empty()) {
@@ -124,6 +135,17 @@ void for_each_node_def(const NonSSANode& node, Callback&& callback) {
         }
         return;
     }
+
+    case NonSSANode::GlobalLoad: {
+        const GlobalLoadNode& load = static_cast<const GlobalLoadNode&>(node);
+        if (!load.result().name.empty()) {
+            callback(load.result().name);
+        }
+        return;
+    }
+
+    case NonSSANode::GlobalStore:
+        return;
 
     case NonSSANode::UnaryOp: {
         const UnaryOpNode& unary = static_cast<const UnaryOpNode&>(node);

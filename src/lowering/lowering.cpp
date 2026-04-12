@@ -208,7 +208,8 @@ ast_ptr function_body_from_unit(const pcdata& unit) {
 }
 
 void collect_predeclared_user_names(const ast_ptr& node,
-                                    std::unordered_set<std::string>& names) {
+                                    std::unordered_set<std::string>& names,
+                                    std::unordered_set<std::string>& global_names) {
     if (!node) {
         return;
     }
@@ -218,20 +219,31 @@ void collect_predeclared_user_names(const ast_ptr& node,
         case node_cmdlist:
         case node_list:
             for (const ast_ptr& branch : node->branch) {
-                collect_predeclared_user_names(branch, names);
+                collect_predeclared_user_names(branch, names, global_names);
             }
             return;
         case node_asgn: {
             const auto assign = std::static_pointer_cast<symasgn>(node);
-            if (assign->s() != nullptr && assign->s()->nodetype == node_name) {
+            if (assign->s() != nullptr && assign->s()->nodetype == node_name &&
+                global_names.find(assign->name()) == global_names.end()) {
                 names.insert(assign->name());
             }
             return;
         }
+        case node_global:
+            for (const ast_ptr& branch : node->branch) {
+                if (branch == nullptr || branch->nodetype != node_name) {
+                    throw std::runtime_error("non-SSA lower 目前只支持名字形式的 global 声明。");
+                }
+                const std::string& name = std::static_pointer_cast<symref>(branch)->name();
+                global_names.insert(name);
+                names.erase(name);
+            }
+            return;
         case node_flow_if: {
             const auto if_node = std::static_pointer_cast<if_flow>(node);
-            collect_predeclared_user_names(if_node->tl(), names);
-            collect_predeclared_user_names(if_node->el(), names);
+            collect_predeclared_user_names(if_node->tl(), names, global_names);
+            collect_predeclared_user_names(if_node->el(), names, global_names);
             return;
         }
         case node_flow_switch: {
@@ -244,10 +256,10 @@ void collect_predeclared_user_names(const ast_ptr& node,
                     continue;
                 }
                 if (case_node->nodetype == node_case && case_node->branch.size() >= 2) {
-                    collect_predeclared_user_names(case_node->branch[1], names);
+                    collect_predeclared_user_names(case_node->branch[1], names, global_names);
                 } else if (case_node->nodetype == node_otherwise &&
                            !case_node->branch.empty()) {
-                    collect_predeclared_user_names(case_node->branch.back(), names);
+                    collect_predeclared_user_names(case_node->branch.back(), names, global_names);
                 }
             }
             return;
@@ -255,20 +267,26 @@ void collect_predeclared_user_names(const ast_ptr& node,
         case node_for: {
             const auto for_node = std::static_pointer_cast<flow>(node);
             if (for_node->var_ref() != nullptr && for_node->var_ref()->nodetype == node_name) {
-                names.insert(std::static_pointer_cast<symref>(for_node->var_ref())->name());
+                const std::string& name =
+                    std::static_pointer_cast<symref>(for_node->var_ref())->name();
+                if (global_names.find(name) == global_names.end()) {
+                    names.insert(name);
+                }
             }
-            collect_predeclared_user_names(for_node->tl(), names);
+            collect_predeclared_user_names(for_node->tl(), names, global_names);
             return;
         }
         case node_flow_while: {
             const auto while_node = std::static_pointer_cast<if_flow>(node);
-            collect_predeclared_user_names(while_node->tl(), names);
+            collect_predeclared_user_names(while_node->tl(), names, global_names);
             return;
         }
         case node_multiple_func: {
             const auto call = std::static_pointer_cast<multipleFuncCall>(node);
             for (const std::string& name : collect_assignment_target_name_list(call->out_args())) {
-                names.insert(name);
+                if (global_names.find(name) == global_names.end()) {
+                    names.insert(name);
+                }
             }
             return;
         }
@@ -279,7 +297,8 @@ void collect_predeclared_user_names(const ast_ptr& node,
 
 std::unordered_set<std::string> collect_function_predeclared_names(const pcdata& unit) {
     std::unordered_set<std::string> names;
-    collect_predeclared_user_names(function_body_from_unit(unit), names);
+    std::unordered_set<std::string> global_names;
+    collect_predeclared_user_names(function_body_from_unit(unit), names, global_names);
     return names;
 }
 
@@ -325,6 +344,7 @@ struct LoweringContext {
     std::size_t next_block_id = 0;
     std::vector<LoopContext> loop_stack;
     std::unordered_set<std::string> defined_user_names;
+    std::unordered_set<std::string> active_global_names;
 
     NamedValue classify_name(const std::string& name) const {
         return NamedValue{name, NamedValue::UserVariable};
@@ -332,6 +352,14 @@ struct LoweringContext {
 
     bool is_known_user_name(const std::string& name) const {
         return defined_user_names.find(name) != defined_user_names.end();
+    }
+
+    bool is_active_global_name(const std::string& name) const {
+        return active_global_names.find(name) != active_global_names.end();
+    }
+
+    void activate_global_name(const std::string& name) {
+        active_global_names.insert(name);
     }
 
     void mark_defined(const NamedValue& value) {
@@ -730,6 +758,12 @@ Function* create_anonymous_function(const ast_ptr& node, LoweringContext& ctx) {
 
 void lower_name_expr_into(const std::shared_ptr<symref>& sym, const NamedValue& target,
                           LoweringContext& ctx, const ast_ptr& node) {
+    if (sym != nullptr && ctx.is_active_global_name(sym->name())) {
+        ctx.append_node<GlobalLoadNode>(target, sym->name(), source_location_from(node));
+        ctx.mark_defined(target);
+        return;
+    }
+
     if (should_treat_symref_as_user_value(sym, ctx)) {
         const NamedValue source = ctx.classify_name(sym->name());
         if (source.name != target.name || source.type != target.type) {
@@ -772,6 +806,9 @@ void lower_call_stmt(const std::shared_ptr<multipleFuncCall>& call, LoweringCont
 
         const auto lhs_call = std::static_pointer_cast<multipleFuncCall>(spec.lhs);
         const NamedValue target = ctx.classify_name(spec.name);
+        if (ctx.is_active_global_name(target.name)) {
+            throw std::runtime_error("non-SSA lower phase1 暂不支持对 global 变量做索引写回。");
+        }
 
         std::vector<NamedValue> set_inputs;
         set_inputs.push_back(target);
@@ -806,6 +843,9 @@ bool is_block_assignment_lhs(const ast_ptr& node) {
 void lower_block_assignment_stmt(const std::shared_ptr<symasgn>& assign, LoweringContext& ctx) {
     const auto lhs_call = std::static_pointer_cast<multipleFuncCall>(assign->s());
     const NamedValue target = ctx.classify_name(lhs_call->name());
+    if (ctx.is_active_global_name(target.name)) {
+        throw std::runtime_error("non-SSA lower phase1 暂不支持对 global 变量做圆括号写回。");
+    }
 
     // `A(...) = rhs` 在 AST 中会被编码成 `node_asgn(node_multiple_func, rhs)`；
     // 这里可以在 lowering 阶段就唯一化成 `__ir_paren_set__`：
@@ -1018,6 +1058,11 @@ NamedValue lower_expr_to_operand(const ast_ptr& node, LoweringContext& ctx) {
 
     if (node->nodetype == node_name) {
         const auto sym = std::static_pointer_cast<symref>(node);
+        if (ctx.is_active_global_name(sym->name())) {
+            const NamedValue temp = ctx.create_temp("__global.load");
+            lower_name_expr_into(sym, temp, ctx, node);
+            return temp;
+        }
         if (should_treat_symref_as_user_value(sym, ctx)) {
             return ctx.classify_name(sym->name());
         }
@@ -1305,9 +1350,22 @@ void lower_stmt(const ast_ptr& node, LoweringContext& ctx) {
             if (assign->s() == nullptr || assign->s()->nodetype != node_name) {
                 throw std::runtime_error("non-SSA lower 目前只支持名字左值赋值。");
             }
+            if (ctx.is_active_global_name(assign->name())) {
+                const NamedValue value = lower_expr_to_operand(assign->v(), ctx);
+                ctx.append_node<GlobalStoreNode>(assign->name(), value, source_location_from(assign));
+                return;
+            }
             lower_expr_into(assign->v(), ctx.classify_name(assign->name()), ctx);
             return;
         }
+        case node_global:
+            for (const ast_ptr& branch : node->branch) {
+                if (branch == nullptr || branch->nodetype != node_name) {
+                    throw std::runtime_error("non-SSA lower 目前只支持名字形式的 global 声明。");
+                }
+                ctx.activate_global_name(std::static_pointer_cast<symref>(branch)->name());
+            }
+            return;
         case node_cell_set: {
             if (node->branch.empty() || node->branch[0] == nullptr ||
                 node->branch[0]->nodetype != node_name) {
@@ -1316,6 +1374,9 @@ void lower_stmt(const ast_ptr& node, LoweringContext& ctx) {
 
             const auto base_sym = std::static_pointer_cast<symref>(node->branch[0]);
             const NamedValue target = ctx.classify_name(base_sym->name());
+            if (ctx.is_active_global_name(target.name)) {
+                throw std::runtime_error("non-SSA lower phase1 暂不支持对 global 变量做元胞写回。");
+            }
 
             std::vector<NamedValue> inputs;
             inputs.push_back(target);

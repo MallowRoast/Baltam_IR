@@ -298,6 +298,19 @@ void rewrite_non_ssa_instruction(const NonSSANode& node, RenameState& state,
             append_instruction<SSACopyNode>(state, dst, ValueRef{src}, location);
             return;
         }
+        case NonSSANode::GlobalLoad: {
+            const auto& load = static_cast<const GlobalLoadNode&>(node);
+            const ValueId result = define_value(state, load.result().name, pushed_names);
+            append_instruction<SSAGlobalLoadNode>(state, result, load.symbol(), location);
+            return;
+        }
+        case NonSSANode::GlobalStore: {
+            const auto& store = static_cast<const GlobalStoreNode&>(node);
+            const ValueId value =
+                ensure_current_value(state, store.value().name, pushed_names, location);
+            append_instruction<SSAGlobalStoreNode>(state, store.symbol(), ValueRef{value}, location);
+            return;
+        }
         case NonSSANode::UnaryOp: {
             const auto& unary = static_cast<const UnaryOpNode&>(node);
             const ValueId operand =
@@ -415,6 +428,8 @@ void rewrite_terminal(const BasicBlock& src_block, RenameState& state,
         case NonSSANode::Number:
         case NonSSANode::Text:
         case NonSSANode::Assign:
+        case NonSSANode::GlobalLoad:
+        case NonSSANode::GlobalStore:
         case NonSSANode::UnaryOp:
         case NonSSANode::BinOp:
         case NonSSANode::Call:

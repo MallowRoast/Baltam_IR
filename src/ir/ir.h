@@ -134,6 +134,8 @@ public:
         Number,
         Text,
         Assign,
+        GlobalLoad,
+        GlobalStore,
         UnaryOp,
         BinOp,
         Call,
@@ -172,6 +174,8 @@ public:
         SSA_Undef,
         SSA_Phi,
         SSA_Copy,
+        SSA_GlobalLoad,
+        SSA_GlobalStore,
         SSA_UnaryOp,
         SSA_BinOp,
         SSA_Call,
@@ -238,6 +242,38 @@ public:
 private:
     NamedValue dst_;
     NamedValue src_;
+};
+
+/**
+ * @brief 从 global 工作区读取一个具名值。
+ */
+class GlobalLoadNode final : public NonSSANode {
+public:
+    GlobalLoadNode(NamedValue result, std::string symbol,
+                   std::optional<SourceLocation> location = std::nullopt);
+
+    const NamedValue& result() const;
+    const std::string& symbol() const;
+
+private:
+    NamedValue result_;
+    std::string symbol_;
+};
+
+/**
+ * @brief 把一个值写回 global 工作区。
+ */
+class GlobalStoreNode final : public NonSSANode {
+public:
+    GlobalStoreNode(std::string symbol, NamedValue value,
+                    std::optional<SourceLocation> location = std::nullopt);
+
+    const std::string& symbol() const;
+    const NamedValue& value() const;
+
+private:
+    std::string symbol_;
+    NamedValue value_;
 };
 
 /**
@@ -465,6 +501,38 @@ public:
 private:
     ValueId result_ = InvalidValueId;
     ValueRef src_;
+};
+
+/**
+ * @brief untyped SSA global 读取节点。
+ */
+class SSAGlobalLoadNode final : public UntypedSSANode {
+public:
+    SSAGlobalLoadNode(ValueId result, std::string symbol,
+                      std::optional<SourceLocation> location = std::nullopt);
+
+    ValueId result() const;
+    const std::string& symbol() const;
+
+private:
+    ValueId result_ = InvalidValueId;
+    std::string symbol_;
+};
+
+/**
+ * @brief untyped SSA global 写回节点。
+ */
+class SSAGlobalStoreNode final : public UntypedSSANode {
+public:
+    SSAGlobalStoreNode(std::string symbol, ValueRef value,
+                       std::optional<SourceLocation> location = std::nullopt);
+
+    const std::string& symbol() const;
+    ValueRef value() const;
+
+private:
+    std::string symbol_;
+    ValueRef value_;
 };
 
 /**

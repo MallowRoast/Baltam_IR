@@ -251,6 +251,11 @@ void collect_ssa_result_ids(const UntypedSSANode& node, std::vector<ValueId>& re
         case UntypedSSANode::SSA_Copy:
             result_ids.push_back(static_cast<const SSACopyNode&>(node).result());
             return;
+        case UntypedSSANode::SSA_GlobalLoad:
+            result_ids.push_back(static_cast<const SSAGlobalLoadNode&>(node).result());
+            return;
+        case UntypedSSANode::SSA_GlobalStore:
+            return;
         case UntypedSSANode::SSA_UnaryOp:
             result_ids.push_back(static_cast<const SSAUnaryOpNode&>(node).result());
             return;
@@ -476,6 +481,15 @@ std::string expr_text(const NonSSANode& node) {
             const auto& assign = static_cast<const AssignNode&>(node);
             return "copy " + format_named_value(assign.src());
         }
+        case NonSSANode::GlobalLoad: {
+            const auto& load = static_cast<const GlobalLoadNode&>(node);
+            return "global.load " + format_function_ref(load.symbol());
+        }
+        case NonSSANode::GlobalStore: {
+            const auto& store = static_cast<const GlobalStoreNode&>(node);
+            return "global.store " + format_function_ref(store.symbol()) + ", " +
+                   format_named_value(store.value());
+        }
         case NonSSANode::UnaryOp: {
             const auto& unary = static_cast<const UnaryOpNode&>(node);
             return unary_opcode(unary.op()) + " " + format_named_value(unary.operand());
@@ -561,6 +575,15 @@ std::string expr_text(const Function& function, const SSADisplayNames& display_n
             const auto& copy = static_cast<const SSACopyNode&>(node);
             return "copy " + format_ssa_value(function, display_names, copy.src());
         }
+        case UntypedSSANode::SSA_GlobalLoad: {
+            const auto& load = static_cast<const SSAGlobalLoadNode&>(node);
+            return "global.load " + format_function_ref(load.symbol());
+        }
+        case UntypedSSANode::SSA_GlobalStore: {
+            const auto& store = static_cast<const SSAGlobalStoreNode&>(node);
+            return "global.store " + format_function_ref(store.symbol()) + ", " +
+                   format_ssa_value(function, display_names, store.value());
+        }
         case UntypedSSANode::SSA_UnaryOp: {
             const auto& unary = static_cast<const SSAUnaryOpNode&>(node);
             return unary_opcode(unary.op()) + " " + format_ssa_value(function, display_names,
@@ -620,6 +643,13 @@ std::string format_node_text(const Function& function, const SSADisplayNames& di
                 case NonSSANode::Assign:
                     text = format_named_value(static_cast<const AssignNode&>(non_ssa).dst()) + " = ";
                     break;
+                case NonSSANode::GlobalLoad:
+                    text =
+                        format_named_value(static_cast<const GlobalLoadNode&>(non_ssa).result()) +
+                        " = ";
+                    break;
+                case NonSSANode::GlobalStore:
+                    break;
                 case NonSSANode::UnaryOp:
                     text = format_named_value(static_cast<const UnaryOpNode&>(non_ssa).result()) + " = ";
                     break;
@@ -670,6 +700,13 @@ std::string format_node_text(const Function& function, const SSADisplayNames& di
                     text = format_ssa_value(function, display_names,
                                             static_cast<const SSACopyNode&>(ssa).result()) +
                            " = ";
+                    break;
+                case UntypedSSANode::SSA_GlobalLoad:
+                    text = format_ssa_value(function, display_names,
+                                            static_cast<const SSAGlobalLoadNode&>(ssa).result()) +
+                           " = ";
+                    break;
+                case UntypedSSANode::SSA_GlobalStore:
                     break;
                 case UntypedSSANode::SSA_UnaryOp:
                     text = format_ssa_value(function, display_names,

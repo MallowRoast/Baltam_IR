@@ -13,6 +13,7 @@
 #include "ba_obj/ba_obj.h"
 #include "ba_obj/cell.h"
 #include "ba_obj/function_handle.h"
+#include "ba_obj/matrix.h"
 #include "ba_obj/variable_list.h"
 #include "baltam_worker/builtin_manager.h"
 #include "print/obj2str.h"
@@ -25,6 +26,7 @@ using ValueTable = std::unordered_map<ValueId, Value>;
 struct ExecutionState {
     Function& function;
     const ExecutionOptions& options;
+    std::shared_ptr<RuntimeWorkspace> workspace;
     std::size_t call_depth = 0;
     std::size_t actual_nargin = 0;
     std::size_t requested_nargout = 0;
@@ -128,6 +130,17 @@ Value undef() {
 
 Value missing_input() {
     return Value{Value::MissingInput, nullptr};
+}
+
+Value::Object copy_object(const Value::Object& object) {
+    if (object == nullptr) {
+        return nullptr;
+    }
+    return std::make_shared<ba_obj>(*object);
+}
+
+Value::Object make_empty_double() {
+    return std::make_shared<ba_obj>(new matrix<double>(0, 0));
 }
 
 const char* callable_type_text(CallableType type) {
@@ -511,6 +524,26 @@ Value::Object pack_varargin_objects(const std::vector<Value::Object>& extra_args
     return std::make_shared<ba_obj>(new cell_array(extra_args, false));
 }
 
+Value load_global_value(const ExecutionState& state, const std::string& symbol) {
+    if (state.workspace == nullptr) {
+        throw std::runtime_error("执行 global.load 时缺少运行时工作区。");
+    }
+
+    auto it = state.workspace->globals.find(symbol);
+    if (it == state.workspace->globals.end() || it->second == nullptr) {
+        return concrete(make_empty_double());
+    }
+    return concrete(copy_object(it->second));
+}
+
+void store_global_value(const ExecutionState& state, const std::string& symbol,
+                        const Value::Object& object) {
+    if (state.workspace == nullptr) {
+        throw std::runtime_error("执行 global.store 时缺少运行时工作区。");
+    }
+    state.workspace->globals[symbol] = copy_object(object);
+}
+
 bool is_variadic_output_seed(const ExecutionState& state, ValueId id) {
     if (!state.function.has_varargout()) {
         return false;
@@ -786,6 +819,18 @@ void execute_instruction(const IRNode& node, ExecutionState& state) {
             state.store_value(copy.result(), state.load_value(copy.src()));
             return;
         }
+        case UntypedSSANode::SSA_GlobalLoad: {
+            const auto& load = static_cast<const SSAGlobalLoadNode&>(ssa);
+            state.store_value(load.result(), load_global_value(state, load.symbol()));
+            return;
+        }
+        case UntypedSSANode::SSA_GlobalStore: {
+            const auto& store = static_cast<const SSAGlobalStoreNode&>(ssa);
+            store_global_value(
+                state, store.symbol(),
+                state.require_concrete_object(store.value(), "global.store 输入值"));
+            return;
+        }
         case UntypedSSANode::SSA_UnaryOp: {
             const auto& unary = static_cast<const SSAUnaryOpNode&>(ssa);
             state.store_value(unary.result(),
@@ -878,6 +923,8 @@ BasicBlock* execute_terminal(const BasicBlock& block, ExecutionState& state) {
         case UntypedSSANode::SSA_Undef:
         case UntypedSSANode::SSA_Phi:
         case UntypedSSANode::SSA_Copy:
+        case UntypedSSANode::SSA_GlobalLoad:
+        case UntypedSSANode::SSA_GlobalStore:
         case UntypedSSANode::SSA_UnaryOp:
         case UntypedSSANode::SSA_BinOp:
         case UntypedSSANode::SSA_Call:
@@ -936,6 +983,11 @@ void print_final_named_bindings(const ExecutionState& state, const ExecResult& r
 ExecResult execute_function_impl(Function& function, const std::vector<Value::Object>& args,
                                  const ExecutionOptions& options, std::size_t call_depth,
                                  std::size_t requested_nargout) {
+    ExecutionOptions resolved_options = options;
+    if (resolved_options.workspace == nullptr) {
+        resolved_options.workspace = std::make_shared<RuntimeWorkspace>();
+    }
+
     if (function.stage() != IRNode::UntypedSSA) {
         throw std::runtime_error("解释器只支持执行 `UntypedSSA` 函数 `" + function.name() + "`。");
     }
@@ -953,7 +1005,15 @@ ExecResult execute_function_impl(Function& function, const std::vector<Value::Ob
         throw std::runtime_error("执行函数 `" + function.name() + "` 时传入了过多实参。");
     }
 
-    ExecutionState state{function, options, call_depth, args.size(), requested_nargout, {}, {}, {},
+    ExecutionState state{function,
+                         resolved_options,
+                         resolved_options.workspace,
+                         call_depth,
+                         args.size(),
+                         requested_nargout,
+                         {},
+                         {},
+                         {},
                          nullptr};
     for (std::size_t i = 0; i < fixed_input_count; ++i) {
         if (i < args.size()) {

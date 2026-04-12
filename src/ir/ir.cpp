@@ -73,6 +73,34 @@ const NamedValue& AssignNode::src() const {
     return src_;
 }
 
+GlobalLoadNode::GlobalLoadNode(NamedValue result, std::string symbol,
+                               std::optional<SourceLocation> location)
+    : NonSSANode(NonSSANode::GlobalLoad, std::move(location)),
+      result_(std::move(result)),
+      symbol_(std::move(symbol)) {}
+
+const NamedValue& GlobalLoadNode::result() const {
+    return result_;
+}
+
+const std::string& GlobalLoadNode::symbol() const {
+    return symbol_;
+}
+
+GlobalStoreNode::GlobalStoreNode(std::string symbol, NamedValue value,
+                                 std::optional<SourceLocation> location)
+    : NonSSANode(NonSSANode::GlobalStore, std::move(location)),
+      symbol_(std::move(symbol)),
+      value_(std::move(value)) {}
+
+const std::string& GlobalStoreNode::symbol() const {
+    return symbol_;
+}
+
+const NamedValue& GlobalStoreNode::value() const {
+    return value_;
+}
+
 UnaryOpNode::UnaryOpNode(Op op, NamedValue result, NamedValue operand,
                          std::optional<SourceLocation> location)
     : NonSSANode(NonSSANode::UnaryOp, std::move(location)),
@@ -456,6 +484,34 @@ ValueId SSACopyNode::result() const {
 
 ValueRef SSACopyNode::src() const {
     return src_;
+}
+
+SSAGlobalLoadNode::SSAGlobalLoadNode(ValueId result, std::string symbol,
+                                     std::optional<SourceLocation> location)
+    : UntypedSSANode(UntypedSSANode::SSA_GlobalLoad, std::move(location)),
+      result_(result),
+      symbol_(std::move(symbol)) {}
+
+ValueId SSAGlobalLoadNode::result() const {
+    return result_;
+}
+
+const std::string& SSAGlobalLoadNode::symbol() const {
+    return symbol_;
+}
+
+SSAGlobalStoreNode::SSAGlobalStoreNode(std::string symbol, ValueRef value,
+                                       std::optional<SourceLocation> location)
+    : UntypedSSANode(UntypedSSANode::SSA_GlobalStore, std::move(location)),
+      symbol_(std::move(symbol)),
+      value_(value) {}
+
+const std::string& SSAGlobalStoreNode::symbol() const {
+    return symbol_;
+}
+
+ValueRef SSAGlobalStoreNode::value() const {
+    return value_;
 }
 
 SSAUnaryOpNode::SSAUnaryOpNode(Op op, ValueId result, ValueRef operand,
