@@ -1,5 +1,5 @@
 % 变量赋值出现在使用后
-function test40
+function test41
 	for i = 1:10
 		if (i == 5)
 			disp(x);
