@@ -96,7 +96,49 @@ global.store @A, %updated
 - 普通 `setfield`
 - 加上根位置的 `GlobalStoreNode`
 
-### 6. call 输出写回 `global`
+### 6. `global` 上的 `A(...)` / `A{...}` 访问
+
+对于表达式位置的：
+
+```matlab
+A(...)
+```
+
+如果根名字 `A` 是 global，lowering 不会试图从本地名字表里找 `%A`，而是会先显式读取：
+
+```text
+%t0 = global.load @A
+%t1 = call %t0(%idx...)
+```
+
+这里 `%t0(%idx...)` 仍然是 indirect call 形状；真正“这是函数调用还是圆括号取值”仍然交给运行期决定。
+
+对于写回位置的：
+
+```matlab
+A(...) = rhs
+A{...} = rhs
+```
+
+当前实现都会走统一的 load-modify-store 展开：
+
+```text
+%t0 = global.load @A
+%t1 = call @__ir_paren_set__(%t0, %idx..., %rhs)
+global.store @A, %t1
+```
+
+或：
+
+```text
+%t0 = global.load @A
+%t1 = call @__ir_cell_set__(%t0, %idx..., %rhs)
+global.store @A, %t1
+```
+
+也就是说，global 的索引/元胞写回和 struct 写回一样，本质上都是“先得到更新后的整个 base，再把整个 base 写回 global 槽位”。
+
+### 7. call 输出写回 `global`
 
 对于：
 
@@ -113,7 +155,7 @@ A = foo(...);
 
 - `A = foo(...)`
 - `[A, x] = foo(...)`
-- 以及后续可能的带回写左值
+- `[A(...), x] = foo(...)`
 
 ## non-SSA IR 设计
 
@@ -298,14 +340,12 @@ global.store @S, %t3
 - `global A`
 - `A = rhs`
 - `rhs` 中读取 `A`
+- `rhs` 中读取 `A(...)`
+- `rhs` 中读取 `A{...}`
 - `A = foo(...)`
+- `A(...) = rhs`
+- `A{...} = rhs`
 - `A.a = rhs`
 - `rhs` 中读取 `A.a`
+- `[A(...), x] = foo(...)`
 - 跨模块内函数共享同一个 `global` 工作区
-
-当前实现仍然没有支持：
-
-- `global A; A(...) = rhs`
-- `global A; A{...} = rhs`
-
-也就是 global 的圆括号写回和元胞写回还没有接进这条链。

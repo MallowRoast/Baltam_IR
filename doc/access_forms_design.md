@@ -88,6 +88,8 @@ node_asgn(node_name(x), node_multiple_func(...))
 - `Direct`：当 callee 在当前语境里被视为已知函数名
 - `Indirect`：当 callee 应被视为“一个值”
 
+如果根名字 `A` 是 global，lowering 会先显式生成一次 `global.load`，再把这个临时值作为 indirect callee。这样 `A(...)` 在 SSA 阶段不会去错误地查找本地 `%A`。
+
 这里没有单独的 `ParenGetNode`。
 
 也就是说，`A(...)` 的 IR 仍然是“调用形状”，但这个调用可能在运行期退化成圆括号取值。
@@ -188,16 +190,13 @@ SSA 后仍然是普通 `SSACallNode`，callee 为 direct：
 
 需要注意的是，runtime `block set` 会原地修改 base，所以解释器会先复制一份 base，再把复制体传进去。这样才能满足 SSA 的“每次写回产生新版本值”。
 
-## 当前限制
+如果根名字 `A` 是 global，则会展开成：
 
-当前实现还没有支持：
-
-```matlab
-global A;
-A(...) = rhs;
+```text
+%t0 = global.load @A
+%t1 = call @__ir_paren_set__(%t0, %idx..., %rhs)
+global.store @A, %t1
 ```
-
-也就是 global 根对象的圆括号写回仍未接通。
 
 ## 三、`A.a`
 
@@ -384,6 +383,7 @@ node_asgn
 ```
 
 这里没有保留任何“函数调用 vs 取值”的二义性，因为 AST 已经把 brace 语义固定下来了。
+如果 base 根名字是 global，则 `%base` 会先由 `global.load` 产生。
 
 ## non-SSA IR
 
@@ -459,16 +459,13 @@ call @__ir_cell_set__(base, idx..., value)
 
 和 paren setter 一样，解释器会先复制 base，再执行 runtime 写回，从而保持 SSA 的“新版本值”语义。
 
-## 当前限制
+如果根名字 `A` 是 global，则会展开成：
 
-当前实现还没有支持：
-
-```matlab
-global A;
-A{...} = rhs;
+```text
+%t0 = global.load @A
+%t1 = call @__ir_cell_set__(%t0, %idx..., %rhs)
+global.store @A, %t1
 ```
-
-global 根对象的 brace 写回仍未接通。
 
 ## 七、为什么三类语法要分开设计
 

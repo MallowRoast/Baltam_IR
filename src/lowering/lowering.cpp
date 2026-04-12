@@ -651,7 +651,8 @@ void append_bool_assignment(const NamedValue& target, bool value, LoweringContex
 bool should_treat_symref_as_user_value(const std::shared_ptr<symref>& sym,
                                        const LoweringContext& ctx) {
     return sym != nullptr &&
-           (sym->get_symbol_type() == symbol_variable || ctx.is_known_user_name(sym->name()));
+           (sym->get_symbol_type() == symbol_variable || ctx.is_known_user_name(sym->name()) ||
+            ctx.is_active_global_name(sym->name()));
 }
 
 std::vector<NamedValue> lower_call_inputs(const ast_ptr& input_args, LoweringContext& ctx) {
@@ -672,15 +673,35 @@ std::vector<NamedValue> lower_call_inputs(const ast_ptr& input_args, LoweringCon
     return inputs;
 }
 
-CallNode::CalleeType lower_multiple_func_callee_type(const std::shared_ptr<multipleFuncCall>& call,
-                                                     const LoweringContext& ctx) {
+struct LoweredCallCallee {
+    CallNode::CalleeType type = CallNode::Direct;
+    std::string callee;
+};
+
+LoweredCallCallee lower_multiple_func_callee(const std::shared_ptr<multipleFuncCall>& call,
+                                             LoweringContext& ctx) {
+    LoweredCallCallee result;
+    result.callee = call != nullptr ? call->name() : "";
+
     if (!call || call->s() == nullptr || call->s()->nodetype != node_name) {
-        return CallNode::Direct;
+        return result;
     }
 
     const auto callee_sym = std::static_pointer_cast<symref>(call->s());
-    return should_treat_symref_as_user_value(callee_sym, ctx) ? CallNode::Indirect
-                                                              : CallNode::Direct;
+    if (!should_treat_symref_as_user_value(callee_sym, ctx)) {
+        return result;
+    }
+
+    result.type = CallNode::Indirect;
+    if (!ctx.is_active_global_name(callee_sym->name())) {
+        return result;
+    }
+
+    const NamedValue callee = ctx.create_temp("__callee.global");
+    ctx.append_node<GlobalLoadNode>(callee, callee_sym->name(), source_location_from(call->s()));
+    ctx.mark_defined(callee);
+    result.callee = callee.name;
+    return result;
 }
 
 void lower_short_circuit_expr_into(const ast_ptr& node, const NamedValue& target,
@@ -835,6 +856,46 @@ NamedValue lower_struct_set_result(const ast_ptr& base_node, const ast_ptr& fiel
     return updated_base;
 }
 
+NamedValue lower_paren_set_result(const ast_ptr& base_node, const ast_ptr& index_args,
+                                  const NamedValue& value, LoweringContext& ctx,
+                                  const ast_ptr& location_node) {
+    const NamedValue base = lower_expr_to_operand(base_node, ctx);
+    const NamedValue updated_base = ctx.create_temp("__paren.set");
+
+    std::vector<NamedValue> inputs;
+    inputs.push_back(base);
+
+    std::vector<NamedValue> block_indices = lower_call_inputs(index_args, ctx);
+    inputs.insert(inputs.end(), std::make_move_iterator(block_indices.begin()),
+                  std::make_move_iterator(block_indices.end()));
+    inputs.push_back(value);
+
+    ctx.append_node<CallNode>(CallNode::Direct, "__ir_paren_set__",
+                              std::vector<NamedValue>{updated_base}, std::move(inputs),
+                              source_location_from(location_node));
+    ctx.mark_defined(updated_base);
+    return updated_base;
+}
+
+NamedValue lower_cell_set_result(const ast_ptr& node, const NamedValue& value,
+                                 LoweringContext& ctx) {
+    const NamedValue base = lower_expr_to_operand(node->branch[0], ctx);
+    const NamedValue updated_base = ctx.create_temp("__cell.set");
+
+    std::vector<NamedValue> inputs;
+    inputs.push_back(base);
+    for (const ast_ptr& index_node : collect_cell_index_nodes(node, true)) {
+        inputs.push_back(lower_expr_to_operand(index_node, ctx));
+    }
+    inputs.push_back(value);
+
+    ctx.append_node<CallNode>(CallNode::Direct, "__ir_cell_set__",
+                              std::vector<NamedValue>{updated_base}, std::move(inputs),
+                              source_location_from(node));
+    ctx.mark_defined(updated_base);
+    return updated_base;
+}
+
 void lower_store_back_to_lvalue(const ast_ptr& lhs, const NamedValue& value, LoweringContext& ctx) {
     if (!lhs) {
         throw std::runtime_error("non-SSA lower 不能把值写回到空左值。");
@@ -865,7 +926,7 @@ void lower_store_back_to_lvalue(const ast_ptr& lhs, const NamedValue& value, Low
             break;
     }
 
-    throw std::runtime_error("non-SSA lower phase2 暂不支持该左值写回形式。");
+    throw std::runtime_error("non-SSA lower 暂不支持该左值写回形式。");
 }
 
 void lower_call_stmt(const std::shared_ptr<multipleFuncCall>& call, LoweringContext& ctx) {
@@ -886,9 +947,9 @@ void lower_call_stmt(const std::shared_ptr<multipleFuncCall>& call, LoweringCont
     }
 
     std::vector<NamedValue> inputs = lower_call_inputs(call->in_args(), ctx);
-    const CallNode::CalleeType callee_type = lower_multiple_func_callee_type(call, ctx);
+    const LoweredCallCallee callee = lower_multiple_func_callee(call, ctx);
     const std::vector<NamedValue> call_results = outputs;
-    ctx.append_node<CallNode>(callee_type, call->name(), std::move(outputs), std::move(inputs),
+    ctx.append_node<CallNode>(callee.type, callee.callee, std::move(outputs), std::move(inputs),
                               source_location_from(call));
     ctx.mark_defined(call_results);
 
@@ -905,26 +966,13 @@ void lower_call_stmt(const std::shared_ptr<multipleFuncCall>& call, LoweringCont
             continue;
         }
 
-        const auto lhs_call = std::static_pointer_cast<multipleFuncCall>(spec.lhs);
-        const NamedValue target = ctx.classify_name(spec.name);
-        if (ctx.is_active_global_name(target.name)) {
-            throw std::runtime_error("non-SSA lower phase1 暂不支持对 global 变量做索引写回。");
-        }
-
-        std::vector<NamedValue> set_inputs;
-        set_inputs.push_back(target);
-
-        std::vector<NamedValue> block_indices = lower_call_inputs(lhs_call->in_args(), ctx);
-        set_inputs.insert(set_inputs.end(), std::make_move_iterator(block_indices.begin()),
-                          std::make_move_iterator(block_indices.end()));
         // 返回值必须以“call 先全部完成，再按左值顺序回写”的方式展开：
         // 这样既保留多返回值求值顺序，也复用已有 `__ir_paren_set__` 桥接语义。
-        set_inputs.push_back(call_results[i]);
-
-        ctx.append_node<CallNode>(CallNode::Direct, "__ir_paren_set__",
-                                  std::vector<NamedValue>{target}, std::move(set_inputs),
-                                  source_location_from(spec.lhs));
-        ctx.mark_defined(target);
+        const auto lhs_call = std::static_pointer_cast<multipleFuncCall>(spec.lhs);
+        const NamedValue updated_base =
+            lower_paren_set_result(lhs_call->s(), lhs_call->in_args(), call_results[i], ctx,
+                                   spec.lhs);
+        lower_store_back_to_lvalue(lhs_call->s(), updated_base, ctx);
     }
 }
 
@@ -943,27 +991,15 @@ bool is_block_assignment_lhs(const ast_ptr& node) {
 
 void lower_block_assignment_stmt(const std::shared_ptr<symasgn>& assign, LoweringContext& ctx) {
     const auto lhs_call = std::static_pointer_cast<multipleFuncCall>(assign->s());
-    const NamedValue target = ctx.classify_name(lhs_call->name());
-    if (ctx.is_active_global_name(target.name)) {
-        throw std::runtime_error("non-SSA lower phase1 暂不支持对 global 变量做圆括号写回。");
-    }
-
     // `A(...) = rhs` 在 AST 中会被编码成 `node_asgn(node_multiple_func, rhs)`；
     // 这里可以在 lowering 阶段就唯一化成 `__ir_paren_set__`：
     // 赋值语境已经保证它不是普通函数调用，只可能是圆括号下标写入。
-    // 后续由解释器桥接到 runtime `block set`，并返回新的 SSA 版本值。
-    std::vector<NamedValue> inputs;
-    inputs.push_back(target);
-
-    std::vector<NamedValue> block_indices = lower_call_inputs(lhs_call->in_args(), ctx);
-    inputs.insert(inputs.end(), std::make_move_iterator(block_indices.begin()),
-                  std::make_move_iterator(block_indices.end()));
-    inputs.push_back(lower_expr_to_operand(assign->v(), ctx));
-
-    ctx.append_node<CallNode>(CallNode::Direct, "__ir_paren_set__",
-                              std::vector<NamedValue>{target}, std::move(inputs),
-                              source_location_from(assign));
-    ctx.mark_defined(target);
+    // 后续由解释器桥接到 runtime `block set`，并返回新的 SSA 版本值；
+    // 最终再按 lhs 根对象决定写回局部名字还是 global 槽位。
+    const NamedValue updated_base =
+        lower_paren_set_result(lhs_call->s(), lhs_call->in_args(),
+                               lower_expr_to_operand(assign->v(), ctx), ctx, assign);
+    lower_store_back_to_lvalue(lhs_call->s(), updated_base, ctx);
 }
 
 void lower_expr_into(const ast_ptr& node, const NamedValue& target, LoweringContext& ctx) {
@@ -1093,8 +1129,8 @@ void lower_expr_into(const ast_ptr& node, const NamedValue& target, LoweringCont
             // 它既可能是函数/函数句柄调用，也可能是矩阵/元胞等对象的圆括号取值。
             // 已知是“变量值”的裸名字会先 lower 成 indirect call；
             // 运行时再根据该值是否是 `function_handle` 分派到函数调用或 `block get`。
-            const CallNode::CalleeType callee_type = lower_multiple_func_callee_type(call, ctx);
-            ctx.append_node<CallNode>(callee_type, call->name(), std::vector<NamedValue>{target},
+            const LoweredCallCallee callee = lower_multiple_func_callee(call, ctx);
+            ctx.append_node<CallNode>(callee.type, callee.callee, std::vector<NamedValue>{target},
                                       std::move(inputs), source_location_from(node));
             ctx.mark_defined(target);
             return;
@@ -1497,23 +1533,9 @@ void lower_stmt(const ast_ptr& node, LoweringContext& ctx) {
                 throw std::runtime_error("non-SSA lower 目前只支持名字基对象的元胞写入。");
             }
 
-            const auto base_sym = std::static_pointer_cast<symref>(node->branch[0]);
-            const NamedValue target = ctx.classify_name(base_sym->name());
-            if (ctx.is_active_global_name(target.name)) {
-                throw std::runtime_error("non-SSA lower phase1 暂不支持对 global 变量做元胞写回。");
-            }
-
-            std::vector<NamedValue> inputs;
-            inputs.push_back(target);
-            for (const ast_ptr& index_node : collect_cell_index_nodes(node, true)) {
-                inputs.push_back(lower_expr_to_operand(index_node, ctx));
-            }
-            inputs.push_back(lower_expr_to_operand(node->branch.back(), ctx));
-
-            ctx.append_node<CallNode>(CallNode::Direct, "__ir_cell_set__",
-                                      std::vector<NamedValue>{target}, std::move(inputs),
-                                      source_location_from(node));
-            ctx.mark_defined(target);
+            const NamedValue updated_base =
+                lower_cell_set_result(node, lower_expr_to_operand(node->branch.back(), ctx), ctx);
+            lower_store_back_to_lvalue(node->branch[0], updated_base, ctx);
             return;
         }
         case node_flow_if:
