@@ -212,10 +212,18 @@ c{2} = (numel(a) < 4 || a(4) == 5);
 
 ```text
 %sc = ... ; short-circuit CFG result
-%tmp = call @__ir_struct_get__(%s.0, %"a")
-%tmp2 = call @__ir_struct_set__(%tmp, %"b", %sc)
-%s.1 = call @__ir_struct_set__(%s.0, %"a", %tmp2)
+%tmp = call @__ir_getfield_for_write__(%s.0, %"a")
+%tmp2 = call @setfield(%tmp, %"b", %sc)
+%s.1 = call @setfield(%s.0, %"a", %tmp2)
 ```
+
+如果 setter 的 base 还是未初始化的本地名字，解释器会按 setter 类型补一个空 base：
+
+- `__ir_paren_set__` -> `[]`
+- `__ir_cell_set__` -> 空 cell
+- `setfield` / `__ir_getfield_for_write__` -> 空 struct
+
+因此短路表达式作为 rhs 时，不需要额外先“显式构造一个空容器”，再进入 setter 路径。
 
 ## 当前实现约束
 

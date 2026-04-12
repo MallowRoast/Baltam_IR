@@ -120,6 +120,7 @@ std::vector<std::string> collect_assignment_target_name_list(const ast_ptr& node
 
     switch (node->nodetype) {
         case node_nop:
+        case node_placeholder:
             return {};
         case node_name: {
             const auto sym = std::static_pointer_cast<symref>(node);
@@ -157,6 +158,7 @@ struct CallOutputTargetSpec {
     std::string name;
     ast_ptr lhs;
     bool requires_store_back = false;
+    bool is_placeholder = false;
 };
 
 std::vector<CallOutputTargetSpec> collect_call_output_target_specs(const ast_ptr& node) {
@@ -167,6 +169,8 @@ std::vector<CallOutputTargetSpec> collect_call_output_target_specs(const ast_ptr
     switch (node->nodetype) {
         case node_nop:
             return {};
+        case node_placeholder:
+            return {{"", node, false, true}};
         case node_name: {
             const auto sym = std::static_pointer_cast<symref>(node);
             return {{sym->name(), node, false}};
@@ -227,9 +231,11 @@ void collect_predeclared_user_names(const ast_ptr& node,
             return;
         case node_asgn: {
             const auto assign = std::static_pointer_cast<symasgn>(node);
-            if (assign->s() != nullptr && assign->s()->nodetype == node_name &&
-                global_names.find(assign->name()) == global_names.end()) {
-                names.insert(assign->name());
+            for (const std::string& name :
+                 collect_assignment_target_name_list(assign->s())) {
+                if (global_names.find(name) == global_names.end()) {
+                    names.insert(name);
+                }
             }
             return;
         }
@@ -244,6 +250,14 @@ void collect_predeclared_user_names(const ast_ptr& node,
             }
             return;
         case node_struct_set:
+            for (const std::string& name :
+                 collect_assignment_target_name_list(node->branch[0])) {
+                if (global_names.find(name) == global_names.end()) {
+                    names.insert(name);
+                }
+            }
+            return;
+        case node_cell_set:
             for (const std::string& name :
                  collect_assignment_target_name_list(node->branch[0])) {
                 if (global_names.find(name) == global_names.end()) {
@@ -822,7 +836,7 @@ NamedValue lower_struct_field_selector_to_operand(const ast_ptr& node, LoweringC
 
     if (node->nodetype == node_name) {
         const auto sym = std::static_pointer_cast<symref>(node);
-        if (!node->paren && !should_treat_symref_as_user_value(sym, ctx)) {
+        if (!node->paren) {
             const NamedValue field_name = ctx.create_hidden_name("struct.field");
             ctx.append_node<TextNode>(field_name, sym->name(), source_location_from(node));
             ctx.mark_defined(field_name);
@@ -833,6 +847,25 @@ NamedValue lower_struct_field_selector_to_operand(const ast_ptr& node, LoweringC
     return lower_expr_to_operand(node, ctx);
 }
 
+NamedValue lower_struct_base_for_write(const ast_ptr& node, LoweringContext& ctx) {
+    if (!node) {
+        throw std::runtime_error("non-SSA lower struct 写回时缺少 base。");
+    }
+
+    if (node->nodetype != node_struct_get) {
+        return lower_expr_to_operand(node, ctx);
+    }
+
+    const NamedValue parent = lower_struct_base_for_write(node->branch[0], ctx);
+    const NamedValue field = lower_struct_field_selector_to_operand(node->branch[1], ctx);
+    const NamedValue nested = ctx.create_temp("__struct.get.for.write");
+    ctx.append_node<CallNode>(CallNode::Direct, "__ir_getfield_for_write__",
+                              std::vector<NamedValue>{nested},
+                              std::vector<NamedValue>{parent, field}, source_location_from(node));
+    ctx.mark_defined(nested);
+    return nested;
+}
+
 NamedValue lower_struct_set_result(const ast_ptr& base_node, const ast_ptr& field_node,
                                    const NamedValue& value, LoweringContext& ctx,
                                    const ast_ptr& location_node) {
@@ -840,7 +873,7 @@ NamedValue lower_struct_set_result(const ast_ptr& base_node, const ast_ptr& fiel
         throw std::runtime_error("non-SSA lower 遇到了不完整的 struct 写回节点。");
     }
 
-    const NamedValue base = lower_expr_to_operand(base_node, ctx);
+    const NamedValue base = lower_struct_base_for_write(base_node, ctx);
     const NamedValue field = lower_struct_field_selector_to_operand(field_node, ctx);
     const NamedValue updated_base = ctx.create_temp("__struct.set");
 
@@ -884,7 +917,8 @@ NamedValue lower_cell_set_result(const ast_ptr& node, const NamedValue& value,
 
     std::vector<NamedValue> inputs;
     inputs.push_back(base);
-    for (const ast_ptr& index_node : collect_cell_index_nodes(node, true)) {
+    const bool has_assignment_value = node->nodetype == node_cell_set;
+    for (const ast_ptr& index_node : collect_cell_index_nodes(node, has_assignment_value)) {
         inputs.push_back(lower_expr_to_operand(index_node, ctx));
     }
     inputs.push_back(value);
@@ -896,30 +930,63 @@ NamedValue lower_cell_set_result(const ast_ptr& node, const NamedValue& value,
     return updated_base;
 }
 
+ast_ptr unwrap_single_output_lvalue(const ast_ptr& node) {
+    if (node == nullptr) {
+        return nullptr;
+    }
+
+    if ((node->nodetype == node_list || node->nodetype == node_horz_list) &&
+        node->branch.size() == 1) {
+        return unwrap_single_output_lvalue(node->branch.front());
+    }
+
+    return node;
+}
+
 void lower_store_back_to_lvalue(const ast_ptr& lhs, const NamedValue& value, LoweringContext& ctx) {
     if (!lhs) {
         throw std::runtime_error("non-SSA lower 不能把值写回到空左值。");
     }
 
-    switch (lhs->nodetype) {
+    const ast_ptr normalized_lhs = unwrap_single_output_lvalue(lhs);
+    if (!normalized_lhs) {
+        throw std::runtime_error("non-SSA lower 不能把值写回到空左值。");
+    }
+
+    switch (normalized_lhs->nodetype) {
         case node_name: {
-            const auto sym = std::static_pointer_cast<symref>(lhs);
+            const auto sym = std::static_pointer_cast<symref>(normalized_lhs);
             if (ctx.is_active_global_name(sym->name())) {
-                ctx.append_node<GlobalStoreNode>(sym->name(), value, source_location_from(lhs));
+                ctx.append_node<GlobalStoreNode>(sym->name(), value,
+                                                 source_location_from(normalized_lhs));
                 return;
             }
 
             const NamedValue target = ctx.classify_name(sym->name());
             if (target.name != value.name || target.type != value.type) {
-                ctx.append_node<AssignNode>(target, value, source_location_from(lhs));
+                ctx.append_node<AssignNode>(target, value, source_location_from(normalized_lhs));
             }
             ctx.mark_defined(target);
             return;
         }
         case node_struct_get: {
             const NamedValue updated_base =
-                lower_struct_set_result(lhs->branch[0], lhs->branch[1], value, ctx, lhs);
-            lower_store_back_to_lvalue(lhs->branch[0], updated_base, ctx);
+                lower_struct_set_result(normalized_lhs->branch[0], normalized_lhs->branch[1], value,
+                                        ctx, normalized_lhs);
+            lower_store_back_to_lvalue(normalized_lhs->branch[0], updated_base, ctx);
+            return;
+        }
+        case node_cell_get: {
+            const NamedValue updated_base = lower_cell_set_result(normalized_lhs, value, ctx);
+            lower_store_back_to_lvalue(normalized_lhs->branch[0], updated_base, ctx);
+            return;
+        }
+        case node_multiple_func: {
+            const auto lhs_call = std::static_pointer_cast<multipleFuncCall>(normalized_lhs);
+            const NamedValue updated_base =
+                lower_paren_set_result(lhs_call->s(), lhs_call->in_args(), value, ctx,
+                                       normalized_lhs);
+            lower_store_back_to_lvalue(lhs_call->s(), updated_base, ctx);
             return;
         }
         default:
@@ -936,6 +1003,11 @@ void lower_call_stmt(const std::shared_ptr<multipleFuncCall>& call, LoweringCont
     std::vector<NamedValue> outputs;
     outputs.reserve(output_specs.size());
     for (const CallOutputTargetSpec& spec : output_specs) {
+        if (spec.is_placeholder) {
+            outputs.push_back(ctx.create_temp("__call.discard"));
+            continue;
+        }
+
         const bool requires_store_back =
             spec.requires_store_back ||
             (spec.lhs != nullptr && spec.lhs->nodetype == node_name &&
@@ -955,6 +1027,10 @@ void lower_call_stmt(const std::shared_ptr<multipleFuncCall>& call, LoweringCont
 
     for (std::size_t i = 0; i < output_specs.size(); ++i) {
         const CallOutputTargetSpec& spec = output_specs[i];
+        if (spec.is_placeholder) {
+            continue;
+        }
+
         if (!spec.requires_store_back &&
             !(spec.lhs != nullptr && spec.lhs->nodetype == node_name &&
               ctx.is_active_global_name(spec.name))) {
@@ -977,11 +1053,12 @@ void lower_call_stmt(const std::shared_ptr<multipleFuncCall>& call, LoweringCont
 }
 
 bool is_block_assignment_lhs(const ast_ptr& node) {
-    if (node == nullptr || node->nodetype != node_multiple_func) {
+    const ast_ptr normalized = unwrap_single_output_lvalue(node);
+    if (normalized == nullptr || normalized->nodetype != node_multiple_func) {
         return false;
     }
 
-    const auto call = std::static_pointer_cast<multipleFuncCall>(node);
+    const auto call = std::static_pointer_cast<multipleFuncCall>(normalized);
     // `node_asgn` 左值是否表示 `A(...) = rhs`，只看：
     //   1) 左值本身是 `node_multiple_func`
     //   2) `node_multiple_func` 的 `branch[1]` / `s()` 是 `node_name`
@@ -990,7 +1067,8 @@ bool is_block_assignment_lhs(const ast_ptr& node) {
 }
 
 void lower_block_assignment_stmt(const std::shared_ptr<symasgn>& assign, LoweringContext& ctx) {
-    const auto lhs_call = std::static_pointer_cast<multipleFuncCall>(assign->s());
+    const auto lhs_call =
+        std::static_pointer_cast<multipleFuncCall>(unwrap_single_output_lvalue(assign->s()));
     // `A(...) = rhs` 在 AST 中会被编码成 `node_asgn(node_multiple_func, rhs)`；
     // 这里可以在 lowering 阶段就唯一化成 `__ir_paren_set__`：
     // 赋值语境已经保证它不是普通函数调用，只可能是圆括号下标写入。
@@ -1498,15 +1576,25 @@ void lower_stmt(const ast_ptr& node, LoweringContext& ctx) {
                 lower_block_assignment_stmt(assign, ctx);
                 return;
             }
-            if (assign->s() == nullptr || assign->s()->nodetype != node_name) {
-                throw std::runtime_error("non-SSA lower 目前只支持名字左值赋值。");
-            }
-            if (ctx.is_active_global_name(assign->name())) {
+            const ast_ptr lhs = unwrap_single_output_lvalue(assign->s());
+            if (lhs != nullptr &&
+                (lhs->nodetype == node_struct_get || lhs->nodetype == node_cell_get)) {
                 const NamedValue value = lower_expr_to_operand(assign->v(), ctx);
-                ctx.append_node<GlobalStoreNode>(assign->name(), value, source_location_from(assign));
+                lower_store_back_to_lvalue(lhs, value, ctx);
                 return;
             }
-            lower_expr_into(assign->v(), ctx.classify_name(assign->name()), ctx);
+            if (lhs == nullptr || lhs->nodetype != node_name) {
+                throw std::runtime_error(
+                    std::string("non-SSA lower 目前只支持名字左值赋值，实际遇到: ") +
+                    (lhs != nullptr ? ast_node_type_name(lhs->nodetype) : "<null>"));
+            }
+            const auto lhs_name = std::static_pointer_cast<symref>(lhs)->name();
+            if (ctx.is_active_global_name(lhs_name)) {
+                const NamedValue value = lower_expr_to_operand(assign->v(), ctx);
+                ctx.append_node<GlobalStoreNode>(lhs_name, value, source_location_from(assign));
+                return;
+            }
+            lower_expr_into(assign->v(), ctx.classify_name(lhs_name), ctx);
             return;
         }
         case node_struct_set: {

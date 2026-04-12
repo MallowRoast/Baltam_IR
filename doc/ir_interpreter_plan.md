@@ -75,6 +75,7 @@ struct ExecResult {
 当前 `ExecutionOptions` 还支持：
 
 - 把“函数执行结束后的最终具名绑定”打印到指定输出流
+- 透传共享 `RuntimeWorkspace`，承载 `global` 工作区
 - 递归透传到模块内函数调用，从而在不修改 SSA IR 的前提下观察每次函数执行结束时的名字状态
 
 ## 当前执行模型
@@ -92,6 +93,8 @@ struct ExecResult {
 - `SSANumberNode`
 - `SSATextNode`
 - `SSAUndefNode`
+- `SSAGlobalLoadNode`
+- `SSAGlobalStoreNode`
 - `SSAPhiNode`
 - `SSACopyNode`
 - `SSAUnaryOpNode`
@@ -114,6 +117,10 @@ struct ExecResult {
 
 - `__ir_make_cell__`
 - `__ir_make_function_handle__`
+- `__ir_cell_get__`
+- `__ir_cell_set__`
+- `__ir_paren_set__`
+- `__ir_getfield_for_write__`
 
 当前已显式静态缓存的 internal function 有：
 
@@ -132,6 +139,18 @@ struct ExecResult {
 - `fh_builtin`
 
 `fh_variable` 仍未支持。
+
+## 当前 `global` 语义
+
+解释器执行 `SSAGlobalLoadNode` / `SSAGlobalStoreNode` 时，会读写 `ExecutionOptions.workspace` 里的共享 `RuntimeWorkspace`。
+
+当前语义是：
+
+- missing `global` 读取返回空 `double([])`
+- `global.store` 总是写回对象拷贝
+- 模块内函数互调会沿用同一个 `workspace`
+
+更完整的设计说明见 [global_design.md](/home/zj/Desktop/Baltam_IR/doc/global_design.md)。
 
 ## 圆括号应用语义
 
@@ -173,16 +192,31 @@ struct ExecResult {
 
 另外，runtime `block set` 本身是原地修改风格；解释器在桥接 `__ir_paren_set__` 时会先复制 base 对象，再调用 runtime `block set`，从而保持 SSA 里“旧版本值不被污染”的语义。
 
+同一类“写回 helper”还有两条当前实现已经依赖的规则：
+
+- `__ir_cell_set__` 也会先复制 base，再执行 runtime `brace_set`
+- `setfield` / `__ir_getfield_for_write__` 用于 dot setter 的构造链
+
+另外，如果这些 helper 的第一个实参在执行时还是本地 `Undef` / `MissingInput`，解释器会按 helper 类型补默认 base：
+
+- `__ir_paren_set__` -> 空 `double([])`
+- `__ir_cell_set__` -> 空 cell
+- `setfield` / `__ir_getfield_for_write__` -> 空 struct
+
+这就是 `L(2:3) = rhs`、`c{2} = rhs`、`s.a.b = rhs` 这类语句可以从未初始化本地名字开始构造值的原因。
+
 ## 当前边界和限制
 
 当前解释器仍有这些明确边界：
 
 - 只执行 `UntypedSSA`
 - 不支持 `TypedSSA`
-- 遇到 `undef` 的实用读取会抛错
+- 遇到 `undef` 的具体读取通常会抛错
 - 返回 `undef` 也会抛错
 - 依赖 verifier 先保证 CFG、`phi`、值定义/使用关系基本合法
 - 还没有接进 `main.cpp`
+
+上面这条有一个明确例外：写回 helper 的首实参允许用默认空 base 做补全，见上一节。
 
 另外，解释器并不替代 SSA 构建器；它默认输入已经是：
 
@@ -204,18 +238,14 @@ struct ExecResult {
 - 直接模块函数调用
 - 间接函数句柄调用
 
-端到端脚本回归测试位于：
+端到端脚本回归测试目前已经覆盖一批 `.m` 脚本，包括早期基础用例以及后续补上的：
 
-- [test/test_test0.cpp](/home/zj/Desktop/Baltam_IR/test/test_test0.cpp)
-- [test/test_test1.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1.cpp)
-- [test/test_test1_2.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1_2.cpp)
-- [test/test_test1_3.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1_3.cpp)
-- [test/test_test1_4.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1_4.cpp)
-- [test/test_test1_5.cpp](/home/zj/Desktop/Baltam_IR/test/test_test1_5.cpp)
-- [test/test_test2.cpp](/home/zj/Desktop/Baltam_IR/test/test_test2.cpp)
-- [test/test_test2_2.cpp](/home/zj/Desktop/Baltam_IR/test/test_test2_2.cpp)
+- 短路求值与 setter 组合
+- `global` 读写与跨函数共享
+- `A(...)` / `A.a` / `A{...}` 的读取和写回
+- 多返回值、占位输出、`nargin/nargout`、`end`
 
-它们覆盖：
+这些回归统一覆盖：
 
 - 解析 `.m`
 - lower 到 non-SSA

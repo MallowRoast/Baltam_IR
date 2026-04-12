@@ -85,6 +85,20 @@ A.a = rhs;
 2. 调 `setfield(base, field, value)` 生成更新后的对象
 3. 再沿左值链把更新后的对象写回根对象
 
+如果是嵌套写回：
+
+```matlab
+A.a.b = rhs;
+```
+
+中间层不会用普通 `getfield`，而是会在写回路径上插入：
+
+```text
+%mid = call @__ir_getfield_for_write__(%parent, %"a")
+```
+
+这个 helper 只用于“为了后续继续写回而读取中间字段”的场景。它在字段缺失时会返回空 struct，方便继续构造嵌套对象链。
+
 如果根对象是 `global`，最后一步会落到：
 
 ```text
@@ -296,6 +310,8 @@ struct ExecutionOptions {
 
 同样，这里也使用拷贝，避免工作区对象和某个 SSA 值对象句柄直接别名。
 
+需要注意的是，missing global 的默认值始终是空 `double([])`。当前实现不会在 `global.load` 这一层再按后续用途把它自动改写成空 struct 或空 cell。
+
 ## 例子
 
 MATLAB：
@@ -316,10 +332,9 @@ global.store @A, %t0
 %y = add %t1, %t2
 ```
 
-如果是：
+如果 `global S` 已经保存了一个结构体，并执行：
 
 ```matlab
-global S;
 S.a = 3;
 ```
 
@@ -344,8 +359,16 @@ global.store @S, %t3
 - `rhs` 中读取 `A{...}`
 - `A = foo(...)`
 - `A(...) = rhs`
+- `[A(...)] = rhs`
 - `A{...} = rhs`
+- `[A{...}] = rhs`
 - `A.a = rhs`
+- `[A.a] = rhs`
 - `rhs` 中读取 `A.a`
 - `[A(...), x] = foo(...)`
 - 跨模块内函数共享同一个 `global` 工作区
+
+当前实现没有在 missing global root 上额外做类型化补全，因此：
+
+- `global A; A(2:3) = rhs` 可以依赖 `[]` 作为圆括号写回 base
+- `global S; S.a = rhs`、`global C; C{1} = rhs` 这类形式应先让 `S` / `C` 显式持有兼容的结构体或元胞值

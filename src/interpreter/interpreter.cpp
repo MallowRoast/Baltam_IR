@@ -14,6 +14,7 @@
 #include "ba_obj/cell.h"
 #include "ba_obj/function_handle.h"
 #include "ba_obj/matrix.h"
+#include "ba_obj/structure.h"
 #include "ba_obj/variable_list.h"
 #include "baltam_worker/builtin_manager.h"
 #include "print/obj2str.h"
@@ -141,6 +142,14 @@ Value::Object copy_object(const Value::Object& object) {
 
 Value::Object make_empty_double() {
     return std::make_shared<ba_obj>(new matrix<double>(0, 0));
+}
+
+Value::Object make_empty_cell() {
+    return std::make_shared<ba_obj>(new cell_array(1, 0));
+}
+
+Value::Object make_empty_struct() {
+    return std::make_shared<ba_obj>(new structure());
 }
 
 const char* callable_type_text(CallableType type) {
@@ -517,6 +526,27 @@ std::vector<Value> invoke_runtime_cell_set(const std::vector<Value::Object>& in_
     return {concrete(std::move(base_copy))};
 }
 
+std::vector<Value> invoke_runtime_getfield_for_write(const std::vector<Value::Object>& in_args,
+                                                     std::size_t expected_out_count) {
+    if (in_args.size() != 2 || in_args[0] == nullptr || in_args[1] == nullptr) {
+        throw std::runtime_error("调用 `__ir_getfield_for_write__` 时参数不合法。");
+    }
+    if (expected_out_count == 0) {
+        return {};
+    }
+    if (in_args[0]->type() != ba_struct) {
+        throw std::runtime_error("`__ir_getfield_for_write__` 的 base 不是结构体。");
+    }
+
+    const auto* base = in_args[0]->cget<structure>();
+    const std::string field_name = in_args[1]->as_string();
+    const const_ba_obj_ptr field_value = base->get_field(field_name);
+    if (field_value == nullptr) {
+        return {concrete(make_empty_struct())};
+    }
+    return {concrete(std::make_shared<ba_obj>(*field_value))};
+}
+
 Value::Object pack_varargin_objects(const std::vector<Value::Object>& extra_args) {
     if (extra_args.empty()) {
         return std::make_shared<ba_obj>(new cell_array(1, 0));
@@ -659,6 +689,10 @@ std::vector<Value> invoke_direct_call(const ExecutionState& caller_state,
         return invoke_runtime_paren_set(in_args, expected_out_count);
     }
 
+    if (callee_name == "__ir_getfield_for_write__") {
+        return invoke_runtime_getfield_for_write(in_args, expected_out_count);
+    }
+
     if (callee_name == "switch_case_match") {
         static baFunPtr switch_case_match_ptr = nullptr;
         return invoke_known_internal_call("switch_case_match", switch_case_match_ptr, in_args,
@@ -739,7 +773,32 @@ std::vector<Value> invoke_indirect_call(const ExecutionState& caller_state,
 std::vector<Value> evaluate_call(const SSACallNode& call, ExecutionState& state) {
     std::vector<Value::Object> in_args;
     in_args.reserve(call.inputs().size());
-    for (const ValueRef input : call.inputs()) {
+    for (std::size_t i = 0; i < call.inputs().size(); ++i) {
+        const ValueRef input = call.inputs()[i];
+        if (call.callee().type == SSACallNode::Callee::Direct && i == 0) {
+            const std::string& callee_name = call.callee().direct_symbol;
+            if (callee_name == "__ir_paren_set__" || callee_name == "__ir_cell_set__" ||
+                callee_name == "setfield" || callee_name == "__ir_getfield_for_write__") {
+                const Value& value = state.load_value(input);
+                if (value.type == Value::Concrete) {
+                    in_args.push_back(value.object);
+                    continue;
+                }
+                if (value.type == Value::Undef || value.type == Value::MissingInput) {
+                    if (callee_name == "__ir_paren_set__") {
+                        in_args.push_back(make_empty_double());
+                    } else if (callee_name == "__ir_cell_set__") {
+                        in_args.push_back(make_empty_cell());
+                    } else if (callee_name == "setfield" ||
+                               callee_name == "__ir_getfield_for_write__") {
+                        in_args.push_back(make_empty_struct());
+                    } else {
+                        throw std::runtime_error("无法为调用补默认 base 对象。");
+                    }
+                    continue;
+                }
+            }
+        }
         in_args.push_back(state.require_concrete_object(input, "调用实参"));
     }
     in_args = flatten_call_inputs(in_args);

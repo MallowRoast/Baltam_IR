@@ -22,11 +22,11 @@
 | 语法 | AST 主类型 | lowering 结果 | 设计要点 |
 | --- | --- | --- | --- |
 | `x = A()` | `node_multiple_func` | `CallNode(Direct/Indirect)` | 不能在 lowering 阶段简单断言“函数调用”或“圆括号取值” |
-| `A() = rhs` | `node_asgn(lhs=node_multiple_func)` | `call @__ir_paren_set__` | setter 语义明确，直接 canonicalize |
+| `A() = rhs` | `node_asgn(lhs=node_multiple_func)` | `call @__ir_paren_set__` + store-back | setter 语义明确，直接 canonicalize |
 | `y = A.a` | `node_asgn(rhs=node_struct_get)` | `call @getfield` | dot 语义已在 AST 层消歧 |
-| `A.a = rhs` | `node_struct_set` | `call @setfield` + store-back | 需要沿左值链递归回写 |
+| `A.a = rhs` | `node_struct_set` | `call @setfield` + store-back | 嵌套写回会额外插入 `__ir_getfield_for_write__` |
 | `z = A{1}` | `node_asgn(rhs=node_cell_get)` | `call @__ir_cell_get__` | brace 语义已在 AST 层消歧 |
-| `A{1} = rhs` | `node_cell_set` | `call @__ir_cell_set__` | setter 语义明确，直接 canonicalize |
+| `A{1} = rhs` | `node_cell_set` | `call @__ir_cell_set__` + store-back | setter 语义明确，直接 canonicalize |
 
 下文统一记作：
 
@@ -35,6 +35,14 @@
 - `A{...}`
 
 其中 `A{...}` 的 probe 用的是 `A{1}`，`A(...)` 的 probe 用的是 `A()`。
+
+当前 lowering 还会先归一化单元素 lhs list / horz_list，因此：
+
+- `[A(...)] = rhs`
+- `[A.a] = rhs`
+- `[A{1}] = rhs`
+
+最终都会复用各自对应的写回路径。这个归一化是 lowering 规则，不改变无括号版本的 AST 主类型。
 
 ## 一、`A(...)`
 
@@ -149,6 +157,8 @@ node_asgn
 - lhs 是 `node_multiple_func`
 - rhs 是普通 rhs 表达式
 
+如果源码写成 `[A(...)] = rhs`，lowering 会先拆掉外层单元素 lhs list，再按同一条 `node_multiple_func` 写回路径处理。
+
 ## lowering 逻辑
 
 当前 lowering 把它识别成圆括号写回，而不是普通赋值。
@@ -165,6 +175,8 @@ canonical 形式是直接转成 helper call：
 - 在赋值语境里，它只可能是圆括号写回
 
 因此可以在 lowering 阶段唯一化。
+
+如果 lhs 根对象不是裸名字，而是 `S.a(...)` / `C{1}(...)` 这类嵌套左值，`__ir_paren_set__` 只负责生成“更新后的当前 base”；后续仍然要沿 lhs AST 递归 store-back 到最外层根对象。
 
 ## non-SSA IR
 
@@ -189,6 +201,8 @@ SSA 后仍然是普通 `SSACallNode`，callee 为 direct：
 解释器把 `__ir_paren_set__` 分派到 runtime `block set`。
 
 需要注意的是，runtime `block set` 会原地修改 base，所以解释器会先复制一份 base，再把复制体传进去。这样才能满足 SSA 的“每次写回产生新版本值”。
+
+另外，如果 `__ir_paren_set__` 的 base 在执行时还是本地 `Undef` / `MissingInput`，解释器会先补一个空 `double([])`。因此 `L(2:3) = rhs` 或 `[L(2:3)] = rhs` 可以从尚未绑定的本地名字开始构造数组。
 
 如果根名字 `A` 是 global，则会展开成：
 
@@ -221,6 +235,14 @@ node_asgn
 ```
 
 所以 `A.a` 不再经过 `node_multiple_func`。
+
+对于嵌套读取：
+
+```matlab
+A.a.b
+```
+
+外层 AST 仍然是 `node_struct_get`，只是它的 `branch[0]` 会继续是内层 `node_struct_get(A, a)`。lowering 通过递归先 lower `branch[0]`，再对当前字段继续发 `getfield`。
 
 ## lowering 逻辑
 
@@ -318,6 +340,16 @@ A.a.b = rhs
 
 这就是为什么当前实现保留 lhs base 的 AST，而不是先把它 lower 成单个值：store-back 还需要知道完整左值链形状。
 
+当 `base` 自身还是 `node_struct_get` 时，current lowering 不直接用普通 `getfield` 取中间对象，而是递归生成：
+
+```text
+%mid = call @__ir_getfield_for_write__(%parent, %"a")
+```
+
+这个 helper 只服务写回路径。它和普通 `getfield` 的区别是：如果中间字段缺失，运行期会返回一个空 struct，方便后续继续构造 `A.a.b = rhs` 这种对象链。
+
+如果源码写成 `[A.a] = rhs` 或 `[A.a.b] = rhs`，lowering 同样会先拆掉单元素 lhs list，再复用相同的递归写回逻辑。
+
 ## non-SSA IR
 
 当前没有单独的 `StructSetNode`，而是：
@@ -330,6 +362,15 @@ A.a.b = rhs
 ```text
 %t0 = call @setfield(%A, %"a", %rhs)
 %A = %t0
+```
+
+嵌套写回更接近：
+
+```text
+%t0 = call @__ir_getfield_for_write__(%S, %"a")
+%t1 = call @setfield(%t0, %"b", %rhs)
+%t2 = call @setfield(%S, %"a", %t1)
+%S = %t2
 ```
 
 如果根对象是 global：
@@ -348,7 +389,12 @@ SSA 后仍然是普通 direct call 加普通值回写，没有额外的 struct-s
 
 ## 解释器运行期
 
-和 `A.a` 一样，解释器把 `setfield` 当作普通 builtin 调用执行，不需要额外 helper。
+dot setter 运行期实际需要两类直接 helper / builtin：
+
+- `setfield`：生成更新后的结构体值
+- `__ir_getfield_for_write__`：在嵌套写回时读取中间字段；字段缺失时返回空 struct
+
+另外，如果 `setfield` 或 `__ir_getfield_for_write__` 的 base 在执行时还是本地 `Undef` / `MissingInput`，解释器也会先补一个空 struct。这样 `s.a = rhs`、`s.a.b = rhs`、`[s.a.b] = rhs` 都可以从未初始化的本地名字开始构造结构体链。
 
 ## 五、`A{...}`
 
@@ -429,6 +475,8 @@ node_cell_set
   node_name rhs
 ```
 
+如果源码写成 `[A{1}] = rhs`，lowering 会先去掉单元素 lhs list，再复用同一条 brace setter 路径。
+
 ## lowering 逻辑
 
 当前实现直接 canonicalize 成：
@@ -437,7 +485,7 @@ node_cell_set
 %A.next = call @__ir_cell_set__(%A.cur, %idx..., %rhs)
 ```
 
-这和 `A(...) = rhs` 类似，setter 语义在 lowering 阶段已经完全确定。
+这和 `A(...) = rhs` 类似，setter 语义在 lowering 阶段已经完全确定。`__ir_cell_set__` 负责生成“更新后的当前 base”，随后仍然通过递归 store-back 把它写回到根对象。
 
 ## non-SSA IR
 
@@ -458,6 +506,8 @@ call @__ir_cell_set__(base, idx..., value)
 解释器把 `__ir_cell_set__` 分派到 runtime `brace_set`。
 
 和 paren setter 一样，解释器会先复制 base，再执行 runtime 写回，从而保持 SSA 的“新版本值”语义。
+
+如果 `__ir_cell_set__` 的 base 在执行时还是本地 `Undef` / `MissingInput`，解释器会先补一个空 cell。这样 `c{2} = rhs` 或 `[c{2}] = rhs` 可以从未初始化的本地名字开始构造元胞数组。
 
 如果根名字 `A` 是 global，则会展开成：
 
