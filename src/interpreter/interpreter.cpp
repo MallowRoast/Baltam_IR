@@ -5,6 +5,7 @@
 #include <ostream>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -184,6 +185,29 @@ bool try_lookup_builtin_function_cached(const std::string& name, baFunPtr& funct
 
     cache.emplace(name, function_ptr);
     return true;
+}
+
+Value::Object make_integer_constant_object(const IntegerConstant& value) {
+    switch (value.type()) {
+        case IntegerConstant::Type::Int8:
+            return std::make_shared<ba_obj>(value.as_int8().value());
+        case IntegerConstant::Type::Int16:
+            return std::make_shared<ba_obj>(value.as_int16().value());
+        case IntegerConstant::Type::Int32:
+            return std::make_shared<ba_obj>(value.as_int32().value());
+        case IntegerConstant::Type::Int64:
+            return std::make_shared<ba_obj>(value.as_int64().value());
+        case IntegerConstant::Type::UInt8:
+            return std::make_shared<ba_obj>(value.as_uint8().value());
+        case IntegerConstant::Type::UInt16:
+            return std::make_shared<ba_obj>(value.as_uint16().value());
+        case IntegerConstant::Type::UInt32:
+            return std::make_shared<ba_obj>(value.as_uint32().value());
+        case IntegerConstant::Type::UInt64:
+            return std::make_shared<ba_obj>(value.as_uint64().value());
+    }
+
+    throw std::runtime_error("当前解释器暂不支持该整数常量类型。");
 }
 
 baFunPtr require_builtin_function_ptr(const char* name, baFunPtr& function_ptr) {
@@ -852,7 +876,15 @@ void execute_instruction(const IRNode& node, ExecutionState& state) {
         case UntypedSSANode::SSA_Number: {
             const auto& number = static_cast<const SSANumberNode&>(ssa);
             Value::Object object = std::visit(
-                [](const auto& item) -> Value::Object { return std::make_shared<ba_obj>(item); },
+                [](const auto& item) -> Value::Object {
+                    using T = std::decay_t<decltype(item)>;
+
+                    if constexpr (std::is_same_v<T, IntegerConstant>) {
+                        return make_integer_constant_object(item);
+                    } else {
+                        return std::make_shared<ba_obj>(item);
+                    }
+                },
                 number.value());
             state.store_value(number.result(), concrete(std::move(object)));
             return;

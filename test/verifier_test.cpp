@@ -50,14 +50,14 @@ void test_valid_untyped_ssa_function() {
 
     const ValueId one = function.create_value("one");
     auto* one_node =
-        function.create_node<SSANumberNode>(one, SSANumberNode::NumberValue{std::int64_t{1}});
+        function.create_node<SSANumberNode>(one, std::int64_t{1});
     then_block->append_instruction(one_node);
     then_block->add_successor(merge);
     then_block->set_terminal(function.create_node<SSAJumpNode>(merge));
 
     const ValueId two = function.create_value("two");
     auto* two_node =
-        function.create_node<SSANumberNode>(two, SSANumberNode::NumberValue{std::int64_t{2}});
+        function.create_node<SSANumberNode>(two, std::int64_t{2});
     else_block->append_instruction(two_node);
     else_block->add_successor(merge);
     else_block->set_terminal(function.create_node<SSAJumpNode>(merge));
@@ -94,14 +94,14 @@ void test_phi_incomings_must_match_predecessors() {
 
     const ValueId one = function.create_value("one");
     auto* one_node =
-        function.create_node<SSANumberNode>(one, SSANumberNode::NumberValue{std::int64_t{1}});
+        function.create_node<SSANumberNode>(one, std::int64_t{1});
     then_block->append_instruction(one_node);
     then_block->add_successor(merge);
     then_block->set_terminal(function.create_node<SSAJumpNode>(merge));
 
     const ValueId two = function.create_value("two");
     auto* two_node =
-        function.create_node<SSANumberNode>(two, SSANumberNode::NumberValue{std::int64_t{2}});
+        function.create_node<SSANumberNode>(two, std::int64_t{2});
     else_block->append_instruction(two_node);
     else_block->add_successor(merge);
     else_block->set_terminal(function.create_node<SSAJumpNode>(merge));
@@ -129,7 +129,7 @@ void test_ssa_definition_must_exist_in_value_table() {
 
     const ValueId constant = 7;
     auto* constant_node =
-        function.create_node<SSANumberNode>(constant, SSANumberNode::NumberValue{std::int64_t{7}});
+        function.create_node<SSANumberNode>(constant, std::int64_t{7});
     entry->append_instruction(constant_node);
     entry->set_terminal(
         function.create_node<SSAReturnNode>(std::vector<ValueRef>{ValueRef{constant}}));

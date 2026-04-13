@@ -74,7 +74,7 @@ void test_execute_constant_and_copy() {
     const ValueId one = function.create_value("one");
     const ValueId out = function.create_value("out");
     entry->append_instruction(
-        function.create_node<SSANumberNode>(one, SSANumberNode::NumberValue{std::int64_t{7}}));
+        function.create_node<SSANumberNode>(one, std::int64_t{7}));
     entry->append_instruction(function.create_node<SSACopyNode>(out, ValueRef{one}));
     entry->set_terminal(function.create_node<SSAReturnNode>(std::vector<ValueRef>{ValueRef{out}}));
 
@@ -104,13 +104,13 @@ void test_execute_branch_phi() {
 
     const ValueId one = function.create_value("one");
     then_block->append_instruction(
-        function.create_node<SSANumberNode>(one, SSANumberNode::NumberValue{std::int64_t{1}}));
+        function.create_node<SSANumberNode>(one, std::int64_t{1}));
     then_block->add_successor(merge);
     then_block->set_terminal(function.create_node<SSAJumpNode>(merge));
 
     const ValueId two = function.create_value("two");
     else_block->append_instruction(
-        function.create_node<SSANumberNode>(two, SSANumberNode::NumberValue{std::int64_t{2}}));
+        function.create_node<SSANumberNode>(two, std::int64_t{2}));
     else_block->add_successor(merge);
     else_block->set_terminal(function.create_node<SSAJumpNode>(merge));
 
@@ -150,13 +150,13 @@ void test_exec_result_tracks_final_named_bindings() {
 
     const ValueId then_out = function.create_value("out");
     then_block->append_instruction(
-        function.create_node<SSANumberNode>(then_out, SSANumberNode::NumberValue{std::int64_t{3}}));
+        function.create_node<SSANumberNode>(then_out, std::int64_t{3}));
     then_block->add_successor(merge);
     then_block->set_terminal(function.create_node<SSAJumpNode>(merge));
 
     const ValueId else_out = function.create_value("out");
     else_block->append_instruction(
-        function.create_node<SSANumberNode>(else_out, SSANumberNode::NumberValue{std::int64_t{4}}));
+        function.create_node<SSANumberNode>(else_out, std::int64_t{4}));
     else_block->add_successor(merge);
     else_block->set_terminal(function.create_node<SSAJumpNode>(merge));
 
@@ -231,7 +231,7 @@ void test_direct_module_function_call() {
     callee->set_entry_block(callee_entry);
     const ValueId callee_out = callee->create_value("out");
     callee_entry->append_instruction(
-        callee->create_node<SSANumberNode>(callee_out, SSANumberNode::NumberValue{std::int64_t{9}}));
+        callee->create_node<SSANumberNode>(callee_out, std::int64_t{9}));
     callee_entry->set_terminal(
         callee->create_node<SSAReturnNode>(std::vector<ValueRef>{ValueRef{callee_out}}));
 
@@ -262,7 +262,7 @@ void test_indirect_function_handle_call() {
     callee->set_entry_block(callee_entry);
     const ValueId callee_out = callee->create_value("out");
     callee_entry->append_instruction(
-        callee->create_node<SSANumberNode>(callee_out, SSANumberNode::NumberValue{std::int64_t{11}}));
+        callee->create_node<SSANumberNode>(callee_out, std::int64_t{11}));
     callee_entry->set_terminal(
         callee->create_node<SSAReturnNode>(std::vector<ValueRef>{ValueRef{callee_out}}));
 
@@ -304,7 +304,7 @@ void test_direct_module_call_after_module_move() {
     callee->set_entry_block(callee_entry);
     const ValueId callee_out = callee->create_value("out");
     callee_entry->append_instruction(
-        callee->create_node<SSANumberNode>(callee_out, SSANumberNode::NumberValue{std::int64_t{13}}));
+        callee->create_node<SSANumberNode>(callee_out, std::int64_t{13}));
     callee_entry->set_terminal(
         callee->create_node<SSAReturnNode>(std::vector<ValueRef>{ValueRef{callee_out}}));
 
@@ -348,16 +348,16 @@ void test_runtime_cell_get_set() {
     const ValueId out = function.create_value("out");
 
     entry->append_instruction(
-        function.create_node<SSANumberNode>(one, SSANumberNode::NumberValue{std::int64_t{1}}));
+        function.create_node<SSANumberNode>(one, std::int64_t{1}));
     entry->append_instruction(
-        function.create_node<SSANumberNode>(two, SSANumberNode::NumberValue{std::int64_t{2}}));
+        function.create_node<SSANumberNode>(two, std::int64_t{2}));
     entry->append_instruction(function.create_node<SSACallNode>(
         SSACallNode::Callee{SSACallNode::Callee::Direct, "__ir_make_cell__", ValueRef{}},
         std::vector<ValueId>{cell}, std::vector<ValueRef>{ValueRef{one}, ValueRef{two}}));
     entry->append_instruction(
-        function.create_node<SSANumberNode>(index, SSANumberNode::NumberValue{std::int64_t{2}}));
+        function.create_node<SSANumberNode>(index, std::int64_t{2}));
     entry->append_instruction(function.create_node<SSANumberNode>(
-        updated_value, SSANumberNode::NumberValue{std::int64_t{7}}));
+        updated_value, std::int64_t{7}));
     entry->append_instruction(function.create_node<SSACallNode>(
         SSACallNode::Callee{SSACallNode::Callee::Direct, "__ir_cell_set__", ValueRef{}},
         std::vector<ValueId>{updated_cell},
@@ -405,9 +405,9 @@ void test_var_list_call_input_flattening() {
     const ValueId caller_out = caller->create_value("out");
 
     caller_entry->append_instruction(
-        caller->create_node<SSANumberNode>(four, SSANumberNode::NumberValue{std::int64_t{4}}));
+        caller->create_node<SSANumberNode>(four, std::int64_t{4}));
     caller_entry->append_instruction(
-        caller->create_node<SSANumberNode>(five, SSANumberNode::NumberValue{std::int64_t{5}}));
+        caller->create_node<SSANumberNode>(five, std::int64_t{5}));
     caller_entry->append_instruction(caller->create_node<SSACallNode>(
         SSACallNode::Callee{SSACallNode::Callee::Direct, "__ir_make_cell__", ValueRef{}},
         std::vector<ValueId>{args_cell}, std::vector<ValueRef>{ValueRef{four}, ValueRef{five}}));
@@ -499,7 +499,7 @@ void test_varargin_and_nargin_binding() {
         SSACallNode::Callee{SSACallNode::Callee::Direct, "nargin", ValueRef{}},
         std::vector<ValueId>{argc}, std::vector<ValueRef>{}));
     entry->append_instruction(function.create_node<SSANumberNode>(
-        second_extra_index, SSANumberNode::NumberValue{std::int64_t{2}}));
+        second_extra_index, std::int64_t{2}));
     entry->append_instruction(function.create_node<SSACallNode>(
         SSACallNode::Callee{SSACallNode::Callee::Direct, "__ir_cell_get__", ValueRef{}},
         std::vector<ValueId>{second_extra},
@@ -539,7 +539,7 @@ void test_varargout_and_nargout_binding() {
         std::vector<ValueId>{count}, std::vector<ValueRef>{}));
     callee_entry->append_instruction(callee->create_node<SSACopyNode>(fixed, ValueRef{count}));
     callee_entry->append_instruction(callee->create_node<SSANumberNode>(
-        first_extra_index, SSANumberNode::NumberValue{std::int64_t{1}}));
+        first_extra_index, std::int64_t{1}));
     callee_entry->append_instruction(callee->create_node<SSAUndefNode>(varargout_seed));
     callee_entry->append_instruction(callee->create_node<SSACallNode>(
         SSACallNode::Callee{SSACallNode::Callee::Direct, "__ir_cell_set__", ValueRef{}},

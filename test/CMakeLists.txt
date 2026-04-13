@@ -58,6 +58,14 @@ add_baltam_ir_test(def_use_test
     ../src/ir/ir.cpp
 )
 
+add_baltam_ir_test(value_def_test
+    value_def_test.cpp
+    ../src/analysis/analysis_manager.cpp
+    ../src/analysis/value_def.cpp
+    ../src/analysis/verifier.cpp
+    ../src/ir/ir.cpp
+)
+
 add_baltam_ir_test(verifier_test
     verifier_test.cpp
     ../src/analysis/verifier.cpp
@@ -83,6 +91,18 @@ add_baltam_ir_test(construct_untyped_ssa_test
     ../src/ir/ir.cpp
     ../src/ir/ir_printer.cpp
     ../src/optimizer/construct_untyped_ssa.cpp
+)
+
+add_baltam_ir_test(constant_fold_test
+    constant_fold_test.cpp
+    ../src/analysis/analysis_manager.cpp
+    ../src/analysis/value_def.cpp
+    ../src/analysis/verifier.cpp
+    ../src/ir/ir.cpp
+    ../src/ir/ir_printer.cpp
+    ../src/optimizer/constant_fold.cpp
+    ../src/optimizer/pass_manager.cpp
+    ../src/optimizer/optimize.cpp
 )
 
 add_baltam_ir_test(interpreter_test

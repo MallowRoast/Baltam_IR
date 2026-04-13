@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -42,11 +43,8 @@ struct MagicEndCallInfo {
 };
 
 std::optional<std::int64_t> as_int64(const NumberNode::NumberValue& value) {
-    if (const auto* item = std::get_if<std::int64_t>(&value)) {
-        return *item;
-    }
-    if (const auto* item = std::get_if<std::uint64_t>(&value)) {
-        return static_cast<std::int64_t>(*item);
+    if (const auto* item = std::get_if<IntegerConstant>(&value)) {
+        return item->as_int64();
     }
     return std::nullopt;
 }

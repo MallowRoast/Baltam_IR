@@ -63,12 +63,12 @@ void test_if_else_generates_phi() {
         NamedValue{"cond", NamedValue::UserVariable}, then_block, else_block));
 
     then_block->append_instruction(function->create_node<NumberNode>(
-        NamedValue{"out", NamedValue::UserVariable}, NumberNode::NumberValue{std::int64_t{1}}));
+        NamedValue{"out", NamedValue::UserVariable}, std::int64_t{1}));
     then_block->add_successor(merge);
     then_block->set_terminal(function->create_node<JumpNode>(merge));
 
     else_block->append_instruction(function->create_node<NumberNode>(
-        NamedValue{"out", NamedValue::UserVariable}, NumberNode::NumberValue{std::int64_t{2}}));
+        NamedValue{"out", NamedValue::UserVariable}, std::int64_t{2}));
     else_block->add_successor(merge);
     else_block->set_terminal(function->create_node<JumpNode>(merge));
 
@@ -105,7 +105,7 @@ void test_missing_definition_materializes_undef() {
         NamedValue{"cond", NamedValue::UserVariable}, then_block, else_block));
 
     then_block->append_instruction(function->create_node<NumberNode>(
-        NamedValue{"out", NamedValue::UserVariable}, NumberNode::NumberValue{std::int64_t{1}}));
+        NamedValue{"out", NamedValue::UserVariable}, std::int64_t{1}));
     then_block->add_successor(merge);
     then_block->set_terminal(function->create_node<JumpNode>(merge));
 
@@ -139,7 +139,7 @@ void test_loop_generates_header_phi() {
     function->set_entry_block(entry);
 
     entry->append_instruction(function->create_node<NumberNode>(
-        NamedValue{"out", NamedValue::UserVariable}, NumberNode::NumberValue{std::int64_t{0}}));
+        NamedValue{"out", NamedValue::UserVariable}, std::int64_t{0}));
     entry->add_successor(header);
     entry->set_terminal(function->create_node<JumpNode>(header));
 
@@ -149,7 +149,7 @@ void test_loop_generates_header_phi() {
         NamedValue{"cond", NamedValue::UserVariable}, body, exit));
 
     body->append_instruction(function->create_node<NumberNode>(
-        NamedValue{"one", NamedValue::Temporary}, NumberNode::NumberValue{std::int64_t{1}}));
+        NamedValue{"one", NamedValue::Temporary}, std::int64_t{1}));
     body->append_instruction(function->create_node<BinOpNode>(
         BinOpNode::Add, NamedValue{"out", NamedValue::UserVariable},
         NamedValue{"out", NamedValue::UserVariable}, NamedValue{"one", NamedValue::Temporary}));
@@ -189,16 +189,16 @@ void test_dead_temporary_does_not_generate_phi() {
         NamedValue{"cond", NamedValue::UserVariable}, then_block, else_block));
 
     then_block->append_instruction(function->create_node<NumberNode>(
-        NamedValue{"tmp_dead", NamedValue::Temporary}, NumberNode::NumberValue{std::int64_t{10}}));
+        NamedValue{"tmp_dead", NamedValue::Temporary}, std::int64_t{10}));
     then_block->append_instruction(function->create_node<NumberNode>(
-        NamedValue{"out", NamedValue::UserVariable}, NumberNode::NumberValue{std::int64_t{1}}));
+        NamedValue{"out", NamedValue::UserVariable}, std::int64_t{1}));
     then_block->add_successor(merge);
     then_block->set_terminal(function->create_node<JumpNode>(merge));
 
     else_block->append_instruction(function->create_node<NumberNode>(
-        NamedValue{"tmp_dead", NamedValue::Temporary}, NumberNode::NumberValue{std::int64_t{20}}));
+        NamedValue{"tmp_dead", NamedValue::Temporary}, std::int64_t{20}));
     else_block->append_instruction(function->create_node<NumberNode>(
-        NamedValue{"out", NamedValue::UserVariable}, NumberNode::NumberValue{std::int64_t{2}}));
+        NamedValue{"out", NamedValue::UserVariable}, std::int64_t{2}));
     else_block->add_successor(merge);
     else_block->set_terminal(function->create_node<JumpNode>(merge));
 
@@ -229,9 +229,9 @@ void test_test0_local_temp_does_not_generate_phi() {
     function->set_entry_block(entry);
 
     entry->append_instruction(function->create_node<NumberNode>(
-        NamedValue{"__t0", NamedValue::Temporary}, NumberNode::NumberValue{std::int64_t{1}}));
+        NamedValue{"__t0", NamedValue::Temporary}, std::int64_t{1}));
     entry->append_instruction(function->create_node<NumberNode>(
-        NamedValue{"__t1", NamedValue::Temporary}, NumberNode::NumberValue{std::int64_t{2}}));
+        NamedValue{"__t1", NamedValue::Temporary}, std::int64_t{2}));
     entry->append_instruction(function->create_node<BinOpNode>(
         BinOpNode::Add, NamedValue{"a", NamedValue::UserVariable},
         NamedValue{"__t0", NamedValue::Temporary}, NamedValue{"__t1", NamedValue::Temporary}));
@@ -239,7 +239,7 @@ void test_test0_local_temp_does_not_generate_phi() {
         CallNode::Direct, "sin", std::vector<NamedValue>{NamedValue{"b", NamedValue::UserVariable}},
         std::vector<NamedValue>{NamedValue{"a", NamedValue::UserVariable}}));
     entry->append_instruction(function->create_node<NumberNode>(
-        NamedValue{"__t3", NamedValue::Temporary}, NumberNode::NumberValue{std::int64_t{0}}));
+        NamedValue{"__t3", NamedValue::Temporary}, std::int64_t{0}));
     entry->append_instruction(function->create_node<BinOpNode>(
         BinOpNode::Gt, NamedValue{"__t2", NamedValue::Temporary},
         NamedValue{"b", NamedValue::UserVariable}, NamedValue{"__t3", NamedValue::Temporary}));
@@ -249,7 +249,7 @@ void test_test0_local_temp_does_not_generate_phi() {
         NamedValue{"__t2", NamedValue::Temporary}, then_block, else_block));
 
     then_block->append_instruction(function->create_node<NumberNode>(
-        NamedValue{"__t4", NamedValue::Temporary}, NumberNode::NumberValue{std::int64_t{2}}));
+        NamedValue{"__t4", NamedValue::Temporary}, std::int64_t{2}));
     then_block->append_instruction(function->create_node<BinOpNode>(
         BinOpNode::Multiply, NamedValue{"c", NamedValue::UserVariable},
         NamedValue{"b", NamedValue::UserVariable}, NamedValue{"__t4", NamedValue::Temporary}));
@@ -257,7 +257,7 @@ void test_test0_local_temp_does_not_generate_phi() {
     then_block->set_terminal(function->create_node<JumpNode>(merge));
 
     else_block->append_instruction(function->create_node<NumberNode>(
-        NamedValue{"c", NamedValue::UserVariable}, NumberNode::NumberValue{std::int64_t{0}}));
+        NamedValue{"c", NamedValue::UserVariable}, std::int64_t{0}));
     else_block->add_successor(merge);
     else_block->set_terminal(function->create_node<JumpNode>(merge));
 

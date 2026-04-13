@@ -39,6 +39,48 @@ NumberNode::NumberNode(NamedValue result, NumberValue value, std::optional<Sourc
       result_(std::move(result)),
       value_(std::move(value)) {}
 
+NumberNode::NumberNode(NamedValue result, bool value, std::optional<SourceLocation> location)
+    : NumberNode(std::move(result), NumberValue{value}, std::move(location)) {}
+
+NumberNode::NumberNode(NamedValue result, std::int8_t value,
+                       std::optional<SourceLocation> location)
+    : NumberNode(std::move(result), IntegerConstant(value), std::move(location)) {}
+
+NumberNode::NumberNode(NamedValue result, std::int16_t value,
+                       std::optional<SourceLocation> location)
+    : NumberNode(std::move(result), IntegerConstant(value), std::move(location)) {}
+
+NumberNode::NumberNode(NamedValue result, std::int32_t value,
+                       std::optional<SourceLocation> location)
+    : NumberNode(std::move(result), IntegerConstant(value), std::move(location)) {}
+
+NumberNode::NumberNode(NamedValue result, std::int64_t value,
+                       std::optional<SourceLocation> location)
+    : NumberNode(std::move(result), IntegerConstant(value), std::move(location)) {}
+
+NumberNode::NumberNode(NamedValue result, std::uint8_t value,
+                       std::optional<SourceLocation> location)
+    : NumberNode(std::move(result), IntegerConstant(value), std::move(location)) {}
+
+NumberNode::NumberNode(NamedValue result, std::uint16_t value,
+                       std::optional<SourceLocation> location)
+    : NumberNode(std::move(result), IntegerConstant(value), std::move(location)) {}
+
+NumberNode::NumberNode(NamedValue result, std::uint32_t value,
+                       std::optional<SourceLocation> location)
+    : NumberNode(std::move(result), IntegerConstant(value), std::move(location)) {}
+
+NumberNode::NumberNode(NamedValue result, std::uint64_t value,
+                       std::optional<SourceLocation> location)
+    : NumberNode(std::move(result), IntegerConstant(value), std::move(location)) {}
+
+NumberNode::NumberNode(NamedValue result, double value, std::optional<SourceLocation> location)
+    : NumberNode(std::move(result), NumberValue{value}, std::move(location)) {}
+
+NumberNode::NumberNode(NamedValue result, std::complex<double> value,
+                       std::optional<SourceLocation> location)
+    : NumberNode(std::move(result), NumberValue{std::move(value)}, std::move(location)) {}
+
 const NamedValue& NumberNode::result() const {
     return result_;
 }
@@ -255,6 +297,21 @@ void BasicBlock::append_instruction(IRNode* node) {
     instructions_.push_back(node);
 }
 
+bool BasicBlock::replace_instruction(IRNode* old_node, IRNode* new_node) {
+    if (old_node == nullptr || new_node == nullptr) {
+        return false;
+    }
+
+    auto it = std::find(instructions_.begin(), instructions_.end(), old_node);
+    if (it == instructions_.end()) {
+        return false;
+    }
+
+    new_node->set_parent(this);
+    *it = new_node;
+    return true;
+}
+
 void BasicBlock::add_successor(BasicBlock* successor) {
     if (successor == nullptr || contains_block(successors_, successor)) {
         return;
@@ -426,6 +483,48 @@ SSANumberNode::SSANumberNode(ValueId result, NumberValue value,
     : UntypedSSANode(UntypedSSANode::SSA_Number, std::move(location)),
       result_(result),
       value_(std::move(value)) {}
+
+SSANumberNode::SSANumberNode(ValueId result, bool value, std::optional<SourceLocation> location)
+    : SSANumberNode(result, NumberValue{value}, std::move(location)) {}
+
+SSANumberNode::SSANumberNode(ValueId result, std::int8_t value,
+                             std::optional<SourceLocation> location)
+    : SSANumberNode(result, IntegerConstant(value), std::move(location)) {}
+
+SSANumberNode::SSANumberNode(ValueId result, std::int16_t value,
+                             std::optional<SourceLocation> location)
+    : SSANumberNode(result, IntegerConstant(value), std::move(location)) {}
+
+SSANumberNode::SSANumberNode(ValueId result, std::int32_t value,
+                             std::optional<SourceLocation> location)
+    : SSANumberNode(result, IntegerConstant(value), std::move(location)) {}
+
+SSANumberNode::SSANumberNode(ValueId result, std::int64_t value,
+                             std::optional<SourceLocation> location)
+    : SSANumberNode(result, IntegerConstant(value), std::move(location)) {}
+
+SSANumberNode::SSANumberNode(ValueId result, std::uint8_t value,
+                             std::optional<SourceLocation> location)
+    : SSANumberNode(result, IntegerConstant(value), std::move(location)) {}
+
+SSANumberNode::SSANumberNode(ValueId result, std::uint16_t value,
+                             std::optional<SourceLocation> location)
+    : SSANumberNode(result, IntegerConstant(value), std::move(location)) {}
+
+SSANumberNode::SSANumberNode(ValueId result, std::uint32_t value,
+                             std::optional<SourceLocation> location)
+    : SSANumberNode(result, IntegerConstant(value), std::move(location)) {}
+
+SSANumberNode::SSANumberNode(ValueId result, std::uint64_t value,
+                             std::optional<SourceLocation> location)
+    : SSANumberNode(result, IntegerConstant(value), std::move(location)) {}
+
+SSANumberNode::SSANumberNode(ValueId result, double value, std::optional<SourceLocation> location)
+    : SSANumberNode(result, NumberValue{value}, std::move(location)) {}
+
+SSANumberNode::SSANumberNode(ValueId result, std::complex<double> value,
+                             std::optional<SourceLocation> location)
+    : SSANumberNode(result, NumberValue{std::move(value)}, std::move(location)) {}
 
 ValueId SSANumberNode::result() const {
     return result_;

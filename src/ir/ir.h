@@ -11,6 +11,8 @@
 #include <variant>
 #include <vector>
 
+#include "ir/integer_constant.h"
+
 namespace baltam {
 
 /**
@@ -39,6 +41,8 @@ struct NamedValue {
 
 using ValueId = std::uint32_t;
 constexpr ValueId InvalidValueId = 0;
+
+using NumberValue = std::variant<bool, IntegerConstant, double, std::complex<double>>;
 
 /**
  * @brief 一元运算节点共享的操作码类型。
@@ -198,10 +202,31 @@ private:
  */
 class NumberNode final : public NonSSANode {
 public:
-    using NumberValue =
-        std::variant<bool, std::int64_t, std::uint64_t, double, std::complex<double>>;
+    using NumberValue = baltam::NumberValue;
 
     NumberNode(NamedValue result, NumberValue value,
+               std::optional<SourceLocation> location = std::nullopt);
+    NumberNode(NamedValue result, bool value,
+               std::optional<SourceLocation> location = std::nullopt);
+    NumberNode(NamedValue result, std::int8_t value,
+               std::optional<SourceLocation> location = std::nullopt);
+    NumberNode(NamedValue result, std::int16_t value,
+               std::optional<SourceLocation> location = std::nullopt);
+    NumberNode(NamedValue result, std::int32_t value,
+               std::optional<SourceLocation> location = std::nullopt);
+    NumberNode(NamedValue result, std::int64_t value,
+               std::optional<SourceLocation> location = std::nullopt);
+    NumberNode(NamedValue result, std::uint8_t value,
+               std::optional<SourceLocation> location = std::nullopt);
+    NumberNode(NamedValue result, std::uint16_t value,
+               std::optional<SourceLocation> location = std::nullopt);
+    NumberNode(NamedValue result, std::uint32_t value,
+               std::optional<SourceLocation> location = std::nullopt);
+    NumberNode(NamedValue result, std::uint64_t value,
+               std::optional<SourceLocation> location = std::nullopt);
+    NumberNode(NamedValue result, double value,
+               std::optional<SourceLocation> location = std::nullopt);
+    NumberNode(NamedValue result, std::complex<double> value,
                std::optional<SourceLocation> location = std::nullopt);
 
     const NamedValue& result() const;
@@ -421,10 +446,31 @@ private:
  */
 class SSANumberNode final : public UntypedSSANode {
 public:
-    using NumberValue =
-        std::variant<bool, std::int64_t, std::uint64_t, double, std::complex<double>>;
+    using NumberValue = baltam::NumberValue;
 
     SSANumberNode(ValueId result, NumberValue value,
+                  std::optional<SourceLocation> location = std::nullopt);
+    SSANumberNode(ValueId result, bool value,
+                  std::optional<SourceLocation> location = std::nullopt);
+    SSANumberNode(ValueId result, std::int8_t value,
+                  std::optional<SourceLocation> location = std::nullopt);
+    SSANumberNode(ValueId result, std::int16_t value,
+                  std::optional<SourceLocation> location = std::nullopt);
+    SSANumberNode(ValueId result, std::int32_t value,
+                  std::optional<SourceLocation> location = std::nullopt);
+    SSANumberNode(ValueId result, std::int64_t value,
+                  std::optional<SourceLocation> location = std::nullopt);
+    SSANumberNode(ValueId result, std::uint8_t value,
+                  std::optional<SourceLocation> location = std::nullopt);
+    SSANumberNode(ValueId result, std::uint16_t value,
+                  std::optional<SourceLocation> location = std::nullopt);
+    SSANumberNode(ValueId result, std::uint32_t value,
+                  std::optional<SourceLocation> location = std::nullopt);
+    SSANumberNode(ValueId result, std::uint64_t value,
+                  std::optional<SourceLocation> location = std::nullopt);
+    SSANumberNode(ValueId result, double value,
+                  std::optional<SourceLocation> location = std::nullopt);
+    SSANumberNode(ValueId result, std::complex<double> value,
                   std::optional<SourceLocation> location = std::nullopt);
 
     ValueId result() const;
@@ -674,6 +720,7 @@ public:
 
     void append_phi(IRNode* node);
     void append_instruction(IRNode* node);
+    bool replace_instruction(IRNode* old_node, IRNode* new_node);
     void add_successor(BasicBlock* successor);
     void set_terminal(IRNode* node);
 

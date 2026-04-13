@@ -18,11 +18,13 @@ set(BALTAM_IR_LIBRARY_SOURCES
     src/analysis/dominance_frontier.cpp
     src/analysis/dominator_tree.cpp
     src/analysis/liveness.cpp
+    src/analysis/value_def.cpp
     src/analysis/verifier.cpp
     src/interpreter/interpreter.cpp
     src/ir/ir.cpp
     src/ir/ir_printer.cpp
     src/lowering/lowering.cpp
+    src/optimizer/constant_fold.cpp
     src/optimizer/construct_untyped_ssa.cpp
     src/optimizer/pass_manager.cpp
     src/optimizer/optimize.cpp

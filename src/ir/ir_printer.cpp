@@ -13,6 +13,29 @@
 namespace baltam {
 namespace {
 
+std::string format_integer_constant(const IntegerConstant& value) {
+    switch (value.type()) {
+        case IntegerConstant::Type::Int8:
+            return std::to_string(value.as_int8().value());
+        case IntegerConstant::Type::Int16:
+            return std::to_string(value.as_int16().value());
+        case IntegerConstant::Type::Int32:
+            return std::to_string(value.as_int32().value());
+        case IntegerConstant::Type::Int64:
+            return std::to_string(value.as_int64().value());
+        case IntegerConstant::Type::UInt8:
+            return std::to_string(value.as_uint8().value());
+        case IntegerConstant::Type::UInt16:
+            return std::to_string(value.as_uint16().value());
+        case IntegerConstant::Type::UInt32:
+            return std::to_string(value.as_uint32().value());
+        case IntegerConstant::Type::UInt64:
+            return std::to_string(value.as_uint64().value());
+    }
+
+    return "<integer>";
+}
+
 std::string format_double(double value) {
     std::ostringstream oss;
     oss << value;
@@ -37,10 +60,8 @@ std::string format_number(const NumberValue& value) {
 
             if constexpr (std::is_same_v<T, bool>) {
                 return item ? "true" : "false";
-            } else if constexpr (std::is_same_v<T, std::int64_t>) {
-                return std::to_string(item);
-            } else if constexpr (std::is_same_v<T, std::uint64_t>) {
-                return std::to_string(item);
+            } else if constexpr (std::is_same_v<T, IntegerConstant>) {
+                return format_integer_constant(item);
             } else if constexpr (std::is_same_v<T, double>) {
                 return format_double(item);
             } else if constexpr (std::is_same_v<T, std::complex<double>>) {

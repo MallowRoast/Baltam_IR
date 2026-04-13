@@ -50,18 +50,20 @@ void optimize_module(Module& module, FunctionPassManager& pass_manager,
                      const OptimizeOptions& options = {});
 
 /**
- * @brief 在单个函数上运行默认构造的空 pipeline。
+ * @brief 在单个函数上运行默认构造的优化 pipeline。
  *
- * 当前阶段该入口主要用于统一优化调用点和 verifier 接线；由于尚未注册
- * 任何具体 pass，它的行为等价于“按选项执行验证，但不做变换”。
+ * 当前默认 pipeline 只注册 `UntypedSSAConstantFoldPass`：
+ *
+ * - 对 `UntypedSSA` 函数尝试折叠可静态求值的一元常量表达式
+ * - 对其他 stage 的函数保持 no-op
  */
 void optimize_function(Function& function, const PassManagerOptions& options = {});
 
 /**
- * @brief 在整个模块上运行默认构造的空 pipeline。
+ * @brief 在整个模块上运行默认构造的优化 pipeline。
  *
- * 当前阶段该入口主要提供统一的优化主入口；由于尚未注册任何具体 pass，
- * 它的行为等价于“按选项执行模块/函数验证，但不做变换”。
+ * 当前默认 pipeline 会对模块中的每个函数运行
+ * `UntypedSSAConstantFoldPass`，并在模块/函数级按选项执行验证。
  */
 void optimize_module(Module& module, const OptimizeOptions& options = {});
 

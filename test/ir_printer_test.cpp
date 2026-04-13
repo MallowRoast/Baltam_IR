@@ -41,7 +41,7 @@ void test_print_non_ssa_module() {
     function->set_entry_block(entry);
 
     entry->append_instruction(function->create_node<NumberNode>(
-        NamedValue{"tmp", NamedValue::Temporary}, NumberNode::NumberValue{std::int64_t{1}}));
+        NamedValue{"tmp", NamedValue::Temporary}, std::int64_t{1}));
     entry->set_terminal(function->create_node<ReturnNode>(
         std::vector<NamedValue>{NamedValue{"tmp", NamedValue::Temporary}}));
 
@@ -82,14 +82,14 @@ void test_print_untyped_ssa_module() {
 
     const ValueId one = function->create_value("one");
     auto* one_node =
-        function->create_node<SSANumberNode>(one, SSANumberNode::NumberValue{std::int64_t{1}});
+        function->create_node<SSANumberNode>(one, std::int64_t{1});
     then_block->append_instruction(one_node);
     then_block->add_successor(merge);
     then_block->set_terminal(function->create_node<SSAJumpNode>(merge));
 
     const ValueId two = function->create_value("two");
     auto* two_node =
-        function->create_node<SSANumberNode>(two, SSANumberNode::NumberValue{std::int64_t{2}});
+        function->create_node<SSANumberNode>(two, std::int64_t{2});
     else_block->append_instruction(two_node);
     else_block->add_successor(merge);
     else_block->set_terminal(function->create_node<SSAJumpNode>(merge));
