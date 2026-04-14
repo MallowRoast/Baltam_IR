@@ -193,7 +193,28 @@ void test_effectful_nodes_are_preserved() {
     expect(function.has_value(cell), "unused call result should remain live in DCE v1.");
 }
 
-void test_default_pipeline_runs_constant_fold_then_dce() {
+void test_user_visible_named_value_is_preserved_without_ssa_uses() {
+    Module module("dce_user_visible_module", "test/dce/user_visible.m", Module::M_Function);
+    Function& function = create_ssa_function(module, "dce_user_visible");
+
+    BasicBlock* entry = function.create_block("entry");
+    function.set_entry_block(entry);
+
+    const ValueId visible = function.create_value("visible", true);
+    entry->append_instruction(function.create_node<SSANumberNode>(visible, std::int64_t{7}));
+    entry->set_terminal(function.create_node<SSAReturnNode>(std::vector<ValueRef>{}));
+
+    const analysis::PreservedAnalyses preserved = run_dce(function);
+    expect(preserved.preserves_all(),
+           "user-visible value should stay live even without explicit SSA uses.");
+
+    analysis::verify_module_or_throw(module);
+
+    expect(entry->instructions().size() == 1, "user-visible constant should remain in the block.");
+    expect(function.has_value(visible), "user-visible SSA value should not be tombstoned.");
+}
+
+void test_default_pipeline_runs_constant_fold_dead_branch_elimination_then_dce() {
     Module module("dce_pipeline_module", "test/dce/pipeline.m", Module::M_Function);
     Function& function = create_ssa_function(module, "dce_pipeline");
 
@@ -230,7 +251,8 @@ int main() {
         test_returned_value_is_preserved();
         test_unused_phi_cascades_to_operands();
         test_effectful_nodes_are_preserved();
-        test_default_pipeline_runs_constant_fold_then_dce();
+        test_user_visible_named_value_is_preserved_without_ssa_uses();
+        test_default_pipeline_runs_constant_fold_dead_branch_elimination_then_dce();
     } catch (const std::exception& ex) {
         std::cerr << "dce_test FAILED: " << ex.what() << '\n';
         return 1;

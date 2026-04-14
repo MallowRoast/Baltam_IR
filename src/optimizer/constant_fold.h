@@ -14,7 +14,8 @@ namespace optimizer {
  * - `SSA_Number`
  * - `SSA_Copy`
  * - `SSA_UnaryOp`
- * - `SSA_BinOp(Add/Subtract/Times/Multiply/LDivide/MLeftDivide/MRightDivide/RDivide)`
+ * - `SSA_BinOp(Add/Subtract/And/Eq/Ge/Gt/Le/Lt/Ne/Or/Power/MPower/Times/Multiply/LDivide/MLeftDivide/MRightDivide/RDivide)`
+ * - `SSA_Call(当前仅 direct builtin sin/sqrt/abs，且仅折叠 double/complex 标量)`
  *
  * 当一元或二元运算的输入可递归求值为常量时，该 pass 会把对应的
  * `SSA_UnaryOpNode` / `SSABinOpNode` 原地替换成同 `result` 的

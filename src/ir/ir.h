@@ -527,6 +527,9 @@ public:
     ValueId result() const;
     const std::vector<Incoming>& incomings() const;
     void add_incoming(BasicBlock* predecessor, ValueRef value);
+    bool remove_incoming(BasicBlock* predecessor);
+    bool replace_predecessor(BasicBlock* old_predecessor, BasicBlock* new_predecessor);
+    bool replace_value(ValueRef old_value, ValueRef new_value);
 
 private:
     ValueId result_ = InvalidValueId;
@@ -543,6 +546,7 @@ public:
 
     ValueId result() const;
     ValueRef src() const;
+    void set_src(ValueRef src);
 
 private:
     ValueId result_ = InvalidValueId;
@@ -575,6 +579,7 @@ public:
 
     const std::string& symbol() const;
     ValueRef value() const;
+    void set_value(ValueRef value);
 
 private:
     std::string symbol_;
@@ -594,6 +599,7 @@ public:
     Op op() const;
     ValueId result() const;
     ValueRef operand() const;
+    void set_operand(ValueRef operand);
 
 private:
     Op op_ = Op::UMinus;
@@ -615,6 +621,8 @@ public:
     ValueId result() const;
     ValueRef lhs() const;
     ValueRef rhs() const;
+    void set_lhs(ValueRef lhs);
+    void set_rhs(ValueRef rhs);
 
 private:
     Op op_ = Op::Add;
@@ -645,6 +653,8 @@ public:
     const Callee& callee() const;
     const std::vector<ValueId>& results() const;
     const std::vector<ValueRef>& inputs() const;
+    void set_callee_indirect_value(ValueRef indirect_value);
+    void set_input(std::size_t index, ValueRef input);
 
 private:
     Callee callee_;
@@ -663,6 +673,7 @@ public:
     ValueRef cond() const;
     BasicBlock* true_block() const;
     BasicBlock* false_block() const;
+    void set_cond(ValueRef cond);
 
 private:
     ValueRef cond_;
@@ -693,6 +704,7 @@ public:
                            std::optional<SourceLocation> location = std::nullopt);
 
     const std::vector<ValueRef>& values() const;
+    void set_value(std::size_t index, ValueRef value);
 
 private:
     std::vector<ValueRef> values_;
@@ -720,10 +732,14 @@ public:
 
     void append_phi(IRNode* node);
     bool erase_phi(IRNode* node);
+    void prepend_instruction(IRNode* node);
     void append_instruction(IRNode* node);
+    std::vector<IRNode*> release_instructions();
     bool erase_instruction(IRNode* node);
     bool replace_instruction(IRNode* old_node, IRNode* new_node);
     void add_successor(BasicBlock* successor);
+    bool remove_successor(BasicBlock* successor);
+    IRNode* release_terminal();
     void set_terminal(IRNode* node);
 
 private:
@@ -766,11 +782,13 @@ public:
     std::size_t fixed_output_count() const;
     std::size_t value_count() const;
     bool has_value(ValueId id) const;
+    bool is_user_visible_value(ValueId id) const;
     const std::string* find_value_debug_name(ValueId id) const;
     BasicBlock* entry_block() const;
     const std::vector<std::unique_ptr<BasicBlock>>& blocks() const;
 
     BasicBlock* create_block(std::string name);
+    bool erase_block(BasicBlock* block);
     void set_entry_block(BasicBlock* block);
     void set_stage(IRNode::Stage stage);
     void set_input_names(std::vector<std::string> names);
@@ -778,7 +796,7 @@ public:
     void set_has_varargin(bool has_varargin);
     void set_has_varargout(bool has_varargout);
     void set_argument_values(std::vector<ValueId> argument_values);
-    ValueId create_value(std::string debug_name = {});
+    ValueId create_value(std::string debug_name = {}, bool is_user_visible = false);
     bool erase_value(ValueId id);
     void set_value_debug_name(ValueId id, std::string debug_name);
 
@@ -805,6 +823,7 @@ private:
     bool has_varargout_ = false;
     std::vector<ValueId> argument_values_;
     std::vector<std::optional<std::string>> value_debug_names_;
+    std::vector<bool> value_user_visible_flags_;
     std::vector<std::unique_ptr<BasicBlock>> block_storage_;
     std::vector<std::unique_ptr<IRNode>> node_storage_;
     BasicBlock* entry_block_ = nullptr;

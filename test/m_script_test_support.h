@@ -17,6 +17,7 @@
 #include "ir/ir_printer.h"
 #include "lowering/lowering.h"
 #include "optimizer/construct_untyped_ssa.h"
+#include "optimizer/optimize.h"
 
 namespace baltam::test_support {
 
@@ -79,6 +80,14 @@ inline Module build_untyped_ssa_module_for_test_script(const std::string& script
     Module ssa_module = optimizer::construct_untyped_ssa_module(non_ssa_module);
     analysis::verify_module_or_throw(ssa_module);
     print_ir_dump(script_name, "untyped SSA", ssa_module);
+    return ssa_module;
+}
+
+inline Module build_optimized_untyped_ssa_module_for_test_script(const std::string& script_name) {
+    Module ssa_module = build_untyped_ssa_module_for_test_script(script_name);
+    optimizer::optimize_module(ssa_module);
+    analysis::verify_module_or_throw(ssa_module);
+    print_ir_dump(script_name, "optimized untyped SSA", ssa_module);
     return ssa_module;
 }
 

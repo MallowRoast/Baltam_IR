@@ -65,6 +65,10 @@ std::vector<std::string> collect_name_list(const std::vector<NamedValue>& values
     return names;
 }
 
+bool is_user_visible_name(const std::string& name) {
+    return !name.empty() && name.rfind("__", 0) != 0;
+}
+
 void append_unique_block(std::vector<const BasicBlock*>& blocks, const BasicBlock* block) {
     if (block == nullptr) {
         return;
@@ -162,7 +166,8 @@ void initialize_argument_values(const Function& src_function, Function& dst_func
     argument_values.reserve(src_function.inputs().size());
 
     for (const NamedValue& input : src_function.inputs()) {
-        const ValueId value_id = dst_function.create_value(input.name);
+        const ValueId value_id =
+            dst_function.create_value(input.name, input.type == NamedValue::UserVariable);
         argument_values.push_back(value_id);
         if (!input.name.empty()) {
             value_stacks[input.name].push_back(value_id);
@@ -199,7 +204,8 @@ void place_phi_nodes(RenameState& state,
                     continue;
                 }
 
-                const ValueId phi_result = state.dst_function.create_value(name);
+                const ValueId phi_result =
+                    state.dst_function.create_value(name, is_user_visible_name(name));
                 auto* phi = state.dst_function.create_node<SSAPhiNode>(phi_result);
                 state.block_map.at(frontier_block)->append_phi(phi);
                 state.phis_by_block[frontier_block].push_back(PhiPlacement{name, phi});
@@ -234,7 +240,7 @@ ValueId ensure_current_value(RenameState& state, const std::string& name,
         throw std::runtime_error("construct_untyped_ssa 当前没有激活的目标基本块。");
     }
 
-    const ValueId undef_value = state.dst_function.create_value(name);
+    const ValueId undef_value = state.dst_function.create_value(name, is_user_visible_name(name));
     auto* undef = state.dst_function.create_node<SSAUndefNode>(undef_value, std::move(location));
     state.current_block->append_instruction(undef);
     push_value(state, name, undef_value, pushed_names);
@@ -247,7 +253,7 @@ ValueId define_value(RenameState& state, const std::string& name,
         throw std::runtime_error("construct_untyped_ssa 遇到了空名字定义。");
     }
 
-    const ValueId value_id = state.dst_function.create_value(name);
+    const ValueId value_id = state.dst_function.create_value(name, is_user_visible_name(name));
     push_value(state, name, value_id, pushed_names);
     return value_id;
 }

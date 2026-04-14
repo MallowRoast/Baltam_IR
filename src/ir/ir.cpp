@@ -304,12 +304,31 @@ bool BasicBlock::erase_phi(IRNode* node) {
     return true;
 }
 
+void BasicBlock::prepend_instruction(IRNode* node) {
+    if (node == nullptr) {
+        return;
+    }
+    node->set_parent(this);
+    instructions_.insert(instructions_.begin(), node);
+}
+
 void BasicBlock::append_instruction(IRNode* node) {
     if (node == nullptr) {
         return;
     }
     node->set_parent(this);
     instructions_.push_back(node);
+}
+
+std::vector<IRNode*> BasicBlock::release_instructions() {
+    std::vector<IRNode*> released = std::move(instructions_);
+    instructions_.clear();
+    for (IRNode* node : released) {
+        if (node != nullptr) {
+            node->set_parent(nullptr);
+        }
+    }
+    return released;
 }
 
 bool BasicBlock::erase_instruction(IRNode* node) {
@@ -351,6 +370,34 @@ void BasicBlock::add_successor(BasicBlock* successor) {
     if (!contains_block(successor->predecessors_, this)) {
         successor->predecessors_.push_back(this);
     }
+}
+
+bool BasicBlock::remove_successor(BasicBlock* successor) {
+    if (successor == nullptr) {
+        return false;
+    }
+
+    auto successor_it = std::find(successors_.begin(), successors_.end(), successor);
+    if (successor_it == successors_.end()) {
+        return false;
+    }
+    successors_.erase(successor_it);
+
+    auto predecessor_it = std::find(successor->predecessors_.begin(),
+                                    successor->predecessors_.end(), this);
+    if (predecessor_it != successor->predecessors_.end()) {
+        successor->predecessors_.erase(predecessor_it);
+    }
+    return true;
+}
+
+IRNode* BasicBlock::release_terminal() {
+    IRNode* released = terminal_;
+    terminal_ = nullptr;
+    if (released != nullptr) {
+        released->set_parent(nullptr);
+    }
+    return released;
 }
 
 void BasicBlock::set_terminal(IRNode* node) {
@@ -426,6 +473,15 @@ bool Function::has_value(ValueId id) const {
     return index < value_debug_names_.size() && value_debug_names_[index].has_value();
 }
 
+bool Function::is_user_visible_value(ValueId id) const {
+    if (!has_value(id)) {
+        return false;
+    }
+
+    const std::size_t index = static_cast<std::size_t>(id - 1);
+    return index < value_user_visible_flags_.size() && value_user_visible_flags_[index];
+}
+
 const std::string* Function::find_value_debug_name(ValueId id) const {
     if (!has_value(id)) {
         return nullptr;
@@ -449,6 +505,43 @@ BasicBlock* Function::create_block(std::string name) {
     raw->set_parent(this);
     block_storage_.push_back(std::move(block));
     return raw;
+}
+
+bool Function::erase_block(BasicBlock* block) {
+    if (block == nullptr) {
+        return false;
+    }
+
+    auto block_it = std::find_if(block_storage_.begin(), block_storage_.end(),
+                                 [block](const std::unique_ptr<BasicBlock>& item) {
+                                     return item.get() == block;
+                                 });
+    if (block_it == block_storage_.end()) {
+        return false;
+    }
+
+    while (!block->successors_.empty()) {
+        block->remove_successor(block->successors_.back());
+    }
+    while (!block->predecessors_.empty()) {
+        block->predecessors_.back()->remove_successor(block);
+    }
+
+    while (!block->phi_nodes_.empty()) {
+        block->erase_phi(block->phi_nodes_.back());
+    }
+    while (!block->instructions_.empty()) {
+        block->erase_instruction(block->instructions_.back());
+    }
+    block->set_terminal(nullptr);
+    block->set_parent(nullptr);
+
+    if (entry_block_ == block) {
+        entry_block_ = nullptr;
+    }
+
+    block_storage_.erase(block_it);
+    return true;
 }
 
 void Function::set_entry_block(BasicBlock* block) {
@@ -487,9 +580,10 @@ void Function::set_argument_values(std::vector<ValueId> argument_values) {
     argument_values_ = std::move(argument_values);
 }
 
-ValueId Function::create_value(std::string debug_name) {
+ValueId Function::create_value(std::string debug_name, bool is_user_visible) {
     const ValueId id = static_cast<ValueId>(value_debug_names_.size() + 1);
     value_debug_names_.push_back(std::move(debug_name));
+    value_user_visible_flags_.push_back(is_user_visible);
     return id;
 }
 
@@ -504,6 +598,7 @@ bool Function::erase_value(ValueId id) {
 
     const std::size_t index = static_cast<std::size_t>(id - 1);
     value_debug_names_[index] = std::nullopt;
+    value_user_visible_flags_[index] = false;
     return true;
 }
 
@@ -621,6 +716,50 @@ void SSAPhiNode::add_incoming(BasicBlock* predecessor, ValueRef value) {
     incomings_.push_back(Incoming{predecessor, value});
 }
 
+bool SSAPhiNode::remove_incoming(BasicBlock* predecessor) {
+    if (predecessor == nullptr) {
+        return false;
+    }
+
+    const auto old_size = incomings_.size();
+    incomings_.erase(std::remove_if(incomings_.begin(), incomings_.end(),
+                                    [predecessor](const Incoming& incoming) {
+                                        return incoming.predecessor == predecessor;
+                                    }),
+                     incomings_.end());
+    return incomings_.size() != old_size;
+}
+
+bool SSAPhiNode::replace_predecessor(BasicBlock* old_predecessor, BasicBlock* new_predecessor) {
+    if (old_predecessor == nullptr || new_predecessor == nullptr) {
+        return false;
+    }
+
+    bool changed = false;
+    for (Incoming& incoming : incomings_) {
+        if (incoming.predecessor == old_predecessor) {
+            incoming.predecessor = new_predecessor;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+bool SSAPhiNode::replace_value(ValueRef old_value, ValueRef new_value) {
+    if (!old_value.valid() || !new_value.valid() || old_value.id == new_value.id) {
+        return false;
+    }
+
+    bool changed = false;
+    for (Incoming& incoming : incomings_) {
+        if (incoming.value.id == old_value.id) {
+            incoming.value = new_value;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
 SSACopyNode::SSACopyNode(ValueId result, ValueRef src, std::optional<SourceLocation> location)
     : UntypedSSANode(UntypedSSANode::SSA_Copy, std::move(location)),
       result_(result),
@@ -632,6 +771,10 @@ ValueId SSACopyNode::result() const {
 
 ValueRef SSACopyNode::src() const {
     return src_;
+}
+
+void SSACopyNode::set_src(ValueRef src) {
+    src_ = src;
 }
 
 SSAGlobalLoadNode::SSAGlobalLoadNode(ValueId result, std::string symbol,
@@ -662,6 +805,10 @@ ValueRef SSAGlobalStoreNode::value() const {
     return value_;
 }
 
+void SSAGlobalStoreNode::set_value(ValueRef value) {
+    value_ = value;
+}
+
 SSAUnaryOpNode::SSAUnaryOpNode(Op op, ValueId result, ValueRef operand,
                                std::optional<SourceLocation> location)
     : UntypedSSANode(UntypedSSANode::SSA_UnaryOp, std::move(location)),
@@ -679,6 +826,10 @@ ValueId SSAUnaryOpNode::result() const {
 
 ValueRef SSAUnaryOpNode::operand() const {
     return operand_;
+}
+
+void SSAUnaryOpNode::set_operand(ValueRef operand) {
+    operand_ = operand;
 }
 
 SSABinOpNode::SSABinOpNode(Op op, ValueId result, ValueRef lhs, ValueRef rhs,
@@ -705,6 +856,14 @@ ValueRef SSABinOpNode::rhs() const {
     return rhs_;
 }
 
+void SSABinOpNode::set_lhs(ValueRef lhs) {
+    lhs_ = lhs;
+}
+
+void SSABinOpNode::set_rhs(ValueRef rhs) {
+    rhs_ = rhs;
+}
+
 SSACallNode::SSACallNode(Callee callee, std::vector<ValueId> results,
                          std::vector<ValueRef> inputs, std::optional<SourceLocation> location)
     : UntypedSSANode(UntypedSSANode::SSA_Call, std::move(location)),
@@ -722,6 +881,17 @@ const std::vector<ValueId>& SSACallNode::results() const {
 
 const std::vector<ValueRef>& SSACallNode::inputs() const {
     return inputs_;
+}
+
+void SSACallNode::set_callee_indirect_value(ValueRef indirect_value) {
+    callee_.indirect_value = indirect_value;
+}
+
+void SSACallNode::set_input(std::size_t index, ValueRef input) {
+    if (index >= inputs_.size()) {
+        return;
+    }
+    inputs_[index] = input;
 }
 
 SSACondJumpNode::SSACondJumpNode(ValueRef cond, BasicBlock* true_block, BasicBlock* false_block,
@@ -743,6 +913,10 @@ BasicBlock* SSACondJumpNode::false_block() const {
     return false_block_;
 }
 
+void SSACondJumpNode::set_cond(ValueRef cond) {
+    cond_ = cond;
+}
+
 SSAJumpNode::SSAJumpNode(BasicBlock* target, std::optional<SourceLocation> location)
     : UntypedSSANode(UntypedSSANode::SSA_Jump, std::move(location)), target_(target) {}
 
@@ -756,6 +930,13 @@ SSAReturnNode::SSAReturnNode(std::vector<ValueRef> values, std::optional<SourceL
 
 const std::vector<ValueRef>& SSAReturnNode::values() const {
     return values_;
+}
+
+void SSAReturnNode::set_value(std::size_t index, ValueRef value) {
+    if (index >= values_.size()) {
+        return;
+    }
+    values_[index] = value;
 }
 
 Module::Module(std::string name, std::string source_path, Type type)

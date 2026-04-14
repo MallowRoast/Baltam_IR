@@ -10,7 +10,7 @@ using namespace baltam::test_support;
 namespace {
 
 void test_execute_test0() {
-    Module ssa_module = build_untyped_ssa_module_for_test_script("test0");
+    Module ssa_module = build_optimized_untyped_ssa_module_for_test_script("test0");
     Function& entry_function = entry_function_or_fail(ssa_module, "test0");
 
     const interpreter::ExecResult result = execute_function_with_test_trace(entry_function);

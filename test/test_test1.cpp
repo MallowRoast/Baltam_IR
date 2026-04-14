@@ -54,7 +54,7 @@ interpreter::Value::Object make_string_arg(const char* text) {
 }
 
 void test_execute_test1() {
-    Module ssa_module = build_untyped_ssa_module_for_test_script("test1");
+    Module ssa_module = build_optimized_untyped_ssa_module_for_test_script("test1");
     Function& entry_function = entry_function_or_fail(ssa_module, "test1");
 
     const interpreter::ExecResult result = execute_function_with_test_trace(

@@ -17,7 +17,8 @@ struct NodeInfo {
     std::vector<ValueId> defs;
     std::vector<ValueRef> uses;
 
-    bool all_defs_unused(const std::unordered_map<ValueId, std::size_t>& use_count) const;
+    bool all_defs_unused(const Function& function,
+                         const std::unordered_map<ValueId, std::size_t>& use_count) const;
 };
 
 void append_use(std::vector<ValueRef>& uses, ValueRef value) {
@@ -142,12 +143,15 @@ bool is_removable_node_type(UntypedSSANode::Type type) {
 }
 
 bool NodeInfo::all_defs_unused(
-    const std::unordered_map<ValueId, std::size_t>& use_count) const {
+    const Function& function, const std::unordered_map<ValueId, std::size_t>& use_count) const {
     if (node == nullptr || removed || !is_removable_node_type(node->type())) {
         return false;
     }
 
     for (ValueId def : defs) {
+        if (function.is_user_visible_value(def)) {
+            return false;
+        }
         auto it = use_count.find(def);
         if (it != use_count.end() && it->second != 0) {
             return false;
@@ -233,7 +237,7 @@ analysis::PreservedAnalyses UntypedSSADCEPass::run(
 
     std::deque<UntypedSSANode*> worklist;
     for (auto& [node, info] : node_infos) {
-        if (info.all_defs_unused(use_count)) {
+        if (info.all_defs_unused(function, use_count)) {
             worklist.push_back(node);
         }
     }
@@ -249,7 +253,7 @@ analysis::PreservedAnalyses UntypedSSADCEPass::run(
         }
 
         NodeInfo& info = info_it->second;
-        if (!info.all_defs_unused(use_count)) {
+        if (!info.all_defs_unused(function, use_count)) {
             continue;
         }
 
@@ -299,7 +303,7 @@ analysis::PreservedAnalyses UntypedSSADCEPass::run(
             if (predecessor_info == node_infos.end()) {
                 continue;
             }
-            if (predecessor_info->second.all_defs_unused(use_count)) {
+            if (predecessor_info->second.all_defs_unused(function, use_count)) {
                 worklist.push_back(def_it->second);
             }
         }
