@@ -4,6 +4,7 @@
 
 #include "analysis/verifier.h"
 #include "optimizer/constant_fold.h"
+#include "optimizer/dce.h"
 
 namespace baltam {
 namespace optimizer {
@@ -37,6 +38,7 @@ void optimize_function(Function& function, const PassManagerOptions& options) {
     analysis::FunctionAnalysisManager analysis_manager;
     FunctionPassManager pass_manager;
     pass_manager.add_pass(std::make_unique<UntypedSSAConstantFoldPass>());
+    pass_manager.add_pass(std::make_unique<UntypedSSADCEPass>());
     optimize_function(function, pass_manager, analysis_manager, options);
 }
 
@@ -44,6 +46,7 @@ void optimize_module(Module& module, const OptimizeOptions& options) {
     analysis::FunctionAnalysisManager analysis_manager;
     FunctionPassManager pass_manager;
     pass_manager.add_pass(std::make_unique<UntypedSSAConstantFoldPass>());
+    pass_manager.add_pass(std::make_unique<UntypedSSADCEPass>());
     optimize_module(module, pass_manager, analysis_manager, options);
 }
 

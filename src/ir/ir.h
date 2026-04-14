@@ -719,7 +719,9 @@ public:
     IRNode* terminal() const;
 
     void append_phi(IRNode* node);
+    bool erase_phi(IRNode* node);
     void append_instruction(IRNode* node);
+    bool erase_instruction(IRNode* node);
     bool replace_instruction(IRNode* old_node, IRNode* new_node);
     void add_successor(BasicBlock* successor);
     void set_terminal(IRNode* node);
@@ -777,6 +779,7 @@ public:
     void set_has_varargout(bool has_varargout);
     void set_argument_values(std::vector<ValueId> argument_values);
     ValueId create_value(std::string debug_name = {});
+    bool erase_value(ValueId id);
     void set_value_debug_name(ValueId id, std::string debug_name);
 
     template <typename T, typename... Args>
@@ -801,7 +804,7 @@ private:
     bool has_varargin_ = false;
     bool has_varargout_ = false;
     std::vector<ValueId> argument_values_;
-    std::vector<std::string> value_debug_names_;
+    std::vector<std::optional<std::string>> value_debug_names_;
     std::vector<std::unique_ptr<BasicBlock>> block_storage_;
     std::vector<std::unique_ptr<IRNode>> node_storage_;
     BasicBlock* entry_block_ = nullptr;

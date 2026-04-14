@@ -289,12 +289,42 @@ void BasicBlock::append_phi(IRNode* node) {
     phi_nodes_.push_back(node);
 }
 
+bool BasicBlock::erase_phi(IRNode* node) {
+    if (node == nullptr) {
+        return false;
+    }
+
+    auto it = std::find(phi_nodes_.begin(), phi_nodes_.end(), node);
+    if (it == phi_nodes_.end()) {
+        return false;
+    }
+
+    node->set_parent(nullptr);
+    phi_nodes_.erase(it);
+    return true;
+}
+
 void BasicBlock::append_instruction(IRNode* node) {
     if (node == nullptr) {
         return;
     }
     node->set_parent(this);
     instructions_.push_back(node);
+}
+
+bool BasicBlock::erase_instruction(IRNode* node) {
+    if (node == nullptr) {
+        return false;
+    }
+
+    auto it = std::find(instructions_.begin(), instructions_.end(), node);
+    if (it == instructions_.end()) {
+        return false;
+    }
+
+    node->set_parent(nullptr);
+    instructions_.erase(it);
+    return true;
 }
 
 bool BasicBlock::replace_instruction(IRNode* old_node, IRNode* new_node) {
@@ -308,6 +338,7 @@ bool BasicBlock::replace_instruction(IRNode* old_node, IRNode* new_node) {
     }
 
     new_node->set_parent(this);
+    old_node->set_parent(nullptr);
     *it = new_node;
     return true;
 }
@@ -323,6 +354,9 @@ void BasicBlock::add_successor(BasicBlock* successor) {
 }
 
 void BasicBlock::set_terminal(IRNode* node) {
+    if (terminal_ != nullptr) {
+        terminal_->set_parent(nullptr);
+    }
     terminal_ = node;
     if (terminal_ != nullptr) {
         terminal_->set_parent(this);
@@ -389,7 +423,7 @@ bool Function::has_value(ValueId id) const {
     }
 
     const std::size_t index = static_cast<std::size_t>(id - 1);
-    return index < value_debug_names_.size();
+    return index < value_debug_names_.size() && value_debug_names_[index].has_value();
 }
 
 const std::string* Function::find_value_debug_name(ValueId id) const {
@@ -398,7 +432,7 @@ const std::string* Function::find_value_debug_name(ValueId id) const {
     }
 
     const std::size_t index = static_cast<std::size_t>(id - 1);
-    return &value_debug_names_[index];
+    return &value_debug_names_[index].value();
 }
 
 BasicBlock* Function::entry_block() const {
@@ -459,9 +493,24 @@ ValueId Function::create_value(std::string debug_name) {
     return id;
 }
 
+bool Function::erase_value(ValueId id) {
+    if (!has_value(id)) {
+        return false;
+    }
+
+    if (std::find(argument_values_.begin(), argument_values_.end(), id) != argument_values_.end()) {
+        return false;
+    }
+
+    const std::size_t index = static_cast<std::size_t>(id - 1);
+    value_debug_names_[index] = std::nullopt;
+    return true;
+}
+
 void Function::set_value_debug_name(ValueId id, std::string debug_name) {
     const std::size_t index = static_cast<std::size_t>(id - 1);
-    if (id == InvalidValueId || index >= value_debug_names_.size()) {
+    if (id == InvalidValueId || index >= value_debug_names_.size() ||
+        !value_debug_names_[index].has_value()) {
         return;
     }
     value_debug_names_[index] = std::move(debug_name);

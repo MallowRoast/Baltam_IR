@@ -52,9 +52,10 @@ void optimize_module(Module& module, FunctionPassManager& pass_manager,
 /**
  * @brief 在单个函数上运行默认构造的优化 pipeline。
  *
- * 当前默认 pipeline 只注册 `UntypedSSAConstantFoldPass`：
+ * 当前默认 pipeline 会注册 `UntypedSSAConstantFoldPass` 和 `UntypedSSADCEPass`：
  *
  * - 对 `UntypedSSA` 函数尝试折叠可静态求值的一元常量表达式
+ * - 删除常量折叠后暴露出来的无 uses 死节点
  * - 对其他 stage 的函数保持 no-op
  */
 void optimize_function(Function& function, const PassManagerOptions& options = {});
@@ -63,7 +64,8 @@ void optimize_function(Function& function, const PassManagerOptions& options = {
  * @brief 在整个模块上运行默认构造的优化 pipeline。
  *
  * 当前默认 pipeline 会对模块中的每个函数运行
- * `UntypedSSAConstantFoldPass`，并在模块/函数级按选项执行验证。
+ * `UntypedSSAConstantFoldPass -> UntypedSSADCEPass`，
+ * 并在模块/函数级按选项执行验证。
  */
 void optimize_module(Module& module, const OptimizeOptions& options = {});
 

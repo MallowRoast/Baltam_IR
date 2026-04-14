@@ -717,6 +717,9 @@ void verify_untyped_ssa_values(VerificationResult& result, const Function& funct
 
     for (std::size_t index = 0; index < function.value_count(); ++index) {
         const ValueId value_id = static_cast<ValueId>(index + 1);
+        if (!function.has_value(value_id)) {
+            continue;
+        }
         if (node_defs.find(value_id) == node_defs.end() &&
             argument_values.find(value_id) == argument_values.end()) {
             add_error(result, "函数 `" + function.name() + "` 的 SSA 值 %" +

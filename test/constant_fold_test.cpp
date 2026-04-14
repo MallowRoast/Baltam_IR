@@ -56,6 +56,14 @@ std::string print_module(const Module& module) {
     return oss.str();
 }
 
+analysis::PreservedAnalyses run_constant_fold(Function& function) {
+    analysis::verify_function_or_throw(function);
+
+    analysis::FunctionAnalysisManager analysis_manager;
+    optimizer::UntypedSSAConstantFoldPass pass;
+    return pass.run(function, analysis_manager);
+}
+
 void test_uminus_folds_to_constant() {
     Module module("fold_uminus_module", "test/constant_fold/fold_uminus.m", Module::M_Function);
     Function& function = create_ssa_function(module, "fold_uminus");
@@ -74,7 +82,7 @@ void test_uminus_folds_to_constant() {
 
     analysis::verify_module_or_throw(module);
 
-    optimizer::optimize_function(function);
+    run_constant_fold(function);
     analysis::verify_module_or_throw(module);
 
     const std::string text = print_module(module);
@@ -146,7 +154,7 @@ void test_not_folds_zero_to_true() {
 
     analysis::verify_module_or_throw(module);
 
-    optimizer::optimize_function(function);
+    run_constant_fold(function);
     analysis::verify_module_or_throw(module);
 
     const auto* number = dynamic_cast<const SSANumberNode*>(entry->instructions()[1]);
@@ -337,7 +345,7 @@ void test_add_bool_and_bool_folds_to_double() {
 
     analysis::verify_module_or_throw(module);
 
-    optimizer::optimize_function(function);
+    run_constant_fold(function);
     analysis::verify_module_or_throw(module);
 
     const auto* number = dynamic_cast<const SSANumberNode*>(entry->instructions()[2]);
@@ -451,7 +459,7 @@ void test_add_integer_same_type_and_double_fold() {
 
     analysis::verify_module_or_throw(module);
 
-    optimizer::optimize_function(function);
+    run_constant_fold(function);
     analysis::verify_module_or_throw(module);
 
     const auto* sat_high = dynamic_cast<const SSANumberNode*>(entry->instructions()[2]);
@@ -530,7 +538,7 @@ void test_add_double_and_complex_variants_fold() {
 
     analysis::verify_module_or_throw(module);
 
-    optimizer::optimize_function(function);
+    run_constant_fold(function);
     analysis::verify_module_or_throw(module);
 
     const auto* bool_complex = dynamic_cast<const SSANumberNode*>(entry->instructions()[2]);
@@ -587,7 +595,7 @@ void test_subtract_bool_and_bool_folds_to_double() {
 
     analysis::verify_module_or_throw(module);
 
-    optimizer::optimize_function(function);
+    run_constant_fold(function);
     analysis::verify_module_or_throw(module);
 
     const auto* number = dynamic_cast<const SSANumberNode*>(entry->instructions()[2]);
@@ -701,7 +709,7 @@ void test_subtract_integer_same_type_and_double_fold() {
 
     analysis::verify_module_or_throw(module);
 
-    optimizer::optimize_function(function);
+    run_constant_fold(function);
     analysis::verify_module_or_throw(module);
 
     const auto* sat_high = dynamic_cast<const SSANumberNode*>(entry->instructions()[2]);
@@ -780,7 +788,7 @@ void test_subtract_double_and_complex_variants_fold() {
 
     analysis::verify_module_or_throw(module);
 
-    optimizer::optimize_function(function);
+    run_constant_fold(function);
     analysis::verify_module_or_throw(module);
 
     const auto* bool_complex = dynamic_cast<const SSANumberNode*>(entry->instructions()[2]);
@@ -838,7 +846,7 @@ void test_times_bool_and_bool_folds_to_double() {
 
     analysis::verify_module_or_throw(module);
 
-    optimizer::optimize_function(function);
+    run_constant_fold(function);
     analysis::verify_module_or_throw(module);
 
     const auto* number = dynamic_cast<const SSANumberNode*>(entry->instructions()[2]);
@@ -969,7 +977,7 @@ void test_times_integer_same_type_and_double_fold() {
 
     analysis::verify_module_or_throw(module);
 
-    optimizer::optimize_function(function);
+    run_constant_fold(function);
     analysis::verify_module_or_throw(module);
 
     const auto* sat_high = dynamic_cast<const SSANumberNode*>(entry->instructions()[2]);
@@ -1083,7 +1091,7 @@ void test_multiply_double_and_complex_variants_fold() {
 
     analysis::verify_module_or_throw(module);
 
-    optimizer::optimize_function(function);
+    run_constant_fold(function);
     analysis::verify_module_or_throw(module);
 
     const auto* bool_complex = dynamic_cast<const SSANumberNode*>(entry->instructions()[2]);
@@ -1172,7 +1180,7 @@ void test_divide_direction_and_matrix_variants_fold() {
 
     analysis::verify_module_or_throw(module);
 
-    optimizer::optimize_function(function);
+    run_constant_fold(function);
     analysis::verify_module_or_throw(module);
 
     for (std::size_t index = 2; index <= 5; ++index) {
@@ -1318,7 +1326,7 @@ void test_rdivide_integer_same_type_and_double_fold() {
 
     analysis::verify_module_or_throw(module);
 
-    optimizer::optimize_function(function);
+    run_constant_fold(function);
     analysis::verify_module_or_throw(module);
 
     const auto* signed_div = dynamic_cast<const SSANumberNode*>(entry->instructions()[2]);
@@ -1442,7 +1450,7 @@ void test_divide_double_and_complex_variants_fold() {
 
     analysis::verify_module_or_throw(module);
 
-    optimizer::optimize_function(function);
+    run_constant_fold(function);
     analysis::verify_module_or_throw(module);
 
     const auto* bool_bool = dynamic_cast<const SSANumberNode*>(entry->instructions()[2]);

@@ -26,6 +26,7 @@ set(BALTAM_IR_LIBRARY_SOURCES
     src/lowering/lowering.cpp
     src/optimizer/constant_fold.cpp
     src/optimizer/construct_untyped_ssa.cpp
+    src/optimizer/dce.cpp
     src/optimizer/pass_manager.cpp
     src/optimizer/optimize.cpp
 )

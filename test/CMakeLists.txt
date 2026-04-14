@@ -101,6 +101,20 @@ add_baltam_ir_test(constant_fold_test
     ../src/ir/ir.cpp
     ../src/ir/ir_printer.cpp
     ../src/optimizer/constant_fold.cpp
+    ../src/optimizer/dce.cpp
+    ../src/optimizer/pass_manager.cpp
+    ../src/optimizer/optimize.cpp
+)
+
+add_baltam_ir_test(dce_test
+    dce_test.cpp
+    ../src/analysis/analysis_manager.cpp
+    ../src/analysis/value_def.cpp
+    ../src/analysis/verifier.cpp
+    ../src/ir/ir.cpp
+    ../src/ir/ir_printer.cpp
+    ../src/optimizer/constant_fold.cpp
+    ../src/optimizer/dce.cpp
     ../src/optimizer/pass_manager.cpp
     ../src/optimizer/optimize.cpp
 )
