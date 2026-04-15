@@ -143,14 +143,14 @@ const NamedValue& GlobalStoreNode::value() const {
     return value_;
 }
 
-UnaryOpNode::UnaryOpNode(Op op, NamedValue result, NamedValue operand,
+UnaryOpNode::UnaryOpNode(UnaryOpType op, NamedValue result, NamedValue operand,
                          std::optional<SourceLocation> location)
     : NonSSANode(NonSSANode::UnaryOp, std::move(location)),
       op_(op),
       result_(std::move(result)),
       operand_(std::move(operand)) {}
 
-UnaryOpNode::Op UnaryOpNode::op() const {
+UnaryOpType UnaryOpNode::op() const {
     return op_;
 }
 
@@ -162,7 +162,7 @@ const NamedValue& UnaryOpNode::operand() const {
     return operand_;
 }
 
-BinOpNode::BinOpNode(Op op, NamedValue result, NamedValue lhs, NamedValue rhs,
+BinOpNode::BinOpNode(BinOpType op, NamedValue result, NamedValue lhs, NamedValue rhs,
                      std::optional<SourceLocation> location)
     : NonSSANode(NonSSANode::BinOp, std::move(location)),
       op_(op),
@@ -170,7 +170,7 @@ BinOpNode::BinOpNode(Op op, NamedValue result, NamedValue lhs, NamedValue rhs,
       lhs_(std::move(lhs)),
       rhs_(std::move(rhs)) {}
 
-BinOpNode::Op BinOpNode::op() const {
+BinOpType BinOpNode::op() const {
     return op_;
 }
 

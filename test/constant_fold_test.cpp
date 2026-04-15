@@ -2968,10 +2968,11 @@ void test_abs_call_double_and_complex_fold() {
                        "abs(-2.0) + 1 should fold transitively.");
 }
 
-void test_abs_call_non_double_and_non_complex_stay_call() {
-    Module module("keep_abs_call_module", "test/constant_fold/keep_abs_call.m", Module::M_Function);
-    Function& function = create_ssa_function(module, "keep_abs_call");
-    function.set_output_names({"out0", "out1"});
+void test_abs_call_bool_and_integer_fold() {
+    Module module("fold_abs_scalar_module", "test/constant_fold/fold_abs_scalar.m",
+                  Module::M_Function);
+    Function& function = create_ssa_function(module, "fold_abs_scalar");
+    function.set_output_names({"out0", "out1", "out2"});
 
     BasicBlock* entry = function.create_block("entry");
     function.set_entry_block(entry);
@@ -2993,20 +2994,43 @@ void test_abs_call_non_double_and_non_complex_stay_call() {
     const ValueId out1 = function.create_value("out1");
     entry->append_instruction(function.create_node<SSACallNode>(
         abs_callee, std::vector<ValueId>{out1}, std::vector<ValueRef>{ValueRef{int_input}}));
+
+    const ValueId uint_input = function.create_value("uint_input");
+    entry->append_instruction(function.create_node<SSANumberNode>(
+        uint_input, SSANumberNode::NumberValue{IntegerConstant(std::uint8_t{9})}));
+    const ValueId out2 = function.create_value("out2");
+    entry->append_instruction(function.create_node<SSACallNode>(
+        abs_callee, std::vector<ValueId>{out2}, std::vector<ValueRef>{ValueRef{uint_input}}));
     entry->set_terminal(function.create_node<SSAReturnNode>(
-        std::vector<ValueRef>{ValueRef{out0}, ValueRef{out1}}));
+        std::vector<ValueRef>{ValueRef{out0}, ValueRef{out1}, ValueRef{out2}}));
 
     analysis::verify_module_or_throw(module);
+    const analysis::PreservedAnalyses preserved = run_constant_fold(function);
+    expect(!preserved.preserves_all(), "abs(bool/int/uint) should fold to constants.");
+    analysis::verify_module_or_throw(module);
 
-    analysis::FunctionAnalysisManager analysis_manager;
-    optimizer::UntypedSSAConstantFoldPass pass;
-    const analysis::PreservedAnalyses preserved = pass.run(function, analysis_manager);
-    expect(preserved.preserves_all(), "abs(bool/int) should stay as calls.");
+    const auto* abs_bool = dynamic_cast<const SSANumberNode*>(entry->instructions()[1]);
+    expect(abs_bool != nullptr, "abs(bool) should fold to SSANumberNode.");
+    expect(std::holds_alternative<double>(abs_bool->value()),
+           "abs(bool) should produce double constant.");
+    expect_double_near(std::get<double>(abs_bool->value()), 1.0, 1e-12,
+                       "abs(true) should fold to 1.0.");
 
-    expect(dynamic_cast<const SSACallNode*>(entry->instructions()[1]) != nullptr,
-           "abs(bool) should remain an SSA call.");
-    expect(dynamic_cast<const SSACallNode*>(entry->instructions()[3]) != nullptr,
-           "abs(integer) should remain an SSA call.");
+    const auto* abs_int = dynamic_cast<const SSANumberNode*>(entry->instructions()[3]);
+    expect(abs_int != nullptr, "abs(signed integer) should fold to SSANumberNode.");
+    const auto* abs_int_value = std::get_if<IntegerConstant>(&abs_int->value());
+    expect(abs_int_value != nullptr, "abs(signed integer) should keep integer representation.");
+    expect(abs_int_value->as_int8().has_value() &&
+               *abs_int_value->as_int8() == static_cast<std::int8_t>(4),
+           "abs(int8(-4)) should fold to int8(4).");
+
+    const auto* abs_uint = dynamic_cast<const SSANumberNode*>(entry->instructions()[5]);
+    expect(abs_uint != nullptr, "abs(unsigned integer) should fold to SSANumberNode.");
+    const auto* abs_uint_value = std::get_if<IntegerConstant>(&abs_uint->value());
+    expect(abs_uint_value != nullptr, "abs(unsigned integer) should keep integer representation.");
+    expect(abs_uint_value->as_uint8().has_value() &&
+               *abs_uint_value->as_uint8() == static_cast<std::uint8_t>(9),
+           "abs(uint8(9)) should fold to itself.");
 }
 
 void test_integer_constant_accessors() {
@@ -3096,7 +3120,7 @@ int main() {
         test_sqrt_call_double_and_complex_fold();
         test_sqrt_call_non_double_and_non_complex_stay_call();
         test_abs_call_double_and_complex_fold();
-        test_abs_call_non_double_and_non_complex_stay_call();
+        test_abs_call_bool_and_integer_fold();
         test_integer_constant_accessors();
     } catch (const std::exception& ex) {
         std::cerr << "constant_fold_test FAILED: " << ex.what() << '\n';

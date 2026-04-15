@@ -428,60 +428,60 @@ std::string format_ssa_argument_list(const Function& function, const SSADisplayN
     return oss.str();
 }
 
-std::string unary_opcode(UnaryOpNode::Op op) {
+std::string unary_opcode(UnaryOpType op) {
     switch (op) {
-        case UnaryOpNode::Logic_Not:
+        case UnaryOpType::Logic_Not:
             return "not";
-        case UnaryOpNode::UPlus:
+        case UnaryOpType::UPlus:
             return "uplus";
-        case UnaryOpNode::UMinus:
+        case UnaryOpType::UMinus:
             return "uminus";
-        case UnaryOpNode::Transpose:
+        case UnaryOpType::Transpose:
             return "transpose";
-        case UnaryOpNode::CTranspose:
+        case UnaryOpType::CTranspose:
             return "ctranspose";
     }
 
     return "unknown.unaryop";
 }
 
-std::string binop_opcode(BinOpNode::Op op) {
+std::string binop_opcode(BinOpType op) {
     switch (op) {
-        case BinOpNode::Add:
+        case BinOpType::Add:
             return "plus";
-        case BinOpNode::Subtract:
+        case BinOpType::Subtract:
             return "minus";
-        case BinOpNode::Eq:
+        case BinOpType::Eq:
             return "eq";
-        case BinOpNode::Ge:
+        case BinOpType::Ge:
             return "ge";
-        case BinOpNode::Gt:
+        case BinOpType::Gt:
             return "gt";
-        case BinOpNode::Le:
+        case BinOpType::Le:
             return "le";
-        case BinOpNode::Lt:
+        case BinOpType::Lt:
             return "lt";
-        case BinOpNode::Ne:
+        case BinOpType::Ne:
             return "ne";
-        case BinOpNode::And:
+        case BinOpType::And:
             return "and";
-        case BinOpNode::Or:
+        case BinOpType::Or:
             return "or";
-        case BinOpNode::Power:
+        case BinOpType::Power:
             return "power";
-        case BinOpNode::LDivide:
+        case BinOpType::LDivide:
             return "ldivide";
-        case BinOpNode::MLeftDivide:
+        case BinOpType::MLeftDivide:
             return "mldivide";
-        case BinOpNode::MPower:
+        case BinOpType::MPower:
             return "mpower";
-        case BinOpNode::MRightDivide:
+        case BinOpType::MRightDivide:
             return "mrdivide";
-        case BinOpNode::Times:
+        case BinOpType::Times:
             return "times";
-        case BinOpNode::Multiply:
+        case BinOpType::Multiply:
             return "mtimes";
-        case BinOpNode::RDivide:
+        case BinOpType::RDivide:
             return "rdivide";
     }
 

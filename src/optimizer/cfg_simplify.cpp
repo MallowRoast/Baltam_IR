@@ -25,6 +25,7 @@ void rewrite_successor_phis(BasicBlock* from, BasicBlock* to,
     }
 }
 
+// 删除只包含无条件跳转的中间块，并把唯一前驱直接改写为跳到目标块。
 bool try_simplify_jump_only_block(Function& function, BasicBlock* block) {
     if (block == nullptr || block == function.entry_block()) {
         return false;
@@ -71,22 +72,23 @@ bool try_simplify_jump_only_block(Function& function, BasicBlock* block) {
     return true;
 }
 
-bool try_merge_linear_successor_block(Function& function, BasicBlock* predecessor) {
-    if (predecessor == nullptr) {
+// 当一个块只跳到唯一后继，且该后继也只有这一个前驱时，将两者合并成单个线性块。
+bool try_merge_linear_successor_block(Function& function, BasicBlock* block) {
+    if (block == nullptr) {
         return false;
     }
 
-    auto* predecessor_jump = dynamic_cast<SSAJumpNode*>(predecessor->terminal());
-    if (predecessor_jump == nullptr || predecessor->successors().size() != 1) {
+    auto* predecessor_jump = dynamic_cast<SSAJumpNode*>(block->terminal());
+    if (predecessor_jump == nullptr || block->successors().size() != 1) {
         return false;
     }
 
     BasicBlock* successor = predecessor_jump->target();
-    if (successor == nullptr || successor == predecessor) {
+    if (successor == nullptr || successor == block) {
         return false;
     }
 
-    if (successor->predecessors().size() != 1 || successor->predecessors().front() != predecessor) {
+    if (successor->predecessors().size() != 1 || successor->predecessors().front() != block) {
         return false;
     }
     if (!successor->phi_nodes().empty()) {
@@ -94,22 +96,22 @@ bool try_merge_linear_successor_block(Function& function, BasicBlock* predecesso
     }
 
     std::vector<BasicBlock*> successor_successors = successor->successors();
-    rewrite_successor_phis(successor, predecessor, successor_successors);
+    rewrite_successor_phis(successor, block, successor_successors);
 
-    predecessor->remove_successor(successor);
+    block->remove_successor(successor);
     for (BasicBlock* next : successor_successors) {
-        predecessor->add_successor(next);
+        block->add_successor(next);
     }
 
     for (IRNode* instruction : successor->release_instructions()) {
-        predecessor->append_instruction(instruction);
+        block->append_instruction(instruction);
     }
 
     IRNode* successor_terminal = successor->release_terminal();
     if (successor_terminal == nullptr) {
         throw std::runtime_error("CFG 简化失败：待合并块缺少终结节点。");
     }
-    predecessor->set_terminal(successor_terminal);
+    block->set_terminal(successor_terminal);
 
     if (!function.erase_block(successor)) {
         throw std::runtime_error("CFG 简化失败：删除已合并的后继块失败。");

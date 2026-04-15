@@ -26,19 +26,6 @@ struct SourceLocation {
     int end_column = 0;
 };
 
-/**
- * @brief non-SSA 阶段里对一个具名值的轻量描述。
- */
-struct NamedValue {
-    enum Type {
-        UserVariable,
-        Temporary,
-    };
-
-    std::string name;
-    Type type = UserVariable;
-};
-
 using ValueId = std::uint32_t;
 constexpr ValueId InvalidValueId = 0;
 
@@ -134,6 +121,19 @@ private:
  */
 class NonSSANode : public IRNode {
 public:
+    /**
+     * @brief non-SSA 阶段里对一个具名值的轻量描述。
+     */
+    struct NamedValue {
+        enum Type {
+            UserVariable,
+            Temporary,
+        };
+
+        std::string name;
+        Type type = UserVariable;
+    };
+
     enum Type {
         Number,
         Text,
@@ -156,6 +156,8 @@ protected:
 private:
     Type type_ = Number;
 };
+
+using NamedValue = NonSSANode::NamedValue;
 
 /**
  * @brief SSA 节点的占位基类。
@@ -306,23 +308,15 @@ private:
  */
 class UnaryOpNode final : public NonSSANode {
 public:
-    using Op = UnaryOpType;
-
-    static constexpr Op Logic_Not = Op::Logic_Not;
-    static constexpr Op UPlus = Op::UPlus;
-    static constexpr Op UMinus = Op::UMinus;
-    static constexpr Op Transpose = Op::Transpose;
-    static constexpr Op CTranspose = Op::CTranspose;
-
-    UnaryOpNode(Op op, NamedValue result, NamedValue operand,
+    UnaryOpNode(UnaryOpType op, NamedValue result, NamedValue operand,
                 std::optional<SourceLocation> location = std::nullopt);
 
-    Op op() const;
+    UnaryOpType op() const;
     const NamedValue& result() const;
     const NamedValue& operand() const;
 
 private:
-    Op op_ = Op::UMinus;
+    UnaryOpType op_ = UnaryOpType::UMinus;
     NamedValue result_;
     NamedValue operand_;
 };
@@ -332,37 +326,16 @@ private:
  */
 class BinOpNode final : public NonSSANode {
 public:
-    using Op = BinOpType;
-
-    static constexpr Op Add = Op::Add;
-    static constexpr Op Subtract = Op::Subtract;
-    static constexpr Op Eq = Op::Eq;
-    static constexpr Op Ge = Op::Ge;
-    static constexpr Op Gt = Op::Gt;
-    static constexpr Op Le = Op::Le;
-    static constexpr Op Lt = Op::Lt;
-    static constexpr Op Ne = Op::Ne;
-    static constexpr Op And = Op::And;
-    static constexpr Op Or = Op::Or;
-    static constexpr Op Power = Op::Power;
-    static constexpr Op LDivide = Op::LDivide;
-    static constexpr Op MLeftDivide = Op::MLeftDivide;
-    static constexpr Op MPower = Op::MPower;
-    static constexpr Op MRightDivide = Op::MRightDivide;
-    static constexpr Op Times = Op::Times;
-    static constexpr Op Multiply = Op::Multiply;
-    static constexpr Op RDivide = Op::RDivide;
-
-    BinOpNode(Op op, NamedValue result, NamedValue lhs, NamedValue rhs,
+    BinOpNode(BinOpType op, NamedValue result, NamedValue lhs, NamedValue rhs,
               std::optional<SourceLocation> location = std::nullopt);
 
-    Op op() const;
+    BinOpType op() const;
     const NamedValue& result() const;
     const NamedValue& lhs() const;
     const NamedValue& rhs() const;
 
 private:
-    Op op_ = Op::Add;
+    BinOpType op_ = BinOpType::Add;
     NamedValue result_;
     NamedValue lhs_;
     NamedValue rhs_;

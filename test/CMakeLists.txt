@@ -97,6 +97,7 @@ add_baltam_ir_test(constant_fold_test
     constant_fold_test.cpp
     ../src/analysis/analysis_manager.cpp
     ../src/analysis/value_def.cpp
+    ../src/analysis/value_use.cpp
     ../src/analysis/verifier.cpp
     ../src/ir/ir.cpp
     ../src/ir/ir_printer.cpp
@@ -113,6 +114,7 @@ add_baltam_ir_test(dce_test
     dce_test.cpp
     ../src/analysis/analysis_manager.cpp
     ../src/analysis/value_def.cpp
+    ../src/analysis/value_use.cpp
     ../src/analysis/verifier.cpp
     ../src/ir/ir.cpp
     ../src/ir/ir_printer.cpp
@@ -129,6 +131,7 @@ add_baltam_ir_test(dead_branch_elimination_test
     dead_branch_elimination_test.cpp
     ../src/analysis/analysis_manager.cpp
     ../src/analysis/value_def.cpp
+    ../src/analysis/value_use.cpp
     ../src/analysis/verifier.cpp
     ../src/ir/ir.cpp
     ../src/ir/ir_printer.cpp
@@ -145,6 +148,7 @@ add_baltam_ir_test(cfg_simplify_test
     cfg_simplify_test.cpp
     ../src/analysis/analysis_manager.cpp
     ../src/analysis/value_def.cpp
+    ../src/analysis/value_use.cpp
     ../src/analysis/verifier.cpp
     ../src/ir/ir.cpp
     ../src/ir/ir_printer.cpp
@@ -161,6 +165,7 @@ add_baltam_ir_test(copy_propagation_test
     copy_propagation_test.cpp
     ../src/analysis/analysis_manager.cpp
     ../src/analysis/value_def.cpp
+    ../src/analysis/value_use.cpp
     ../src/analysis/verifier.cpp
     ../src/ir/ir.cpp
     ../src/ir/ir_printer.cpp

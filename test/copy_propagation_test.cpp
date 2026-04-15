@@ -130,12 +130,62 @@ void test_copy_source_is_propagated_into_binop_use() {
            "different-name copy result should remain until a later cleanup pass removes it.");
 }
 
+void test_copy_source_is_propagated_into_phi_use() {
+    Module module("copy_phi_module", "test/copy_propagation/copy_phi.m", Module::M_Function);
+    Function& function = create_ssa_function(module, "copy_phi", {"out"});
+
+    BasicBlock* entry = function.create_block("entry");
+    BasicBlock* then_block = function.create_block("then");
+    BasicBlock* else_block = function.create_block("else");
+    BasicBlock* merge = function.create_block("merge");
+    function.set_entry_block(entry);
+
+    const ValueId cond = function.create_value("cond");
+    entry->append_instruction(function.create_node<SSANumberNode>(cond, true));
+    entry->add_successor(then_block);
+    entry->add_successor(else_block);
+    entry->set_terminal(function.create_node<SSACondJumpNode>(ValueRef{cond}, then_block, else_block));
+
+    const ValueId then_value = function.create_value("then_value");
+    then_block->append_instruction(function.create_node<SSANumberNode>(then_value, std::int64_t{7}));
+    const ValueId then_alias = function.create_value("tmp");
+    then_block->append_instruction(function.create_node<SSACopyNode>(then_alias, ValueRef{then_value}));
+    then_block->add_successor(merge);
+    then_block->set_terminal(function.create_node<SSAJumpNode>(merge));
+
+    const ValueId else_value = function.create_value("else_value");
+    else_block->append_instruction(function.create_node<SSANumberNode>(else_value, std::int64_t{9}));
+    else_block->add_successor(merge);
+    else_block->set_terminal(function.create_node<SSAJumpNode>(merge));
+
+    const ValueId out = function.create_value("out");
+    auto* phi = function.create_node<SSAPhiNode>(out);
+    phi->add_incoming(then_block, ValueRef{then_alias});
+    phi->add_incoming(else_block, ValueRef{else_value});
+    merge->append_phi(phi);
+    merge->set_terminal(function.create_node<SSAReturnNode>(std::vector<ValueRef>{ValueRef{out}}));
+
+    const analysis::PreservedAnalyses preserved = run_copy_propagation(function);
+    expect(!preserved.preserves_all(), "copy propagation should rewrite phi incoming values.");
+
+    analysis::verify_module_or_throw(module);
+
+    expect(phi->incomings().size() == 2, "phi should keep both incoming edges.");
+    expect(phi->incomings()[0].value.id == then_value,
+           "phi incoming from then block should be rewritten to the original source.");
+    expect(phi->incomings()[1].value.id == else_value,
+           "phi incoming from else block should remain unchanged.");
+    expect(function.has_value(then_alias),
+           "different-name copy result should remain until a later cleanup pass removes it.");
+}
+
 }  // namespace
 
 int main() {
     try {
         test_same_name_copy_chain_is_propagated_into_return_and_erased();
         test_copy_source_is_propagated_into_binop_use();
+        test_copy_source_is_propagated_into_phi_use();
     } catch (const std::exception& ex) {
         std::cerr << "copy_propagation_test FAILED: " << ex.what() << '\n';
         return 1;

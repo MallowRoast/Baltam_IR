@@ -297,61 +297,61 @@ bool condition_value_as_bool(const Value::Object& value) {
     }
 }
 
-Value::Object eval_binop(BinOpNode::Op op, Value::Object lhs, Value::Object rhs) {
+Value::Object eval_binop(BinOpType op, Value::Object lhs, Value::Object rhs) {
     std::string name;
     switch (op) {
-        case BinOpNode::Add:
+        case BinOpType::Add:
             name = "plus";
             break;
-        case BinOpNode::Subtract:
+        case BinOpType::Subtract:
             name = "minus";
             break;
-        case BinOpNode::Eq:
+        case BinOpType::Eq:
             name = "eq";
             break;
-        case BinOpNode::Ge:
+        case BinOpType::Ge:
             name = "ge";
             break;
-        case BinOpNode::Gt:
+        case BinOpType::Gt:
             name = "gt";
             break;
-        case BinOpNode::Le:
+        case BinOpType::Le:
             name = "le";
             break;
-        case BinOpNode::Lt:
+        case BinOpType::Lt:
             name = "lt";
             break;
-        case BinOpNode::Ne:
+        case BinOpType::Ne:
             name = "ne";
             break;
-        case BinOpNode::And:
+        case BinOpType::And:
             name = "and";
             break;
-        case BinOpNode::Or:
+        case BinOpType::Or:
             name = "or";
             break;
-        case BinOpNode::Power:
+        case BinOpType::Power:
             name = "power";
             break;
-        case BinOpNode::LDivide:
+        case BinOpType::LDivide:
             name = "ldivide";
             break;
-        case BinOpNode::MLeftDivide:
+        case BinOpType::MLeftDivide:
             name = "mldivide";
             break;
-        case BinOpNode::MPower:
+        case BinOpType::MPower:
             name = "mpower";
             break;
-        case BinOpNode::MRightDivide:
+        case BinOpType::MRightDivide:
             name = "mrdivide";
             break;
-        case BinOpNode::Times:
+        case BinOpType::Times:
             name = "times";
             break;
-        case BinOpNode::Multiply:
+        case BinOpType::Multiply:
             name = "mtimes";
             break;
-        case BinOpNode::RDivide:
+        case BinOpType::RDivide:
             name = "rdivide";
             break;
     }
@@ -366,22 +366,22 @@ Value::Object eval_binop(BinOpNode::Op op, Value::Object lhs, Value::Object rhs)
     return results.front();
 }
 
-Value::Object eval_unaryop(UnaryOpNode::Op op, Value::Object operand) {
+Value::Object eval_unaryop(UnaryOpType op, Value::Object operand) {
     std::string name;
     switch (op) {
-        case UnaryOpNode::Logic_Not:
+        case UnaryOpType::Logic_Not:
             name = "not";
             break;
-        case UnaryOpNode::UPlus:
+        case UnaryOpType::UPlus:
             name = "uplus";
             break;
-        case UnaryOpNode::UMinus:
+        case UnaryOpType::UMinus:
             name = "uminus";
             break;
-        case UnaryOpNode::Transpose:
+        case UnaryOpType::Transpose:
             name = "transpose";
             break;
-        case UnaryOpNode::CTranspose:
+        case UnaryOpType::CTranspose:
             name = "ctranspose";
             break;
     }

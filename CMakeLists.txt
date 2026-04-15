@@ -19,6 +19,7 @@ set(BALTAM_IR_LIBRARY_SOURCES
     src/analysis/dominator_tree.cpp
     src/analysis/liveness.cpp
     src/analysis/value_def.cpp
+    src/analysis/value_use.cpp
     src/analysis/verifier.cpp
     src/interpreter/interpreter.cpp
     src/ir/ir.cpp

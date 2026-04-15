@@ -151,7 +151,7 @@ void test_loop_generates_header_phi() {
     body->append_instruction(function->create_node<NumberNode>(
         NamedValue{"one", NamedValue::Temporary}, std::int64_t{1}));
     body->append_instruction(function->create_node<BinOpNode>(
-        BinOpNode::Add, NamedValue{"out", NamedValue::UserVariable},
+        BinOpType::Add, NamedValue{"out", NamedValue::UserVariable},
         NamedValue{"out", NamedValue::UserVariable}, NamedValue{"one", NamedValue::Temporary}));
     body->add_successor(header);
     body->set_terminal(function->create_node<JumpNode>(header));
@@ -233,7 +233,7 @@ void test_test0_local_temp_does_not_generate_phi() {
     entry->append_instruction(function->create_node<NumberNode>(
         NamedValue{"__t1", NamedValue::Temporary}, std::int64_t{2}));
     entry->append_instruction(function->create_node<BinOpNode>(
-        BinOpNode::Add, NamedValue{"a", NamedValue::UserVariable},
+        BinOpType::Add, NamedValue{"a", NamedValue::UserVariable},
         NamedValue{"__t0", NamedValue::Temporary}, NamedValue{"__t1", NamedValue::Temporary}));
     entry->append_instruction(function->create_node<CallNode>(
         CallNode::Direct, "sin", std::vector<NamedValue>{NamedValue{"b", NamedValue::UserVariable}},
@@ -241,7 +241,7 @@ void test_test0_local_temp_does_not_generate_phi() {
     entry->append_instruction(function->create_node<NumberNode>(
         NamedValue{"__t3", NamedValue::Temporary}, std::int64_t{0}));
     entry->append_instruction(function->create_node<BinOpNode>(
-        BinOpNode::Gt, NamedValue{"__t2", NamedValue::Temporary},
+        BinOpType::Gt, NamedValue{"__t2", NamedValue::Temporary},
         NamedValue{"b", NamedValue::UserVariable}, NamedValue{"__t3", NamedValue::Temporary}));
     entry->add_successor(then_block);
     entry->add_successor(else_block);
@@ -251,7 +251,7 @@ void test_test0_local_temp_does_not_generate_phi() {
     then_block->append_instruction(function->create_node<NumberNode>(
         NamedValue{"__t4", NamedValue::Temporary}, std::int64_t{2}));
     then_block->append_instruction(function->create_node<BinOpNode>(
-        BinOpNode::Multiply, NamedValue{"c", NamedValue::UserVariable},
+        BinOpType::Multiply, NamedValue{"c", NamedValue::UserVariable},
         NamedValue{"b", NamedValue::UserVariable}, NamedValue{"__t4", NamedValue::Temporary}));
     then_block->add_successor(merge);
     then_block->set_terminal(function->create_node<JumpNode>(merge));

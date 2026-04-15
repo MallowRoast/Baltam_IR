@@ -451,44 +451,44 @@ struct LoweringContext {
     }
 };
 
-BinOpNode::Op lower_binop_type(nodeType type) {
+BinOpType lower_binop_type(nodeType type) {
     switch (type) {
         case node_add:
-            return BinOpNode::Add;
+            return BinOpType::Add;
         case node_subtract:
-            return BinOpNode::Subtract;
+            return BinOpType::Subtract;
         case node_eq:
-            return BinOpNode::Eq;
+            return BinOpType::Eq;
         case node_geq:
-            return BinOpNode::Ge;
+            return BinOpType::Ge;
         case node_greater_than:
-            return BinOpNode::Gt;
+            return BinOpType::Gt;
         case node_leq:
-            return BinOpNode::Le;
+            return BinOpType::Le;
         case node_less_than:
-            return BinOpNode::Lt;
+            return BinOpType::Lt;
         case node_noteq:
-            return BinOpNode::Ne;
+            return BinOpType::Ne;
         case node_logic_and:
-            return BinOpNode::And;
+            return BinOpType::And;
         case node_logic_or:
-            return BinOpNode::Or;
+            return BinOpType::Or;
         case node_element_ldiv:
-            return BinOpNode::LDivide;
+            return BinOpType::LDivide;
         case node_element_power:
-            return BinOpNode::Power;
+            return BinOpType::Power;
         case node_left_divide:
-            return BinOpNode::MLeftDivide;
+            return BinOpType::MLeftDivide;
         case node_power:
-            return BinOpNode::MPower;
+            return BinOpType::MPower;
         case node_right_divide:
-            return BinOpNode::MRightDivide;
+            return BinOpType::MRightDivide;
         case node_element_mul:
-            return BinOpNode::Times;
+            return BinOpType::Times;
         case node_multiply:
-            return BinOpNode::Multiply;
+            return BinOpType::Multiply;
         case node_element_rdiv:
-            return BinOpNode::RDivide;
+            return BinOpType::RDivide;
         default:
             break;
     }
@@ -496,18 +496,18 @@ BinOpNode::Op lower_binop_type(nodeType type) {
     throw std::runtime_error("non-SSA lower 遇到了暂不支持的二元运算。");
 }
 
-UnaryOpNode::Op lower_unaryop_type(nodeType type) {
+UnaryOpType lower_unaryop_type(nodeType type) {
     switch (type) {
         case node_logic_not:
-            return UnaryOpNode::Logic_Not;
+            return UnaryOpType::Logic_Not;
         case node_uplus:
-            return UnaryOpNode::UPlus;
+            return UnaryOpType::UPlus;
         case node_negative:
-            return UnaryOpNode::UMinus;
+            return UnaryOpType::UMinus;
         case node_transpose:
-            return UnaryOpNode::Transpose;
+            return UnaryOpType::Transpose;
         case node_ctranspose:
-            return UnaryOpNode::CTranspose;
+            return UnaryOpType::CTranspose;
         default:
             break;
     }
@@ -1166,7 +1166,7 @@ void lower_expr_into(const ast_ptr& node, const NamedValue& target, LoweringCont
         case node_transpose:
         case node_ctranspose: {
             const NamedValue operand = lower_expr_to_operand(node->branch[0], ctx);
-            const UnaryOpNode::Op op = lower_unaryop_type(node->nodetype);
+            const UnaryOpType op = lower_unaryop_type(node->nodetype);
             ctx.append_node<UnaryOpNode>(op, target, operand, source_location_from(node));
             ctx.mark_defined(target);
             return;
@@ -1381,7 +1381,8 @@ NamedValue build_switch_match_cond(const NamedValue& switch_value, const ast_ptr
         }
 
         const NamedValue merged = ctx.create_temp("__switch.or");
-        ctx.append_node<BinOpNode>(BinOpNode::Or, merged, combined_cond, eq, source_location_from(item));
+        ctx.append_node<BinOpNode>(BinOpType::Or, merged, combined_cond, eq,
+                                   source_location_from(item));
         ctx.mark_defined(merged);
         combined_cond = merged;
     }
@@ -1507,7 +1508,7 @@ void lower_for_stmt(const std::shared_ptr<flow>& for_node, LoweringContext& ctx)
 
     ctx.current_block = header_block;
     const NamedValue done_name = ctx.create_hidden_name("foreach_done");
-    ctx.append_node<BinOpNode>(BinOpNode::Lt, done_name, max_iter_name, iter_index_name,
+    ctx.append_node<BinOpNode>(BinOpType::Lt, done_name, max_iter_name, iter_index_name,
                                source_location_from(for_node));
     header_block->add_successor(exit_block);
     header_block->add_successor(body_block);
@@ -1526,7 +1527,7 @@ void lower_for_stmt(const std::shared_ptr<flow>& for_node, LoweringContext& ctx)
     ctx.current_block = latch_block;
     const NamedValue one_name = ctx.create_hidden_name("foreach_one");
     ctx.append_node<NumberNode>(one_name, std::int64_t{1}, source_location_from(for_node));
-    ctx.append_node<BinOpNode>(BinOpNode::Add, iter_index_name, iter_index_name, one_name,
+    ctx.append_node<BinOpNode>(BinOpType::Add, iter_index_name, iter_index_name, one_name,
                                source_location_from(for_node));
     ensure_fallthrough_to(ctx, header_block, for_node);
 

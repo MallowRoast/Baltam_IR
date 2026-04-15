@@ -62,8 +62,7 @@ std::optional<NumberValue> fold_sqrt_call(const std::vector<NumberValue>& inputs
                 if (item < 0.0) {
                     return NumberValue{std::sqrt(std::complex<double>{item, 0.0})};
                 }
-                const double result = std::sqrt(item);
-                return NumberValue{result == 0.0 ? 0.0 : result};
+                return NumberValue{std::sqrt(item)};
             } else if constexpr (std::is_same_v<T, std::complex<double>>) {
                 return NumberValue{std::sqrt(item)};
             }
@@ -82,12 +81,32 @@ std::optional<NumberValue> fold_abs_call(const std::vector<NumberValue>& inputs)
         [](const auto& item) -> std::optional<NumberValue> {
             using T = std::decay_t<decltype(item)>;
 
-            if constexpr (std::is_same_v<T, double>) {
-                const double result = std::abs(item);
-                return NumberValue{result == 0.0 ? 0.0 : result};
-            } else if constexpr (std::is_same_v<T, std::complex<double>>) {
-                const double result = std::abs(item);
-                return NumberValue{result == 0.0 ? 0.0 : result};
+            if constexpr (std::is_same_v<T, bool>) {
+                return NumberValue{item ? 1.0 : 0.0};
+            } else if constexpr (std::is_same_v<T, IntegerConstant>) {
+                switch (item.type()) {
+                    case IntegerConstant::Type::Int8:
+                        return NumberValue{
+                            item.as_int8().value() < 0 ? item.negated() : item};
+                    case IntegerConstant::Type::Int16:
+                        return NumberValue{
+                            item.as_int16().value() < 0 ? item.negated() : item};
+                    case IntegerConstant::Type::Int32:
+                        return NumberValue{
+                            item.as_int32().value() < 0 ? item.negated() : item};
+                    case IntegerConstant::Type::Int64:
+                        return NumberValue{
+                            item.as_int64().value() < 0 ? item.negated() : item};
+                    case IntegerConstant::Type::UInt8:
+                    case IntegerConstant::Type::UInt16:
+                    case IntegerConstant::Type::UInt32:
+                    case IntegerConstant::Type::UInt64:
+                        return NumberValue{item};
+                }
+                return std::nullopt;
+            } else if constexpr (std::is_same_v<T, double> ||
+                                 std::is_same_v<T, std::complex<double>>) {
+                return NumberValue{std::abs(item)};
             }
 
             return std::nullopt;
