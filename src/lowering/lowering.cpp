@@ -1214,6 +1214,12 @@ void lower_expr_into(const ast_ptr& node, const NamedValue& target, LoweringCont
             return;
         }
         case node_magic_end: {
+            // 临时编码：当前先把 `end` 物化成 direct helper call
+            // `magic_end(base, index_position, total_index_count)`。
+            // 这不是长期 IR 设计。`end` 绑定到哪一层索引上下文，可能依赖
+            // 外围 `A(...)` 的调用/取值消歧；例如 `A(floor(end))` 里，
+            // `floor` 既可能是函数，也可能是一个值。
+            // 长期应把 `magic_end` 提升成专门 IR 节点，而不是普通 direct call。
             const MagicEndIndexInfo index_info = resolve_magic_end_index_info(node.get(), ctx);
             const NamedValue index_position_literal =
                 ctx.create_hidden_name("magic_end.index.literal");

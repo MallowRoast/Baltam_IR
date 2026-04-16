@@ -102,6 +102,25 @@ node_asgn(node_name(x), node_multiple_func(...))
 
 也就是说，`A(...)` 的 IR 仍然是“调用形状”，但这个调用可能在运行期退化成圆括号取值。
 
+不过 `end` 是这里的一个例外。
+
+当前实现里，`node_magic_end` 会先被编码成 direct helper call：
+
+- `magic_end(base, index_position, total_index_count)`
+
+但从长期 IR 设计看，这个编码并不充分，因为 `end` 的归属可能依赖更晚的调用/索引消歧。
+
+典型例子：
+
+- `A(floor(end))`
+
+这里的 `floor` 既可能是函数，也可能是一个值：
+
+- 若 `floor` 是函数，`end` 应绑定外层 `A(...)`
+- 若 `floor` 是值，`floor(end)` 自身就是一层索引，`end` 应绑定内层 `floor(...)`
+
+所以 `magic_end` 不应被长期当作普通 direct `CallNode` / `SSACallNode` 处理；更合理的方案是把它保留成专门的 IR 节点，等外围 `A(...)` 的歧义收敛后再最终绑定。
+
 ## non-SSA IR
 
 ```text
