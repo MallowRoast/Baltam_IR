@@ -334,6 +334,7 @@ void IRLowerer::lower_stmt(const ast_ptr& node) {
         case node_nop:
         case node_empty:
         case node_comment:
+        case node_andy_end_of_string:
             return;
         default:
             builder_.report(
@@ -427,19 +428,10 @@ void IRLowerer::lower_call_stmt(const std::shared_ptr<multipleFuncCall>& call) {
         return;
     }
 
-    std::unique_ptr<ApplyInst> inst = std::make_unique<ApplyInst>();
-    inst->callee_or_base = InternedString(call->name());
-    inst->source_span = source_span;
-    for (std::size_t i = 0; i < result_names.size(); ++i) {
-        inst->results.push_back(builder_.create_value());
-    }
-
-    if (!append_apply_arguments(*inst, call->in_args())) {
+    std::vector<ValueId> results;
+    if (!lower_named_invoke(call, result_names.size(), source_span, results)) {
         return;
     }
-
-    const std::vector<ValueId> results = inst->results;
-    builder_.append_instruction(std::move(inst));
 
     for (std::size_t i = 0; i < result_names.size(); ++i) {
         if (!store_named_result(result_names[i], results[i], source_span)) {
@@ -515,7 +507,9 @@ void IRLowerer::lower_if_stmt(const std::shared_ptr<if_flow>& if_node) {
     builder_.set_insert_point(exit_block);
 }
 
-bool IRLowerer::append_apply_arguments(ApplyInst& inst, const ast_ptr& in_args) {
+bool IRLowerer::append_call_arguments(
+    std::vector<Operand>& arguments,
+    const ast_ptr& in_args) {
     if (in_args == nullptr ||
         in_args->nodetype == node_nop ||
         in_args->nodetype == node_empty) {
@@ -528,7 +522,7 @@ bool IRLowerer::append_apply_arguments(ApplyInst& inst, const ast_ptr& in_args) 
             if (!argument.is_valid()) {
                 return false;
             }
-            inst.arguments.push_back(argument);
+            arguments.push_back(argument);
         }
         return true;
     }
@@ -538,7 +532,7 @@ bool IRLowerer::append_apply_arguments(ApplyInst& inst, const ast_ptr& in_args) 
         return false;
     }
 
-    inst.arguments.push_back(argument);
+    arguments.push_back(argument);
     return true;
 }
 
@@ -575,6 +569,79 @@ bool IRLowerer::collect_call_result_names(
     }
 
     return append_name(out_args);
+}
+
+bool IRLowerer::lower_named_invoke(
+    const std::shared_ptr<multipleFuncCall>& call,
+    std::size_t result_count,
+    SourceSpan source_span,
+    std::vector<ValueId>& results) {
+    results.clear();
+    results.reserve(result_count);
+
+    if (should_lower_direct_call(call->name())) {
+        std::unique_ptr<CallInst> inst = std::make_unique<CallInst>();
+        inst->callee_kind = CallInst::Direct;
+        inst->callee = InternedString(call->name());
+        inst->source_span = source_span;
+
+        for (std::size_t i = 0; i < result_count; ++i) {
+            const ValueId result = builder_.create_value();
+            if (!result.is_valid()) {
+                return false;
+            }
+
+            inst->results.push_back(result);
+            results.push_back(result);
+        }
+
+        if (!append_call_arguments(inst->arguments, call->in_args())) {
+            return false;
+        }
+
+        builder_.append_instruction(std::move(inst));
+        return true;
+    }
+
+    std::unique_ptr<ApplyInst> inst = std::make_unique<ApplyInst>();
+    inst->source_span = source_span;
+
+    if (builder_.current_unit() != nullptr && builder_.current_unit()->is_function()) {
+        const SlotId callee_slot = lookup_slot_binding(call->name(), source_span);
+        if (!callee_slot.is_valid()) {
+            return false;
+        }
+
+        inst->callee_or_base = callee_slot;
+    } else {
+        inst->callee_or_base = InternedString(call->name());
+    }
+
+    for (std::size_t i = 0; i < result_count; ++i) {
+        const ValueId result = builder_.create_value();
+        if (!result.is_valid()) {
+            return false;
+        }
+
+        inst->results.push_back(result);
+        results.push_back(result);
+    }
+
+    if (!append_call_arguments(inst->arguments, call->in_args())) {
+        return false;
+    }
+
+    builder_.append_instruction(std::move(inst));
+    return true;
+}
+
+bool IRLowerer::should_lower_direct_call(std::string_view name) const noexcept {
+    const CodeUnit* unit = builder_.current_unit();
+    if (unit == nullptr || !unit->is_function()) {
+        return false;
+    }
+
+    return builder_.find_name(name) == nullptr;
 }
 
 bool IRLowerer::store_named_result(
@@ -739,18 +806,13 @@ ValueId IRLowerer::lower_expr(const ast_ptr& node) {
                 return InvalidValueId;
             }
 
-            std::unique_ptr<ApplyInst> inst = std::make_unique<ApplyInst>();
-            inst->results.push_back(builder_.create_value());
-            inst->callee_or_base = InternedString(call->name());
-            inst->source_span = source_span_from(node);
-
-            if (!append_apply_arguments(*inst, call->in_args())) {
+            const SourceSpan source_span = source_span_from(node);
+            std::vector<ValueId> results;
+            if (!lower_named_invoke(call, 1, source_span, results)) {
                 return InvalidValueId;
             }
 
-            const ValueId result = inst->results.front();
-            builder_.append_instruction(std::move(inst));
-            return result;
+            return results.front();
         }
         default:
             builder_.report(
@@ -767,28 +829,59 @@ void IRLowerer::predeclare_function_signature(const pcdata& parsed_unit) {
     attrs.is_user_visible = 1;
     attrs.is_mutable = 1;
 
-    if (parsed_unit.m_in_arg_names != nullptr) {
-        for (const std::string& arg_name : *parsed_unit.m_in_arg_names) {
-            const SlotId slot_id = builder_.create_slot(
-                Slot::Arg,
-                arg_name,
-                SourceSpan::invalid(),
-                attrs);
+    if (parsed_unit.ast != nullptr && parsed_unit.ast->nodetype == node_mfile_func) {
+        const auto& function_ast = std::static_pointer_cast<mFileFunc>(parsed_unit.ast);
 
-            builder_.bind_name(arg_name, slot_id);
+        if (function_ast->in_args() != nullptr) {
+            if (function_ast->in_args()->nodetype == node_list) {
+                for (const ast_ptr& arg_node : function_ast->in_args()->branch) {
+                    const std::string& arg_name = std::static_pointer_cast<symref>(arg_node)->name();
+                    const SlotId slot_id = builder_.create_slot(
+                        Slot::Arg,
+                        arg_name,
+                        SourceSpan::invalid(),
+                        attrs);
+
+                    builder_.bind_name(arg_name, slot_id);
+                }
+            } else if (function_ast->in_args()->nodetype == node_name) {
+                const std::string& arg_name =
+                    std::static_pointer_cast<symref>(function_ast->in_args())->name();
+                const SlotId slot_id = builder_.create_slot(
+                    Slot::Arg,
+                    arg_name,
+                    SourceSpan::invalid(),
+                    attrs);
+
+                builder_.bind_name(arg_name, slot_id);
+            }
         }
-    }
 
-    if (parsed_unit.m_out_arg_names != nullptr) {
-        for (const std::string& ret_name : *parsed_unit.m_out_arg_names) {
-            const SlotId slot_id = builder_.create_slot(
-                Slot::Ret,
-                ret_name,
-                SourceSpan::invalid(),
-                attrs);
+        if (function_ast->out_args() != nullptr) {
+            if (function_ast->out_args()->nodetype == node_list) {
+                for (const ast_ptr& ret_node : function_ast->out_args()->branch) {
+                    const std::string& ret_name = std::static_pointer_cast<symref>(ret_node)->name();
+                    const SlotId slot_id = builder_.create_slot(
+                        Slot::Ret,
+                        ret_name,
+                        SourceSpan::invalid(),
+                        attrs);
 
-            builder_.bind_name(ret_name, slot_id);
+                    builder_.bind_name(ret_name, slot_id);
+                }
+            } else if (function_ast->out_args()->nodetype == node_name) {
+                const std::string& ret_name =
+                    std::static_pointer_cast<symref>(function_ast->out_args())->name();
+                const SlotId slot_id = builder_.create_slot(
+                    Slot::Ret,
+                    ret_name,
+                    SourceSpan::invalid(),
+                    attrs);
+
+                builder_.bind_name(ret_name, slot_id);
+            }
         }
+        return;
     }
 }
 
@@ -841,8 +934,12 @@ SlotId IRLowerer::ensure_workspace_handle_slot(SourceSpan source_span) {
         return existing->slot_id;
     }
 
+    const std::string slot_name = unit->name.empty()
+        ? "env"
+        : (std::string(unit->name) + "_env");
+
     return builder_.create_hidden_slot(
-        "__workspace_handle__",
+        slot_name,
         SlotAttrs::WorkspaceHandle,
         source_span);
 }

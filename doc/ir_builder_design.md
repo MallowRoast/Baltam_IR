@@ -90,7 +90,6 @@ IRUnitBuildState
   current_block   : BasicBlock*
   ids             : IRIdAllocator
   name_bindings   : unordered_map<InternedString, SlotId>
-  loop_stack      : LoopFrame[]
 ```
 
 字段职责如下：
@@ -102,9 +101,9 @@ IRUnitBuildState
 - `ids`
   当前 unit 内的 `SlotId / ValueId` 分配器
 - `name_bindings`
-  当前 unit 的静态名字表，只保存 `name -> SlotId`
-- `loop_stack`
-  预留给 lowering 使用的 loop 栈
+  当前 unit 的静态名字表，只保存 `name -> SlotId`。
+  在函数 lowering 中，它除了服务局部 slot 绑定外，也会参与 `A(...)` 的分派：
+  已绑定名字保留为 `apply`，未绑定名字可直接收敛成 `call`
 
 ### 4. `IRIdAllocator`
 
@@ -137,6 +136,7 @@ script 名字访问不进入这张表，而是直接 lower 成：
 - `StoreWorkspaceInst`
 
 因此 builder 里的名字表现在本质上就是一个 `name -> SlotId` 的 side table。
+函数调用是否能从 `apply` 收敛成 `call`，也依赖这张表中“名字是否已经被绑定成变量”这一事实。
 
 ## 构建期不变量
 

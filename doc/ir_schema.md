@@ -398,10 +398,12 @@ Instruction
   - `workspace_handle_slot : SlotId`
   - `symbol   : InternedString`
   - 读取的是 workspace 中名为 `symbol` 的名字，而不是静态 frame slot
+  - 在当前 printer 中显示为 `load_env`
 - `StoreWorkspaceInst`
   - `workspace_handle_slot : SlotId`
   - `symbol   : InternedString`
   - `value    : Operand`
+  - 在当前 printer 中显示为 `store_env`
 - `ApplyInst`
   - `results        : ValueId[]`
   - `callee_or_base : Operand`
@@ -449,6 +451,7 @@ Instruction
   - 输入由 `workspace_handle_slot : SlotId` 和 `symbol : InternedString` 组成
   - `workspace_handle_slot` 指向工作区句柄 slot，`symbol` 是要在 workspace 中查找的名字
   - 读取的是当前 workspace 的动态名字绑定
+  - 当前打印文本里用 `load_env` 表示这一语义
 
 换句话说：
 

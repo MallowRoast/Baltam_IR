@@ -67,9 +67,9 @@ std::vector<std::shared_ptr<pcdata>>
 
 - 创建 `MFileUnit`
 - 为每个 parser 单元创建 `ScriptUnit` 或 `FunctionUnit`
-- 为函数预声明参数 slot 和返回值 slot
+- 为函数从 `mFileFunc` AST 预声明参数 slot 和返回值 slot
 - 为每个 unit 创建 `entry` 基本块
-- lower 最小语句/表达式子集：
+- lower `test0 / test0_1` 所需的最小语句/表达式子集：
   - 简单赋值
   - 数值字面量
   - 名字读取
@@ -82,8 +82,14 @@ std::vector<std::shared_ptr<pcdata>>
 ### script 与 function 的区别
 
 - `script` 名字访问固定 lower 成 `LoadWorkspaceInst` / `StoreWorkspaceInst`
+  打印时分别显示为 `load_env` / `store_env`
 - `function` 名字访问固定 lower 成 `LoadSlotInst` / `StoreSlotInst`
-- `WorkspaceHandle` hidden slot 只出现在 `ScriptUnit`，并在第一次脚本名字读写时按需创建
+- `script` 中的 `A(...)` 先保留为 `ApplyInst`
+- `function` 中的 `A(...)` 会根据 lowering 期名字绑定表分派：
+  若 `A` 尚未绑定为变量，则直接 lower 成 `CallInst`；
+  若 `A` 已绑定为 slot 名字，则保留为 `ApplyInst`
+- `WorkspaceHandle` hidden slot 只出现在 `ScriptUnit`，并在第一次脚本名字读写时按需创建；
+  当前脚本环境槽位名字采用 `<script_name>_env`
 
 ### 源码位置
 
@@ -119,14 +125,15 @@ block 的创建与 `entry` 指定现在由 `CodeUnit` 自身完成，builder 只
 当前端到端闭环测试是：
 
 - `test/smoke_test/test0_smoke.cpp`
+- `test/smoke_test/test0_1_smoke.cpp`
 
 它会：
 
-- parse `test/m/test0/test0.m`
-- lower 成 `IR`
-- 校验 slot / CFG / 指令形状
+- parse `test/m/test0/test0.m` / `test/m/test0_1/test0_1.m`
+- build 成 `IR` 并检查结构完整、没有 `Error` 诊断
+- 校验各自的核心侧重点是否 lower 正确
 - 调用 `ir_print` 打印文本 IR
-- 校验源码注释存在且列对齐
+- 校验关键打印结果与源码行号注释
 
 ## 当前未覆盖范围
 

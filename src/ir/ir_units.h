@@ -184,7 +184,6 @@ struct FunctionUnit : CodeUnit {
      * 返回值名字、源码位置等信息统一由对应 `Slot` 提供，不再重复保存一份描述结构。
      */
     std::vector<SlotId> return_slots;
-
 };
 
 /**

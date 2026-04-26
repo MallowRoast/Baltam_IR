@@ -26,9 +26,14 @@ struct IRPrintOptions {
     bool load_source_from_path = true;
 
     /**
-     * @brief 是否在指令/slot/block 行尾追加源码注释。
+     * @brief 是否在语句级 IR 指令行尾追加源码注释。
      */
     bool print_source_comments = true;
+
+    /**
+     * @brief 是否在源码注释前缀中打印源码行号。
+     */
+    bool print_source_line_numbers = true;
 
     /**
      * @brief 是否打印 slot 表。

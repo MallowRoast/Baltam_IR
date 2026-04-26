@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <type_traits>
 #include <unordered_map>
@@ -209,7 +210,7 @@ const char* hidden_role_name(SlotAttrs::HiddenRole role) noexcept {
         case SlotAttrs::Varargout:
             return "varargout";
         case SlotAttrs::WorkspaceHandle:
-            return "workspace_handle";
+            return "env";
     }
     return "hidden";
 }
@@ -268,13 +269,12 @@ public:
         if (!options_.source_text.empty()) {
             source_storage_.assign(options_.source_text.data(), options_.source_text.size());
             source_text_ = source_storage_;
-            return;
-        }
-
-        if (options_.load_source_from_path) {
+        } else if (options_.load_source_from_path) {
             source_storage_ = try_read_text_file(owner.path);
             source_text_ = source_storage_;
         }
+
+        build_source_line_offsets();
     }
 
     void render_file(const MFileUnit& mfile) {
@@ -343,15 +343,15 @@ private:
                 header += ')';
             }
             header += " {";
-            emit_line(std::move(header), function.source_span);
+            emit_raw(std::move(header));
         } else {
-            emit_line("script " + format_symbol(unit.name) + " {", unit.source_span);
+            emit_raw("script " + format_symbol(unit.name) + " {");
         }
 
         if (options_.print_slot_table && !unit.slot_table.empty()) {
             emit_raw("  ; slots:");
             for (const Slot& slot : unit.slot_table.slots) {
-                emit_line("  " + format_slot_decl(slot), slot.source_span);
+                emit_raw("  " + format_slot_decl(slot));
             }
             if (!unit.basic_blocks.empty()) {
                 emit_raw({});
@@ -365,10 +365,10 @@ private:
                 continue;
             }
 
-            emit_line(block_labels_[block] + ':', block->source_span);
+            emit_raw(block_labels_[block] + ':');
             for (const std::unique_ptr<Instruction>& instruction : block->instructions) {
                 if (instruction != nullptr) {
-                    emit_line("  " + format_instruction(*instruction), instruction->source_span);
+                    emit_instruction(*instruction);
                 }
             }
 
@@ -403,10 +403,10 @@ private:
         lines_.push_back({std::move(text), {}});
     }
 
-    void emit_line(std::string text, SourceSpan source_span) {
+    void emit_instruction(const Instruction& instruction) {
         IRRenderedLine line;
-        line.text = std::move(text);
-        line.source_comment = format_source_comment(source_span);
+        line.text = "  " + format_instruction(instruction);
+        line.source_comment = format_instruction_source_comment(instruction);
         lines_.push_back(std::move(line));
     }
 
@@ -418,10 +418,114 @@ private:
             return {};
         }
 
-        return collapse_source_excerpt(
+        std::string excerpt = collapse_source_excerpt(
             source_text_.substr(
                 source_span.begin_offset,
                 source_span.end_offset - source_span.begin_offset));
+        if (excerpt.empty()) {
+            return {};
+        }
+
+        if (!options_.print_source_line_numbers) {
+            return excerpt;
+        }
+
+        const std::string line_tag = format_source_line_tag(source_span);
+        if (line_tag.empty()) {
+            return excerpt;
+        }
+
+        return line_tag + ": " + excerpt;
+    }
+
+    [[nodiscard]] bool should_print_instruction_source_comment(
+        const Instruction& instruction) const {
+        switch (instruction.type()) {
+            case Instruction::StoreSlot:
+            case Instruction::StoreWorkspace:
+            case Instruction::Branch:
+                return true;
+            case Instruction::Return:
+                return instruction.source_span.is_valid();
+            case Instruction::Apply: {
+                const auto& inst = static_cast<const ApplyInst&>(instruction);
+                return inst.results.empty();
+            }
+            case Instruction::Call: {
+                const auto& inst = static_cast<const CallInst&>(instruction);
+                return inst.results.empty();
+            }
+            default:
+                return false;
+        }
+    }
+
+    [[nodiscard]] std::string format_instruction_source_comment(
+        const Instruction& instruction) const {
+        if (!should_print_instruction_source_comment(instruction)) {
+            return {};
+        }
+        return format_source_comment(instruction.source_span);
+    }
+
+    void build_source_line_offsets() {
+        source_line_offsets_.clear();
+        if (source_text_.empty()) {
+            return;
+        }
+
+        source_line_offsets_.push_back(0);
+        for (std::size_t i = 0; i < source_text_.size(); ++i) {
+            if (source_text_[i] == '\n') {
+                source_line_offsets_.push_back(i + 1U);
+            }
+        }
+    }
+
+    [[nodiscard]] std::size_t source_line_number_from_offset(std::size_t offset) const {
+        if (source_line_offsets_.empty() || offset > source_text_.size()) {
+            return 0;
+        }
+
+        const auto it = std::upper_bound(
+            source_line_offsets_.begin(),
+            source_line_offsets_.end(),
+            offset);
+        return static_cast<std::size_t>(std::distance(source_line_offsets_.begin(), it));
+    }
+
+    [[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> source_line_range(
+        SourceSpan source_span) const {
+        if (!source_span.is_valid() ||
+            source_span.begin_offset >= source_text_.size() ||
+            source_span.end_offset > source_text_.size()) {
+            return std::nullopt;
+        }
+
+        const std::size_t begin_line = source_line_number_from_offset(source_span.begin_offset);
+        const std::size_t end_line = source_line_number_from_offset(
+            source_span.end_offset > source_span.begin_offset
+                ? (source_span.end_offset - 1U)
+                : source_span.begin_offset);
+        if (begin_line == 0 || end_line == 0) {
+            return std::nullopt;
+        }
+
+        return std::pair(begin_line, end_line);
+    }
+
+    [[nodiscard]] std::string format_source_line_tag(SourceSpan source_span) const {
+        const auto range = source_line_range(source_span);
+        if (!range.has_value()) {
+            return {};
+        }
+
+        if (range->first == range->second) {
+            return "line " + std::to_string(range->first);
+        }
+
+        return "line " + std::to_string(range->first) +
+            "-" + std::to_string(range->second);
     }
 
     void assign_block_labels(const CodeUnit& unit) {
@@ -453,6 +557,13 @@ private:
 
         for (const Slot& slot : slot_table.slots) {
             if (slot.is_hidden() && slot.attrs.hidden_role != SlotAttrs::None) {
+                if (slot.attrs.hidden_role == SlotAttrs::WorkspaceHandle &&
+                    !slot.name.empty() &&
+                    is_simple_identifier(slot.name)) {
+                    slot_refs_.emplace(slot.slot_id, "%" + std::string(slot.name));
+                    continue;
+                }
+
                 slot_refs_.emplace(
                     slot.slot_id,
                     "%" + std::string(hidden_role_name(
@@ -584,13 +695,13 @@ private:
             }
             case Instruction::LoadWorkspace: {
                 const auto& inst = static_cast<const LoadWorkspaceInst&>(instruction);
-                return format_value_id(inst.result) + " = load_workspace " +
+                return format_value_id(inst.result) + " = load_env " +
                     format_slot_ref(inst.workspace_handle_slot) + ", " +
                     format_symbol(inst.symbol);
             }
             case Instruction::StoreWorkspace: {
                 const auto& inst = static_cast<const StoreWorkspaceInst&>(instruction);
-                return "store_workspace " + format_slot_ref(inst.workspace_handle_slot) +
+                return "store_env " + format_slot_ref(inst.workspace_handle_slot) +
                     ", " + format_symbol(inst.symbol) +
                     ", " + format_operand(inst.value);
             }
@@ -663,6 +774,7 @@ private:
     IRPrintOptions options_;
     std::string source_storage_;
     std::string_view source_text_;
+    std::vector<std::size_t> source_line_offsets_;
     std::vector<IRRenderedLine> lines_;
     std::unordered_map<const BasicBlock*, std::string> block_labels_;
     std::unordered_map<SlotId, std::string> slot_refs_;

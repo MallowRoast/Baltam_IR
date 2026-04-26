@@ -73,22 +73,17 @@ struct IRUnitBuildState {
         }
     };
 
-    /**
-     * @brief lowering 期 loop 栈帧。
-     *
-     * 该结构不属于最终 IR，只为 `break` / `continue` / 回边生成提供上下文。
-     */
-    struct LoopFrame {
-        BasicBlock* header_block = nullptr;
-        BasicBlock* continue_block = nullptr;
-        BasicBlock* break_block = nullptr;
-    };
-
     CodeUnit* unit = nullptr;
     BasicBlock* current_block = nullptr;
     IRIdAllocator ids;
+    /**
+     * @brief lowering 期名字到 slot 的绑定表。
+     *
+     * 该表不属于最终 IR，只记录当前 unit 在 lowering 过程中已经确定为变量语义的名字。
+     * 函数 lowering 会根据它判断源码中的 `A(...)` 应保留为 `apply`，还是收敛为直接
+     * `call`。
+     */
     std::unordered_map<InternedString, SlotId> name_bindings;
-    std::vector<LoopFrame> loop_stack;
 };
 
 /**
