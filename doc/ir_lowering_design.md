@@ -129,7 +129,7 @@ block 的创建与 `entry` 指定现在由 `CodeUnit` 自身完成，builder 只
 
 它会：
 
-- parse `test/m/test0/test0.m` / `test/m/test0_1/test0_1.m`
+- parse `test/m/test0/test0.m` / `test/test0_1.m`
 - build 成 `IR` 并检查结构完整、没有 `Error` 诊断
 - 校验各自的核心侧重点是否 lower 正确
 - 调用 `ir_print` 打印文本 IR

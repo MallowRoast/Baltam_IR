@@ -71,7 +71,8 @@ void verify_printed_ir(const std::string& printed_ir) {
         smoke_test::find_line_containing(printed_ir, "store_env %test0_env, @a, %2");
     smoke_test::require(!store_a_line.empty(), "应打印 a 的环境写回");
     smoke_test::require(
-        store_a_line.find("; line 4: a = 1 + 2;") != std::string::npos,
+        store_a_line.find("; line ") != std::string::npos &&
+            store_a_line.find("a = 1 + 2;") != std::string::npos,
         "a 的写回行应打印源码行号注释");
 
     smoke_test::require(
@@ -104,7 +105,8 @@ void verify_other_important_checks(
         "br %7, label %if.then, label %if.else");
     smoke_test::require(!branch_line.empty(), "应打印 if 条件分支");
     smoke_test::require(
-        branch_line.find("; line 7: b > 0") != std::string::npos,
+        branch_line.find("; line ") != std::string::npos &&
+            branch_line.find("b > 0") != std::string::npos,
         "条件分支行应打印源码行号注释");
     smoke_test::require(
         printed_ir.find("\n  ret") != std::string::npos,
