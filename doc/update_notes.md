@@ -2,8 +2,8 @@
 
 ## v0.0.1
 
-1. 完成了 IR 的基础设计，主要包括 IR 本身，以及 builder、lowering、printer 这三部分。
-2. 实现了对简单脚本和函数的 lowering，见 `test0` 和 `test0_1`。
+1. 完成 IR 的基础设计，主要包括 IR 本身，以及 `builder`、`lowering`、`printer` 三部分。
+2. 实现对简单脚本和函数的 lowering，见 `test0` 和 `test0_1`。
 
 目前支持：
 
@@ -13,21 +13,12 @@
 - 函数中变量的 `load_slot` / `store_slot`
 - 函数中 `Apply` 节点到 `Call` 节点的降级
 
-TODO：
+3. 增加对 local 函数的最小支持，见 `test0_2` 和 `test0_3`。
 
-- 支持脚本 / 函数中的 `local` 函数
+具体包括：
 
-## v0.0.2
+- 脚本中的 local 函数调用目前仍保留为 `apply`
+- 函数中的 local 函数调用可以静态分派
+- 支持一元 / 二元运算符对 local 函数的分派
+- 验证了函数中局部变量对 local 函数的遮蔽作用
 
-1. 新增仓库根目录 `README.md`，补充仓库目标、当前能力和后续计划说明。
-2. 整理设计笔记，合并并改名为 `doc/planning_notes.md`。
-3. 调整测试样例布局：
-   `test0` 保留在 `test/m/test0/test0.m`，
-   `test0_1` 移到 `test/test0_1.m`。
-4. 删除 `test/m/README.md`，将测试说明直接写入对应 `.m` 文件头部注释。
-5. 统一 smoke test 的运行时基线到 `/opt/Baltamatica/lib`，`deps/` 目录只保留头文件用途。
-
-当前状态：
-
-- `cmake --build build` 可通过
-- `ctest --test-dir build` 可通过

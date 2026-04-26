@@ -9,6 +9,7 @@
 - 从 `.m` 文件直接 parse 并 lower
 - 从 parser 产出的 `pcdata[]` 直接 lower
 - 生成可验证、可打印、带源码注释的 `IR`
+- 文件内 `local` 函数的最小支持
 
 ## 公开接口
 
@@ -46,6 +47,7 @@ std::vector<std::shared_ptr<pcdata>>
 
 - `MFileUnit::path` 直接复用第一个有效 `pcdata` 的 `filename`
 - 每个 `pcdata` 对应一个 `ScriptUnit` 或 `FunctionUnit`
+- 脚本单元或函数名等于文件名的单元对应入口单元，其余函数单元可作为文件内 local 函数
 - `IRLowerer` 自己维护源码文本和行起始偏移表，用于把 AST `location` 转成 `SourceSpan`
 
 ### 2. `parse_and_lower_mfile_to_ir(...)`
@@ -67,14 +69,18 @@ std::vector<std::shared_ptr<pcdata>>
 
 - 创建 `MFileUnit`
 - 为每个 parser 单元创建 `ScriptUnit` 或 `FunctionUnit`
+- 在 lowering 前先识别入口单元和文件内 local `FunctionUnit`
 - 为函数从 `mFileFunc` AST 预声明参数 slot 和返回值 slot
 - 为每个 unit 创建 `entry` 基本块
-- lower `test0 / test0_1` 所需的最小语句/表达式子集：
+- lower `test0 / test0_1 / test0_2 / test0_3` 所需的最小语句/表达式子集：
   - 简单赋值
   - 数值字面量
   - 名字读取
+  - 一元运算
+  - 二元运算
   - 名字形式的圆括号应用
   - 带输出参数的圆括号应用语句
+  - 文件内 `local` 函数的最小分派
   - `if / else`
   - 显式 `return`
   - 隐式 `return`
@@ -86,8 +92,17 @@ std::vector<std::shared_ptr<pcdata>>
 - `function` 名字访问固定 lower 成 `LoadSlotInst` / `StoreSlotInst`
 - `script` 中的 `A(...)` 先保留为 `ApplyInst`
 - `function` 中的 `A(...)` 会根据 lowering 期名字绑定表分派：
-  若 `A` 尚未绑定为变量，则直接 lower 成 `CallInst`；
+  若 `A` 尚未绑定为变量，且命中文件内 `local` 函数，则直接 lower 成
+  `CallInst(Local)`，打印时显示为 `call_local @A(...)`；
+  若 `A` 尚未绑定为变量，且未命中文件内 `local` 函数，则直接 lower 成
+  `CallInst(Direct)`；
   若 `A` 已绑定为 slot 名字，则保留为 `ApplyInst`
+- `MFileUnit` 当前会记录入口单元之外的 local `FunctionUnit`，供 function lowering
+  使用；script 主体当前仍不会因为 local 函数存在而把 `apply` 收敛成 `call`
+- `function` 中的一元 / 二元运算也会尝试按 Matlab 同名规则命中文件内 local 函数：
+  例如 `+` 对应 `plus`，一元 `-` 对应 `uminus`。若这些名字未被局部变量遮蔽，
+  则表达式会直接 lower 成 `call_local`；若已经被局部变量遮蔽，则回退为普通
+  `UnaryInst` / `BinaryInst`
 - `WorkspaceHandle` hidden slot 只出现在 `ScriptUnit`，并在第一次脚本名字读写时按需创建；
   当前脚本环境槽位名字采用 `<script_name>_env`
 
@@ -126,12 +141,18 @@ block 的创建与 `entry` 指定现在由 `CodeUnit` 自身完成，builder 只
 
 - `test/smoke_test/test0_smoke.cpp`
 - `test/smoke_test/test0_1_smoke.cpp`
+- `test/smoke_test/test0_2_smoke.cpp`
+- `test/smoke_test/test0_3_smoke.cpp`
 
 它会：
 
-- parse `test/m/test0/test0.m` / `test/test0_1.m`
+- parse `test/m/test0/test0.m` / `test/m/test0/test0_1.m` / `test/m/test0/test0_2.m` /
+  `test/m/test0/test0_3.m`
 - build 成 `IR` 并检查结构完整、没有 `Error` 诊断
-- 校验各自的核心侧重点是否 lower 正确
+- 校验各自的核心侧重点是否 lower 正确：
+  - `test0_2`：脚本里即使定义了 local `sin`，主体中的 `sin(a)` 仍保留为 `apply`
+  - `test0_3`：函数里 `sin(a)` / `-a` 可命中 local `sin` / `uminus`，而 `plus = 1`
+    和 `cos = 1` 又会分别遮蔽 local `plus` / `cos`
 - 调用 `ir_print` 打印文本 IR
 - 校验关键打印结果与源码行号注释
 

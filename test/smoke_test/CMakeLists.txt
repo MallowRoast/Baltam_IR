@@ -43,5 +43,19 @@ add_ir_smoke_test(
     test0_1_smoke
     test0_1_smoke.cpp
     TEST0_1_MFILE_PATH
-    test/test0_1.m
+    test/m/test0/test0_1.m
+)
+
+add_ir_smoke_test(
+    test0_2_smoke
+    test0_2_smoke.cpp
+    TEST0_2_MFILE_PATH
+    test/m/test0/test0_2.m
+)
+
+add_ir_smoke_test(
+    test0_3_smoke
+    test0_3_smoke.cpp
+    TEST0_3_MFILE_PATH
+    test/m/test0/test0_3.m
 )

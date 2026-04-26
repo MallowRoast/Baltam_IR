@@ -660,6 +660,15 @@ private:
         return text;
     }
 
+    [[nodiscard]] std::string format_local_function_symbol(const FunctionUnit* function) const {
+        if (function == nullptr || function->parent == nullptr) {
+            return "@<local>";
+        }
+
+        return "@" + function->parent->file_stem().string() + "::" +
+            std::string(function->name);
+    }
+
     [[nodiscard]] std::string format_slot_decl(const Slot& slot) const {
         std::string text = format_slot_ref(slot.slot_id);
         text += " = ";
@@ -716,6 +725,19 @@ private:
             }
             case Instruction::Call: {
                 const auto& inst = static_cast<const CallInst&>(instruction);
+                if (inst.callee_kind == CallInst::Local) {
+                    std::string text = format_result_prefix(inst.results);
+                    text += "call_local ";
+                    if (inst.local_target != nullptr) {
+                        text += format_symbol(inst.local_target->name);
+                    } else {
+                        text += format_local_function_symbol(inst.local_target);
+                    }
+                    text += '(';
+                    text += format_operand_list(inst.arguments);
+                    text += ')';
+                    return text;
+                }
                 return format_call_like(
                     "call",
                     inst.results,

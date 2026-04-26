@@ -41,8 +41,10 @@
 - 简单赋值语句
 - 数值字面量
 - 名字读取
+- 一元运算与二元运算
 - 名字形式的圆括号应用
 - 带输出参数的圆括号应用语句
+- 文件内 `local` 函数的最小支持
 - `if / else`
 - 显式 `return` 与隐式 `return`
 
@@ -51,13 +53,22 @@
 - 脚本变量访问会 lower 成 `load_workspace` / `store_workspace`
 - 函数变量访问会 lower 成 `load_slot` / `store_slot`
 - 函数中的名字调用会根据名字绑定情况，在 `Apply` 和 `Call` 之间分派
+- 对于文件内 `local` 函数：
+  - 脚本主体中的名字调用当前仍保留为 `Apply`
+  - 函数主体中的名字调用若命中 `local` 函数，可直接分派为 `Call`
+  - 函数主体中的一元 / 二元运算若命中同名 local 函数，也可直接分派为 `call_local`
+  - 若这些名字已经被局部变量遮蔽，则回退为普通运算或 `Apply`
 
 当前仓库已经有基础 smoke test：
 
 - [test0.m](/home/zj/Desktop/Baltam_IR/test/m/test0/test0.m)
-- [test0_1.m](/home/zj/Desktop/Baltam_IR/test/test0_1.m)
+- [test0_1.m](/home/zj/Desktop/Baltam_IR/test/m/test0/test0_1.m)
+- [test0_2.m](/home/zj/Desktop/Baltam_IR/test/m/test0/test0_2.m)
+- [test0_3.m](/home/zj/Desktop/Baltam_IR/test/m/test0/test0_3.m)
 - [test0_smoke.cpp](/home/zj/Desktop/Baltam_IR/test/smoke_test/test0_smoke.cpp)
 - [test0_1_smoke.cpp](/home/zj/Desktop/Baltam_IR/test/smoke_test/test0_1_smoke.cpp)
+- [test0_2_smoke.cpp](/home/zj/Desktop/Baltam_IR/test/smoke_test/test0_2_smoke.cpp)
+- [test0_3_smoke.cpp](/home/zj/Desktop/Baltam_IR/test/smoke_test/test0_3_smoke.cpp)
 
 ## 后续要做的
 
@@ -80,6 +91,7 @@
 - [IR Schema](./doc/ir_schema.md)
 - [IR Builder Design](./doc/ir_builder_design.md)
 - [IR Lowering Design](./doc/ir_lowering_design.md)
+- [Local 函数支持方案](./doc/local_function_support_design.md)
 - [计划中与思考中的问题](./doc/planning_notes.md)
 - [Execution Strategy](./doc/execution_strategy.md)
 - [更新日志](./doc/update_notes.md)

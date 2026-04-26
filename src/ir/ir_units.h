@@ -4,12 +4,14 @@
 
 #include <memory>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace baltam {
 
 struct MFileUnit;
 struct CodeUnit;
+struct FunctionUnit;
 
 /**
  * @brief 可 lowering 的 IR 代码单元。
@@ -197,6 +199,7 @@ struct MFileUnit {
     NormalizedPath path;
     std::vector<std::unique_ptr<CodeUnit>> code_units;
     CodeUnit* entry_unit = nullptr;
+    std::unordered_map<InternedString, FunctionUnit*> local_function_map;
 
     /**
      * @brief 获取文件去掉扩展名后的 stem。
@@ -223,6 +226,16 @@ struct MFileUnit {
      */
     [[nodiscard]] bool is_function_file() const noexcept {
         return entry_unit != nullptr && entry_unit->is_function();
+    }
+
+    [[nodiscard]] FunctionUnit* find_local_function(std::string_view name) noexcept {
+        const auto it = local_function_map.find(InternedString(name));
+        return it != local_function_map.end() ? it->second : nullptr;
+    }
+
+    [[nodiscard]] const FunctionUnit* find_local_function(std::string_view name) const noexcept {
+        const auto it = local_function_map.find(InternedString(name));
+        return it != local_function_map.end() ? it->second : nullptr;
     }
 };
 

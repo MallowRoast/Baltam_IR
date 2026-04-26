@@ -7,7 +7,8 @@ namespace baltam {
 
 void IRBuilder::reset() noexcept {
     owned_file_.reset();
-    current_unit_state_.reset();
+    unit_states_.clear();
+    current_unit_state_ = nullptr;
     diagnostics_.clear();
 }
 
@@ -47,12 +48,10 @@ UnitT& IRBuilder::begin_unit(
     UnitT* unit_ptr = unit.get();
     owned_file_->code_units.push_back(std::move(unit));
 
-    if (owned_file_->entry_unit == nullptr) {
-        owned_file_->entry_unit = unit_ptr;
-    }
-
-    current_unit_state_ = std::make_unique<IRUnitBuildState>();
-    current_unit_state_->unit = unit_ptr;
+    auto state = std::make_unique<IRUnitBuildState>();
+    state->unit = unit_ptr;
+    current_unit_state_ = state.get();
+    unit_states_[unit_ptr] = std::move(state);
 
     return *unit_ptr;
 }
@@ -69,6 +68,24 @@ FunctionUnit& IRBuilder::begin_function_unit(std::string_view name, SourceSpan s
         name,
         source_span,
         "创建函数代码单元前必须先创建文件");
+}
+
+void IRBuilder::set_current_unit(CodeUnit* unit) {
+    if (unit == nullptr) {
+        current_unit_state_ = nullptr;
+        return;
+    }
+
+    const auto it = unit_states_.find(unit);
+    if (it == unit_states_.end()) {
+        report(
+            IRBuildDiagnostic::Error,
+            "切换活动代码单元失败：该单元不属于当前 builder",
+            unit->source_span);
+        return;
+    }
+
+    current_unit_state_ = it->second.get();
 }
 
 void IRBuilder::set_insert_point(BasicBlock* block) {
@@ -355,7 +372,8 @@ IRBuildResult IRBuilder::finish() {
     result.mfile = std::move(owned_file_);
     result.diagnostics = std::move(diagnostics_);
 
-    current_unit_state_.reset();
+    unit_states_.clear();
+    current_unit_state_ = nullptr;
     diagnostics_.clear();
 
     return result;

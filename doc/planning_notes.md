@@ -232,6 +232,24 @@
 - 如果某个名字仍可能被 workspace 中的变量遮蔽，就必须保留 `apply`
 - 因此它更像是“名字消歧 pass”的后半段，而不是一个单纯的指令替换 pass
 
+### Pass 3：删除未被调用的 local 函数
+
+#### 目标
+
+删除当前文件里从入口代码单元出发、沿显式 local call 不可达的 local 函数，减少无用 `FunctionUnit`。
+
+#### 基本思路
+
+- 从 `mfile.entry_unit` 出发遍历当前文件内的调用图
+- 只跟踪 `CallInst(Local)` 这类已经静态确定目标的调用边
+- 被遍历到的 local 函数视为可达，未被遍历到的视为可删除
+
+#### 适用范围
+
+这条 pass 更适合先用于函数文件。
+
+原因是当前函数文件中的 local 调用已经会显式 lower 成 `call_local`，可达性边比较清楚；而脚本中的调用很多仍保留为 `apply`，是否最终命中某个 local 函数还不能完全静态确定，因此脚本场景下暂时不应贸然删除 local 函数。
+
 ### 粗略顺序
 
 当前更合理的实现顺序是：
@@ -239,5 +257,6 @@
 1. 先做 script 名字稳定区间分析
 2. 基于稳定结果把部分 `LoadWorkspaceInst` 收敛成 `LoadSlotInst`
 3. 再基于同一份稳定信息，把部分 `apply` 收敛成 `call`
+4. 对函数文件做基于 `call_local` 可达性的 local function DCE
 
 原因很简单：第二个 pass 依赖的前提，和第一个 pass 证明的其实是同一类事实。

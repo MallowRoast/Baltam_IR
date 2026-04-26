@@ -15,6 +15,7 @@ namespace baltam {
 struct if_flow;
 struct multipleFuncCall;
 struct symasgn;
+class pcdata;
 
 /**
  * @brief IR lowering 驱动。
@@ -86,6 +87,7 @@ private:
         std::size_t result_count,
         SourceSpan source_span,
         std::vector<ValueId>& results);
+    [[nodiscard]] const FunctionUnit* lookup_local_function(std::string_view name) const noexcept;
     /**
      * @brief 判断当前函数中的名字调用是否可直接收敛为 `call`。
      *

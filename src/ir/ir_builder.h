@@ -123,6 +123,11 @@ public:
     FunctionUnit& begin_function_unit(std::string_view name, SourceSpan source_span);
 
     /**
+     * @brief 切换当前活动代码单元。
+     */
+    void set_current_unit(CodeUnit* unit);
+
+    /**
      * @brief 设置当前指令插入点。
      */
     void set_insert_point(BasicBlock* block);
@@ -217,7 +222,8 @@ private:
         std::string_view missing_file_message);
 
     std::unique_ptr<MFileUnit> owned_file_;
-    std::unique_ptr<IRUnitBuildState> current_unit_state_;
+    std::unordered_map<CodeUnit*, std::unique_ptr<IRUnitBuildState>> unit_states_;
+    IRUnitBuildState* current_unit_state_ = nullptr;
     std::vector<IRBuildDiagnostic> diagnostics_;
 };
 

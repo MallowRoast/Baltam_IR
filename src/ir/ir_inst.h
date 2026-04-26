@@ -9,6 +9,7 @@
 namespace baltam {
 
 struct BasicBlock;
+struct FunctionUnit;
 
 /**
  * @brief 逻辑常量。
@@ -350,6 +351,7 @@ class CallInst final : public Instruction {
 public:
     enum CalleeKind : std::uint8_t {
         Direct,
+        Local,
         Indirect,
     };
 
@@ -363,6 +365,7 @@ public:
     std::vector<ValueId> results;
     CalleeKind callee_kind = Direct;
     Operand callee;
+    FunctionUnit* local_target = nullptr;
     std::vector<Operand> arguments;
 };
 

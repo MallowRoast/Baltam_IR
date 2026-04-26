@@ -103,6 +103,86 @@ BinaryOp lower_binary_op(nodeType type, bool& ok) noexcept {
     }
 }
 
+UnaryOp lower_unary_op(nodeType type, bool& ok) noexcept {
+    ok = true;
+
+    switch (type) {
+        case node_uplus:
+            return Uplus;
+        case node_negative:
+            return Uminus;
+        case node_logic_not:
+            return LogicalNot;
+        case node_transpose:
+            return Transpose;
+        case node_ctranspose:
+            return Ctranspose;
+        default:
+            ok = false;
+            return Uplus;
+    }
+}
+
+const char* unary_operator_function_name(nodeType type) noexcept {
+    switch (type) {
+        case node_uplus:
+            return "uplus";
+        case node_negative:
+            return "uminus";
+        case node_logic_not:
+            return "not";
+        case node_transpose:
+            return "transpose";
+        case node_ctranspose:
+            return "ctranspose";
+        default:
+            return nullptr;
+    }
+}
+
+const char* binary_operator_function_name(nodeType type) noexcept {
+    switch (type) {
+        case node_add:
+            return "plus";
+        case node_subtract:
+            return "minus";
+        case node_multiply:
+            return "mtimes";
+        case node_right_divide:
+            return "mrdivide";
+        case node_left_divide:
+            return "mldivide";
+        case node_power:
+            return "mpower";
+        case node_element_mul:
+            return "times";
+        case node_element_rdiv:
+            return "rdivide";
+        case node_element_ldiv:
+            return "ldivide";
+        case node_element_power:
+            return "power";
+        case node_logic_and:
+            return "and";
+        case node_logic_or:
+            return "or";
+        case node_less_than:
+            return "lt";
+        case node_leq:
+            return "le";
+        case node_greater_than:
+            return "gt";
+        case node_geq:
+            return "ge";
+        case node_eq:
+            return "eq";
+        case node_noteq:
+            return "ne";
+        default:
+            return nullptr;
+    }
+}
+
 bool try_parse_number_constant(const numval& number_node, Constant& out_constant) {
     std::string text = number_node.str;
     text.erase(
@@ -232,7 +312,17 @@ IRBuildResult IRLowerer::lower_parsed_units(
     }
 
     load_source_text(NormalizedPath(first_unit->filename));
-    builder_.begin_file(NormalizedPath(first_unit->filename));
+    MFileUnit& mfile = builder_.begin_file(NormalizedPath(first_unit->filename));
+    const std::string file_stem = mfile.file_stem().string();
+
+    std::vector<std::shared_ptr<pcdata>> active_parsed_units;
+    active_parsed_units.reserve(parsed_units.size());
+
+    std::vector<CodeUnit*> lowered_units;
+    lowered_units.reserve(parsed_units.size());
+
+    mfile.entry_unit = nullptr;
+    mfile.local_function_map.clear();
 
     for (const std::shared_ptr<pcdata>& parsed_unit : parsed_units) {
         if (parsed_unit == nullptr) {
@@ -251,17 +341,53 @@ IRBuildResult IRLowerer::lower_parsed_units(
 
         CodeUnit* unit = builder_.current_unit();
         if (unit == nullptr) {
+            builder_.report(
+                IRBuildDiagnostic::Error,
+                std::string("创建代码单元失败: ") + parsed_unit->funname);
             continue;
         }
+
+        const bool is_main_unit =
+            parsed_unit->is_mscript() || parsed_unit->funname == file_stem;
+
+        if (is_main_unit) {
+            if (mfile.entry_unit == nullptr) {
+                mfile.entry_unit = unit;
+            } else {
+                builder_.report(
+                    IRBuildDiagnostic::Error,
+                    "当前 lowering 暂不支持同一个文件中出现多个主代码单元",
+                    unit->source_span);
+            }
+        } else if (unit->is_function()) {
+            auto* function = static_cast<FunctionUnit*>(unit);
+            const auto [it, inserted] = mfile.local_function_map.emplace(function->name, function);
+            if (!inserted) {
+                builder_.report(
+                    IRBuildDiagnostic::Error,
+                    std::string("当前 lowering 暂不支持重名 local 函数: ") + function->name,
+                    function->source_span);
+                it->second = function;
+            }
+        }
+
+        active_parsed_units.push_back(parsed_unit);
+        lowered_units.push_back(unit);
+    }
+
+    for (std::size_t i = 0; i < lowered_units.size(); ++i) {
+        const std::shared_ptr<pcdata>& parsed_unit = active_parsed_units[i];
+        CodeUnit* unit = lowered_units[i];
 
         if (unit->entry_block == nullptr) {
             BasicBlock* entry_block = unit->create_block("entry", SourceSpan::invalid());
             if (!unit->set_entry_block(entry_block)) {
                 continue;
             }
-            builder_.set_insert_point(entry_block);
         }
 
+        builder_.set_current_unit(unit);
+        builder_.set_insert_point(unit->entry_block);
         ast_ptr body = parsed_unit->ast;
         if (body != nullptr && body->nodetype == node_mfile_func) {
             body = std::static_pointer_cast<mFileFunc>(body)->body();
@@ -277,12 +403,12 @@ IRBuildResult IRLowerer::lower_parsed_units(
             lower_stmt(body);
         }
 
-        if (!builder_.current_block()->has_terminator()) {
+        if (builder_.current_block() != nullptr &&
+            !builder_.current_block()->has_terminator()) {
             std::unique_ptr<ReturnInst> inst = std::make_unique<ReturnInst>();
             inst->source_span = SourceSpan::invalid();
 
-            const CodeUnit* unit = builder_.current_unit();
-            if (unit != nullptr && unit->is_function()) {
+            if (unit->is_function()) {
                 const auto* function = static_cast<const FunctionUnit*>(unit);
                 for (SlotId slot_id : function->return_slots) {
                     inst->values.push_back(slot_id);
@@ -579,6 +705,35 @@ bool IRLowerer::lower_named_invoke(
     results.clear();
     results.reserve(result_count);
 
+    const bool name_is_bound_variable = builder_.find_name(call->name()) != nullptr;
+
+    if (!name_is_bound_variable) {
+        if (const FunctionUnit* local_target = lookup_local_function(call->name())) {
+            std::unique_ptr<CallInst> inst = std::make_unique<CallInst>();
+            inst->callee_kind = CallInst::Local;
+            inst->callee = InternedString(call->name());
+            inst->local_target = const_cast<FunctionUnit*>(local_target);
+            inst->source_span = source_span;
+
+            for (std::size_t i = 0; i < result_count; ++i) {
+                const ValueId result = builder_.create_value();
+                if (!result.is_valid()) {
+                    return false;
+                }
+
+                inst->results.push_back(result);
+                results.push_back(result);
+            }
+
+            if (!append_call_arguments(inst->arguments, call->in_args())) {
+                return false;
+            }
+
+            builder_.append_instruction(std::move(inst));
+            return true;
+        }
+    }
+
     if (should_lower_direct_call(call->name())) {
         std::unique_ptr<CallInst> inst = std::make_unique<CallInst>();
         inst->callee_kind = CallInst::Direct;
@@ -635,13 +790,23 @@ bool IRLowerer::lower_named_invoke(
     return true;
 }
 
+const FunctionUnit* IRLowerer::lookup_local_function(std::string_view name) const noexcept {
+    const CodeUnit* unit = builder_.current_unit();
+    if (unit == nullptr || !unit->is_function() || unit->parent == nullptr) {
+        return nullptr;
+    }
+
+    return unit->parent->find_local_function(name);
+}
+
 bool IRLowerer::should_lower_direct_call(std::string_view name) const noexcept {
     const CodeUnit* unit = builder_.current_unit();
     if (unit == nullptr || !unit->is_function()) {
         return false;
     }
 
-    return builder_.find_name(name) == nullptr;
+    return builder_.find_name(name) == nullptr &&
+        lookup_local_function(name) == nullptr;
 }
 
 bool IRLowerer::store_named_result(
@@ -721,6 +886,59 @@ ValueId IRLowerer::lower_expr(const ast_ptr& node) {
             builder_.append_instruction(std::move(inst));
             return result;
         }
+        case node_uplus:
+        case node_negative:
+        case node_logic_not:
+        case node_transpose:
+        case node_ctranspose: {
+            const ValueId operand = lower_expr(node->l());
+            if (!operand.is_valid()) {
+                return InvalidValueId;
+            }
+
+            const SourceSpan source_span = source_span_from(node);
+            if (const char* function_name = unary_operator_function_name(node->nodetype)) {
+                if (const FunctionUnit* local_target = lookup_local_function(function_name)) {
+                    if (builder_.find_name(function_name) == nullptr) {
+                        std::unique_ptr<CallInst> inst = std::make_unique<CallInst>();
+                        inst->callee_kind = CallInst::Local;
+                        inst->callee = InternedString(function_name);
+                        inst->local_target = const_cast<FunctionUnit*>(local_target);
+                        inst->source_span = source_span;
+
+                        const ValueId result = builder_.create_value();
+                        if (!result.is_valid()) {
+                            return InvalidValueId;
+                        }
+
+                        inst->results.push_back(result);
+                        inst->arguments.push_back(operand);
+                        builder_.append_instruction(std::move(inst));
+                        return result;
+                    }
+                }
+            }
+
+            bool ok = false;
+            const UnaryOp op = lower_unary_op(node->nodetype, ok);
+            if (!ok) {
+                builder_.report(
+                    IRBuildDiagnostic::Error,
+                    std::string("当前 lowering 暂不支持一元表达式节点: ") +
+                        ast_node_type_name(node->nodetype),
+                    source_span);
+                return InvalidValueId;
+            }
+
+            std::unique_ptr<UnaryInst> inst = std::make_unique<UnaryInst>();
+            inst->result = builder_.create_value();
+            inst->op = op;
+            inst->operand = operand;
+            inst->source_span = source_span;
+            const ValueId result = inst->result;
+            builder_.append_instruction(std::move(inst));
+            return result;
+        }
         case node_number: {
             Constant constant;
             if (!try_parse_number_constant(*std::static_pointer_cast<numval>(node), constant)) {
@@ -757,6 +975,7 @@ ValueId IRLowerer::lower_expr(const ast_ptr& node) {
         case node_geq:
         case node_eq:
         case node_noteq: {
+            const SourceSpan source_span = source_span_from(node);
             bool ok = false;
             const BinaryOp op = lower_binary_op(node->nodetype, ok);
             if (!ok) {
@@ -764,7 +983,7 @@ ValueId IRLowerer::lower_expr(const ast_ptr& node) {
                     IRBuildDiagnostic::Error,
                     std::string("当前 lowering 暂不支持二元表达式节点: ") +
                         ast_node_type_name(node->nodetype),
-                    source_span_from(node));
+                    source_span);
                 return InvalidValueId;
             }
 
@@ -774,12 +993,35 @@ ValueId IRLowerer::lower_expr(const ast_ptr& node) {
                 return InvalidValueId;
             }
 
+            if (const char* function_name = binary_operator_function_name(node->nodetype)) {
+                if (const FunctionUnit* local_target = lookup_local_function(function_name)) {
+                    if (builder_.find_name(function_name) == nullptr) {
+                        std::unique_ptr<CallInst> inst = std::make_unique<CallInst>();
+                        inst->callee_kind = CallInst::Local;
+                        inst->callee = InternedString(function_name);
+                        inst->local_target = const_cast<FunctionUnit*>(local_target);
+                        inst->source_span = source_span;
+
+                        const ValueId result = builder_.create_value();
+                        if (!result.is_valid()) {
+                            return InvalidValueId;
+                        }
+
+                        inst->results.push_back(result);
+                        inst->arguments.push_back(lhs);
+                        inst->arguments.push_back(rhs);
+                        builder_.append_instruction(std::move(inst));
+                        return result;
+                    }
+                }
+            }
+
             std::unique_ptr<BinaryInst> inst = std::make_unique<BinaryInst>();
             inst->result = builder_.create_value();
             inst->op = op;
             inst->lhs = lhs;
             inst->rhs = rhs;
-            inst->source_span = source_span_from(node);
+            inst->source_span = source_span;
             const ValueId result = inst->result;
             builder_.append_instruction(std::move(inst));
             return result;
