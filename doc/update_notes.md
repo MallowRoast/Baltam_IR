@@ -22,3 +22,7 @@
 - 支持一元 / 二元运算符对 local 函数的分派
 - 验证了函数中局部变量对 local 函数的遮蔽作用
 
+TODO：
+
+- 增加 `parent_get` 节点
+- 支持 `for / while / switch` 及其嵌套情况
