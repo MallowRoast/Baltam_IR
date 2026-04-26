@@ -1,14 +1,14 @@
-# Matlab HIR Schema 草案
+# Matlab IR Schema 草案
 
 ## 目标
 
-本文承接 [hir_draft.md](/home/zj/Desktop/Baltam_IR/doc/hir_draft.md)，只记录当前代码实现对应的第一版 `HIR` schema。
+本文承接 [ir_draft.md](/home/zj/Desktop/Baltam_IR/doc/ir_draft.md)，只记录当前代码实现对应的第一版 `IR` schema。
 
 主文档负责说明：
 
-- 为什么需要 `HIR`
-- 第一版 `HIR` 的职责边界
-- `HIR` 与 `bytecode`、`typed SSA` 的关系
+- 为什么需要 `IR`
+- 第一版 `IR` 的职责边界
+- `IR` 与 `bytecode`、`typed SSA` 的关系
 
 本文只负责说明当前实际存在的数据结构：
 
@@ -22,7 +22,7 @@
 
 ## 当前范围
 
-本文默认沿用第一版 `HIR` 的范围约束：
+本文默认沿用第一版 `IR` 的范围约束：
 
 - 只考虑 `.m` 文件输入
 - 只考虑 `script` 和 `function`
@@ -67,7 +67,6 @@ MFileUnit
   path         : NormalizedPath
   code_units   : CodeUnit*[]
   entry_unit   : CodeUnit*
-  source_span  : SourceSpan
 ```
 
 ### 字段说明
@@ -78,8 +77,6 @@ MFileUnit
   文件直接拥有的全部 `CodeUnit`。
 - `entry_unit`
   当前文件的入口代码单元。
-- `source_span`
-  整个文件覆盖的源码范围。
 
 ### 派生方法
 
@@ -139,10 +136,8 @@ type() -> script | function
 
 `ScriptUnit` 是 `CodeUnit` 的脚本特化。
 
-当前它没有新增独立字段，只增加脚本专属 helper：
-
-- `find_script_env_slot()`
-- `has_script_env_slot()`
+当前它没有新增独立字段，只固定脚本单元语义；工作区句柄 slot 仍通过
+基类上的 `find_hidden_slot(WorkspaceHandle)` 访问。
 
 ### 3.3 FunctionUnit
 
@@ -183,7 +178,7 @@ SlotAttrs
 - `Nargout`
 - `Varargin`
 - `Varargout`
-- `ScriptEnvHandle`
+- `WorkspaceHandle`
 
 ### 4.2 Slot
 
@@ -239,6 +234,7 @@ SlotTable
 
 ```text
 BasicBlock
+  parent        : CodeUnit*
   label         : InternedString
   source_span   : SourceSpan
   instructions  : Instruction*[]
@@ -248,6 +244,8 @@ BasicBlock
 
 ### 字段说明
 
+- `parent`
+  所属 `CodeUnit`。
 - `label`
   文本标签，主要用于打印、调试和诊断。
 - `source_span`
@@ -366,6 +364,7 @@ EffectClass
 
 ```text
 Instruction
+  parent       : BasicBlock*
   type         : Instruction::Type
   effect       : EffectClass
   source_span  : SourceSpan
@@ -375,6 +374,7 @@ Instruction
 当前 `Instruction` 采用：
 
 - 继承层次表达具体指令数据结构
+- `parent` 反向指回所属 `BasicBlock`
 - `Instruction::Type` 作为显式判别标签
 
 这里保留 `type` 标签的目的，是避免在核心 IR 上依赖 RTTI 做分派。
@@ -389,14 +389,33 @@ Instruction
 - `LoadSlotInst`
   - `result  : ValueId`
   - `slot_id : SlotId`
+  - 读取的是已经静态绑定好的 frame slot
 - `StoreSlotInst`
   - `slot_id : SlotId`
   - `value   : Operand`
+- `LoadWorkspaceInst`
+  - `result   : ValueId`
+  - `workspace_handle_slot : SlotId`
+  - `symbol   : InternedString`
+  - 读取的是 workspace 中名为 `symbol` 的名字，而不是静态 frame slot
+- `StoreWorkspaceInst`
+  - `workspace_handle_slot : SlotId`
+  - `symbol   : InternedString`
+  - `value    : Operand`
+- `ApplyInst`
+  - `results        : ValueId[]`
+  - `callee_or_base : Operand`
+  - `arguments      : Operand[]`
+  - 表示尚未消歧的源码层 `A(...)`
+- `CallInst`
+  - `results      : ValueId[]`
+  - `callee_kind  : direct | indirect`
+  - `callee       : Operand`
+  - `arguments    : Operand[]`
+  - 只表示已经确认是调用的语义
 - `CopyInst`
   - `result : ValueId`
   - `value  : Operand`
-- `UndefInst`
-  - `result : ValueId`
 - `UnaryInst`
   - `result  : ValueId`
   - `op      : UnaryOp`
@@ -418,36 +437,50 @@ Instruction
 - `ReturnInst`
   - `values : Operand[]`
 
-这些指令仍然通过 `Instruction` 统一建模，只是在语义上要求：
+## 9. `LoadSlot` 与 `LoadWorkspace` 的区别
 
-- 只能出现在 block 末尾
+这两个节点都表现为“读一个值”，但它们读取的语义空间不同。
 
-## 9. 当前结构约束
+- `LoadSlotInst`
+  - 输入操作数是 `slot_id : SlotId`
+  - `SlotId` 是 IR 构建阶段就已经确定的静态句柄
+  - 读取的是当前 `CodeUnit` frame 内的 slot
+- `LoadWorkspaceInst`
+  - 输入由 `workspace_handle_slot : SlotId` 和 `symbol : InternedString` 组成
+  - `workspace_handle_slot` 指向工作区句柄 slot，`symbol` 是要在 workspace 中查找的名字
+  - 读取的是当前 workspace 的动态名字绑定
 
-### 9.1 MFileUnit / CodeUnit
+换句话说：
+
+- `LoadSlotInst` = 读取静态 slot
+- `LoadWorkspaceInst` = 通过环境句柄按名字读取 workspace
+
+## 10. 当前结构约束
+
+### 10.1 MFileUnit / CodeUnit
 
 - `entry_unit` 必须属于当前 `MFileUnit`
 - `basic_blocks` 中的 block 必须都属于当前 `CodeUnit`
 - `entry_block` 必须属于当前 `CodeUnit`
 
-### 9.2 FunctionUnit
+### 10.2 FunctionUnit
 
 - `param_slots` 只能引用 `arg` slot
 - `return_slots` 只能引用 `ret` slot
 - `param_slots` 和 `return_slots` 的顺序应与源码声明顺序一致
 
-### 9.3 Hidden slot
+### 10.3 Hidden slot
 
 - 同一个 `CodeUnit` 中，除 `None` 外的同一 `HiddenRole` 至多出现一个对应 slot
-- `ScriptEnvHandle` 只应出现在 `ScriptUnit`
+- `WorkspaceHandle` 只应出现在 `ScriptUnit`
 - `Nargin/Nargout/Varargin/Varargout` 只应出现在 `FunctionUnit`
 
-### 9.4 BasicBlock
+### 10.4 BasicBlock
 
 - 若 block 中存在终结指令，则必须是最后一条
 - block 中除最后一条外不应出现其他终结指令
 
-## 10. 已经删除的旧设计
+## 11. 已经删除的旧设计
 
 为了避免与旧文档混淆，以下结构已经不再属于当前 schema：
 
@@ -471,6 +504,5 @@ Instruction
 
 ## 相关文档
 
-- [hir_draft.md](/home/zj/Desktop/Baltam_IR/doc/hir_draft.md)
-- [ir_design_evolution.md](/home/zj/Desktop/Baltam_IR/doc/ir_design_evolution.md)
+- [ir_draft.md](/home/zj/Desktop/Baltam_IR/doc/ir_draft.md)
 - [execution_strategy.md](/home/zj/Desktop/Baltam_IR/doc/execution_strategy.md)

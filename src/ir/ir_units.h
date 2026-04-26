@@ -1,8 +1,9 @@
 #pragma once
 
-#include "hir/hir_cfg.h"
+#include "ir/ir_cfg.h"
 
 #include <memory>
+#include <string_view>
 #include <vector>
 
 namespace baltam {
@@ -11,7 +12,7 @@ struct MFileUnit;
 struct CodeUnit;
 
 /**
- * @brief 可 lowering 的 HIR 代码单元。
+ * @brief 可 lowering 的 IR 代码单元。
  *
  * 第一版 `CodeUnit` 承载稳定的顶层元数据、slot 表和 block 列表。
  * `CodeUnit` 通过 `std::unique_ptr` 统一拥有全部 `BasicBlock`，这样块对象地址稳定，
@@ -95,14 +96,41 @@ struct CodeUnit {
     [[nodiscard]] const Slot* find_hidden_slot(SlotAttrs::HiddenRole role) const noexcept {
         return slot_table.find_hidden_slot(role);
     }
+
+    /**
+     * @brief 为当前 unit 创建一个基本块。
+     */
+    [[nodiscard]] BasicBlock* create_block(std::string_view label, SourceSpan source_span) {
+        auto block = std::make_unique<BasicBlock>();
+        block->parent = this;
+        block->label = InternedString(label);
+        block->source_span = source_span;
+
+        BasicBlock* block_ptr = block.get();
+        basic_blocks.push_back(std::move(block));
+        return block_ptr;
+    }
+
+    /**
+     * @brief 设置当前 unit 的入口基本块。
+     *
+     * @return `block == nullptr` 或其属于当前 unit 时返回 true。
+     */
+    [[nodiscard]] bool set_entry_block(BasicBlock* block) noexcept {
+        if (block != nullptr && block->parent != this) {
+            return false;
+        }
+
+        entry_block = block;
+        return true;
+    }
 };
 
 /**
  * @brief `CodeUnit(type=script)` 的薄特化。
  *
- * 第一版 `ScriptUnit` 不新增独立字段，而是在 `CodeUnit` 之上显式固定脚本语义约束：
- * - `type()` 固定返回 `Script`
- * - 可以持有 `ScriptEnvHandle` 隐藏 slot
+ * 第一版 `ScriptUnit` 不新增独立字段，只在 `CodeUnit` 之上显式固定脚本语义约束：
+ * `type()` 固定返回 `Script`。
  */
 struct ScriptUnit : CodeUnit {
     /**
@@ -117,33 +145,6 @@ struct ScriptUnit : CodeUnit {
      */
     [[nodiscard]] Type type() const noexcept override {
         return CodeUnit::Script;
-    }
-
-    /**
-     * @brief 查找脚本环境句柄 slot。
-     *
-     * @return 找到时返回对应 slot 指针，否则返回 `nullptr`。
-     */
-    [[nodiscard]] Slot* find_script_env_slot() noexcept {
-        return find_hidden_slot(SlotAttrs::ScriptEnvHandle);
-    }
-
-    /**
-     * @brief 查找脚本环境句柄 slot。
-     *
-     * @return 找到时返回对应 slot 指针，否则返回 `nullptr`。
-     */
-    [[nodiscard]] const Slot* find_script_env_slot() const noexcept {
-        return find_hidden_slot(SlotAttrs::ScriptEnvHandle);
-    }
-
-    /**
-     * @brief 判断脚本单元是否持有脚本环境句柄 slot。
-     *
-     * @return 找到 `ScriptEnvHandle` 对应 slot 时返回 true。
-     */
-    [[nodiscard]] bool has_script_env_slot() const noexcept {
-        return find_script_env_slot() != nullptr;
     }
 };
 
@@ -184,99 +185,10 @@ struct FunctionUnit : CodeUnit {
      */
     std::vector<SlotId> return_slots;
 
-    /**
-     * @brief 查找 `nargin` 对应的隐藏 slot。
-     *
-     * @return 找到时返回对应 slot 指针，否则返回 `nullptr`。
-     */
-    [[nodiscard]] Slot* find_nargin_slot() noexcept {
-        return find_hidden_slot(SlotAttrs::Nargin);
-    }
-
-    /**
-     * @brief 查找 `nargin` 对应的隐藏 slot。
-     *
-     * @return 找到时返回对应 slot 指针，否则返回 `nullptr`。
-     */
-    [[nodiscard]] const Slot* find_nargin_slot() const noexcept {
-        return find_hidden_slot(SlotAttrs::Nargin);
-    }
-
-    /**
-     * @brief 查找 `nargout` 对应的隐藏 slot。
-     *
-     * @return 找到时返回对应 slot 指针，否则返回 `nullptr`。
-     */
-    [[nodiscard]] Slot* find_nargout_slot() noexcept {
-        return find_hidden_slot(SlotAttrs::Nargout);
-    }
-
-    /**
-     * @brief 查找 `nargout` 对应的隐藏 slot。
-     *
-     * @return 找到时返回对应 slot 指针，否则返回 `nullptr`。
-     */
-    [[nodiscard]] const Slot* find_nargout_slot() const noexcept {
-        return find_hidden_slot(SlotAttrs::Nargout);
-    }
-
-    /**
-     * @brief 查找 `varargin` 对应的隐藏 slot。
-     *
-     * @return 找到时返回对应 slot 指针，否则返回 `nullptr`。
-     */
-    [[nodiscard]] Slot* find_varargin_slot() noexcept {
-        return find_hidden_slot(SlotAttrs::Varargin);
-    }
-
-    /**
-     * @brief 查找 `varargin` 对应的隐藏 slot。
-     *
-     * @return 找到时返回对应 slot 指针，否则返回 `nullptr`。
-     */
-    [[nodiscard]] const Slot* find_varargin_slot() const noexcept {
-        return find_hidden_slot(SlotAttrs::Varargin);
-    }
-
-    /**
-     * @brief 查找 `varargout` 对应的隐藏 slot。
-     *
-     * @return 找到时返回对应 slot 指针，否则返回 `nullptr`。
-     */
-    [[nodiscard]] Slot* find_varargout_slot() noexcept {
-        return find_hidden_slot(SlotAttrs::Varargout);
-    }
-
-    /**
-     * @brief 查找 `varargout` 对应的隐藏 slot。
-     *
-     * @return 找到时返回对应 slot 指针，否则返回 `nullptr`。
-     */
-    [[nodiscard]] const Slot* find_varargout_slot() const noexcept {
-        return find_hidden_slot(SlotAttrs::Varargout);
-    }
-
-    /**
-     * @brief 判断函数单元是否持有 `varargin` 隐藏 slot。
-     *
-     * @return 找到 `Varargin` 对应 slot 时返回 true。
-     */
-    [[nodiscard]] bool has_varargin_slot() const noexcept {
-        return find_varargin_slot() != nullptr;
-    }
-
-    /**
-     * @brief 判断函数单元是否持有 `varargout` 隐藏 slot。
-     *
-     * @return 找到 `Varargout` 对应 slot 时返回 true。
-     */
-    [[nodiscard]] bool has_varargout_slot() const noexcept {
-        return find_varargout_slot() != nullptr;
-    }
 };
 
 /**
- * @brief 文件级 HIR 单元。
+ * @brief 文件级 IR 单元。
  *
  * `MFileUnit` 对应一个 `.m` 文件，直接拥有该文件中的全部 `CodeUnit`，并通过
  * `entry_unit` 指向入口代码单元。文件是脚本文件还是函数文件，不再额外缓存一份
@@ -286,7 +198,6 @@ struct MFileUnit {
     NormalizedPath path;
     std::vector<std::unique_ptr<CodeUnit>> code_units;
     CodeUnit* entry_unit = nullptr;
-    SourceSpan source_span;
 
     /**
      * @brief 获取文件去掉扩展名后的 stem。

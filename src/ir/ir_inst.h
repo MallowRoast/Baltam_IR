@@ -1,6 +1,6 @@
 #pragma once
 
-#include "hir/hir_base_types.h"
+#include "ir/ir_base_types.h"
 
 #include <cstdint>
 #include <variant>
@@ -116,7 +116,7 @@ enum BinaryOp : std::uint8_t {
 };
 
 /**
- * @brief 第一版 HIR 操作数集合。
+ * @brief 第一版 IR 操作数集合。
  *
  * 操作数保持为轻量值类型，因为它们本质上是某条指令上的输入边，而不是独立 IR 节点。
  * 当前版本直接用强类型 ID 或名字文本承载引用，不再额外包一层单字段 wrapper。
@@ -153,11 +153,11 @@ enum EffectClass : std::uint8_t {
     Frame,   ///< 只读写当前 frame slot。
     Heap,    ///< 读写普通堆对象。
     Env,     ///< 读写 workspace、resolver、path 等动态环境。
-    Opaque,  ///< HIR 层无法精确描述的副作用。
+    Opaque,  ///< IR 层无法精确描述的副作用。
 };
 
 /**
- * @brief HIR 指令基类。
+ * @brief IR 指令基类。
  *
  * 当前阶段改为继承层次，是因为具体指令的结果个数、字段形状和控制流角色都已经开始
  * 明显分化，继续用统一的 payload 容器表示会让结构约束越来越别扭。
@@ -171,8 +171,11 @@ public:
         Const,
         LoadSlot,
         StoreSlot,
+        LoadWorkspace,
+        StoreWorkspace,
+        Apply,
+        Call,
         Copy,
-        Undef,
         Unary,
         Binary,
         Goto,
@@ -203,6 +206,7 @@ public:
         return type_ == Goto || type_ == Branch || type_ == Return;
     }
 
+    BasicBlock* parent = nullptr;
     EffectClass effect = Pure;
     SourceSpan source_span;
     InstAttrs attrs;
@@ -216,7 +220,7 @@ protected:
     explicit Instruction(Type type) noexcept : type_(type) {}
 
 private:
-    Type type_ = Undef;
+    Type type_;
 };
 
 /**
@@ -242,8 +246,14 @@ class LoadSlotInst final : public Instruction {
 public:
     /**
      * @brief 构造 `load_slot` 指令。
+     *
+     * `load_slot` 的输入操作数是 `SlotId`，表示一个在 IR 构建阶段就已经静态绑定好的
+     * frame 槽位句柄。它读取的是当前 `CodeUnit` 的 slot 空间，而不是按名字查询
+     * workspace。
      */
-    LoadSlotInst() noexcept : Instruction(Instruction::LoadSlot) {}
+    LoadSlotInst() noexcept : Instruction(Instruction::LoadSlot) {
+        effect = Frame;
+    }
 
     ValueId result = InvalidValueId;
     SlotId slot_id = InvalidSlotId;
@@ -257,10 +267,103 @@ public:
     /**
      * @brief 构造 `store_slot` 指令。
      */
-    StoreSlotInst() noexcept : Instruction(Instruction::StoreSlot) {}
+    StoreSlotInst() noexcept : Instruction(Instruction::StoreSlot) {
+        effect = Frame;
+    }
 
     SlotId slot_id = InvalidSlotId;
     Operand value;
+};
+
+/**
+ * @brief `load_workspace` 指令。
+ *
+ * `load_workspace` 与 `load_slot` 的核心区别在于输入不是静态 `SlotId`，而是：
+ * - 一个指向工作区句柄 slot 的 `workspace_handle_slot`
+ * - 一个需要在 workspace 中查询的 `symbol`
+ *
+ * 因此它表达的是“按名字访问 workspace”，而不是“读取已经静态绑定好的 frame 槽位”。
+ */
+class LoadWorkspaceInst final : public Instruction {
+public:
+    /**
+     * @brief 构造 `load_workspace` 指令。
+     */
+    LoadWorkspaceInst() noexcept : Instruction(Instruction::LoadWorkspace) {
+        effect = Env;
+    }
+
+    ValueId result = InvalidValueId;
+    SlotId workspace_handle_slot = InvalidSlotId;
+    InternedString symbol;
+};
+
+/**
+ * @brief `store_workspace` 指令。
+ *
+ * 该指令与 `store_slot` 的区别同样在于写回目标并非静态 slot，而是当前 workspace 中
+ * 名为 `symbol` 的动态名字。
+ */
+class StoreWorkspaceInst final : public Instruction {
+public:
+    /**
+     * @brief 构造 `store_workspace` 指令。
+     */
+    StoreWorkspaceInst() noexcept : Instruction(Instruction::StoreWorkspace) {
+        effect = Env;
+    }
+
+    SlotId workspace_handle_slot = InvalidSlotId;
+    InternedString symbol;
+    Operand value;
+};
+
+/**
+ * @brief 通用圆括号应用指令。
+ *
+ * `apply` 保留源码层 `A(...)` 的歧义：这里暂时只知道发生了一次圆括号应用，但尚未收敛
+ * 成“函数调用”还是“圆括号取值”。
+ */
+class ApplyInst final : public Instruction {
+public:
+    /**
+     * @brief 构造 `apply` 指令。
+     */
+    ApplyInst() noexcept : Instruction(Instruction::Apply) {
+        effect = Opaque;
+    }
+
+    std::vector<ValueId> results;
+    Operand callee_or_base;
+    std::vector<Operand> arguments;
+};
+
+/**
+ * @brief 函数调用指令。
+ *
+ * `call` 只表达已经确认是调用的语义，不再承载 `A(...)` 尚未消歧时的通用圆括号应用。
+ * 其中：
+ * - `Direct` 表示 callee 作为已知可调用名出现，通常由 `InternedString` 承载
+ * - `Indirect` 表示通过值发起调用，例如函数句柄，通常由 `ValueId` 或 `SlotId` 承载
+ */
+class CallInst final : public Instruction {
+public:
+    enum CalleeKind : std::uint8_t {
+        Direct,
+        Indirect,
+    };
+
+    /**
+     * @brief 构造 `call` 指令。
+     */
+    CallInst() noexcept : Instruction(Instruction::Call) {
+        effect = Opaque;
+    }
+
+    std::vector<ValueId> results;
+    CalleeKind callee_kind = Direct;
+    Operand callee;
+    std::vector<Operand> arguments;
 };
 
 /**
@@ -275,19 +378,6 @@ public:
 
     ValueId result = InvalidValueId;
     Operand value;
-};
-
-/**
- * @brief `undef` 指令。
- */
-class UndefInst final : public Instruction {
-public:
-    /**
-     * @brief 构造 `undef` 指令。
-     */
-    UndefInst() noexcept : Instruction(Instruction::Undef) {}
-
-    ValueId result = InvalidValueId;
 };
 
 /**

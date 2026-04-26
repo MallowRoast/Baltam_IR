@@ -1,11 +1,14 @@
 #pragma once
 
-#include "hir/hir_inst.h"
+#include "ir/ir_inst.h"
 
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace baltam {
+
+struct CodeUnit;
 
 /**
  * @brief slot 级语义属性。
@@ -26,7 +29,7 @@ struct SlotAttrs {
         Nargout,          ///< 当前调用点期望输出参数个数。
         Varargin,         ///< 多余输入参数的聚合容器，而不是动态数量的多个 slot。
         Varargout,        ///< 额外输出参数的聚合容器，而不是动态数量的多个 slot。
-        ScriptEnvHandle,  ///< 脚本执行环境句柄，用于间接访问 script workspace。
+        WorkspaceHandle,  ///< 工作区句柄，用于间接访问 script workspace。
     };
 
     /**
@@ -121,12 +124,7 @@ struct SlotTable {
      * @return 找到时返回对应 slot 指针，否则返回 `nullptr`。
      */
     [[nodiscard]] Slot* find_slot(SlotId slot_id) noexcept {
-        for (Slot& slot : slots) {
-            if (slot.slot_id == slot_id) {
-                return &slot;
-            }
-        }
-        return nullptr;
+        return const_cast<Slot*>(std::as_const(*this).find_slot(slot_id));
     }
 
     /**
@@ -151,12 +149,7 @@ struct SlotTable {
      * @return 找到时返回对应 slot 指针，否则返回 `nullptr`。
      */
     [[nodiscard]] Slot* find_hidden_slot(SlotAttrs::HiddenRole role) noexcept {
-        for (Slot& slot : slots) {
-            if (slot.is_hidden() && slot.attrs.hidden_role == role) {
-                return &slot;
-            }
-        }
-        return nullptr;
+        return const_cast<Slot*>(std::as_const(*this).find_hidden_slot(role));
     }
 
     /**
@@ -177,7 +170,7 @@ struct SlotTable {
 };
 
 /**
- * @brief HIR 基本块。
+ * @brief IR 基本块。
  *
  * `BasicBlock` 直接拥有一组指令对象，采用
  * `std::vector<std::unique_ptr<Instruction>>` 保存，以避免继承层次下的对象切片。
@@ -190,6 +183,7 @@ struct SlotTable {
  * - 第一版 verifier 还应进一步保证块内除最后一条外不存在其他终结类指令。
  */
 struct BasicBlock {
+    CodeUnit* parent = nullptr;
     InternedString label;
     SourceSpan source_span;
     std::vector<std::unique_ptr<Instruction>> instructions;
@@ -231,12 +225,7 @@ struct BasicBlock {
      * @return 当前 block 的终结指令指针，或 `nullptr`。
      */
     [[nodiscard]] Instruction* terminator() noexcept {
-        if (instructions.empty()) {
-            return nullptr;
-        }
-
-        Instruction* last = instructions.back().get();
-        return last != nullptr && last->is_terminator() ? last : nullptr;
+        return const_cast<Instruction*>(std::as_const(*this).terminator());
     }
 
     /**

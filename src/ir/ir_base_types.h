@@ -171,7 +171,7 @@ using SlotId = EntityId<SlotIdTag>;
 struct ValueIdTag;
 
 /**
- * @brief HIR 临时值的强类型 ID。
+ * @brief IR 临时值的强类型 ID。
  */
 using ValueId = EntityId<ValueIdTag>;
 
@@ -326,10 +326,8 @@ struct SourceSpan {
             return *this;
         }
 
-        const offset_type merged_begin =
-            begin_offset < other.begin_offset ? begin_offset : other.begin_offset;
-        const offset_type merged_end =
-            end_offset > other.end_offset ? end_offset : other.end_offset;
+        const offset_type merged_begin = std::min(begin_offset, other.begin_offset);
+        const offset_type merged_end = std::max(end_offset, other.end_offset);
         return SourceSpan(merged_begin, merged_end);
     }
 

@@ -1,22 +1,63 @@
-# Matlab HIR 草案
+# Matlab IR 草案
 
 ## 目标
 
-本文给出当前代码实现对应的一版 `HIR`（High-level IR）草案，用于承接 `AST` 与 `bytecode` 之间的语义层表示。
+本文给出当前代码实现对应的一版 `IR`（High-level IR）草案，用于承接 `AST` 与 `bytecode` 之间的语义层表示。
 
 当前默认的总体流水线是：
 
-`AST -> HIR -> bytecode -> interpreter/profile -> typed SSA -> LLVM IR`
+`AST -> IR -> bytecode -> interpreter/profile -> typed SSA -> LLVM IR`
 
-其中 `HIR` 的角色是：
+其中 `IR` 的角色是：
 
 - 保留 Matlab 的高层语义边界
 - 为 `bytecode` lowering 提供直接输入
 - 作为后续热点编译前的语义规范化层
 
+## 总体结构与设计取舍
+
+当前已经收敛下来的主方向是：
+
+- 让 `IR` 承担 Matlab 动态语义的主建模责任
+- 让 `bytecode` 承担稳定执行与 profile
+- 只在热点 region 或热点函数上按需构造 typed SSA
+
+这样分层的核心原因不是“SSA 不好”，而是 Matlab 的完整动态语义并不适合作为全局常驻 SSA 的主干表示。尤其是：
+
+- workspace 访问
+- 动态名字解析
+- 动态函数分发
+- `eval`
+- `clear`
+- `cd`
+- `addpath`
+- `mex`
+
+如果把这些行为强行压进一个长期保留的 SSA 主链路，通常会演化成大量 barrier、失效点和保守副作用建模，最后反过来削弱 SSA 本来最有价值的优化能力。
+
+因此当前更明确的职责分工是：
+
+- `IR`：语义层 IR，显式表达动态环境、名字与调用边界
+- `bytecode`：执行层 IR，负责解释执行、profile 和作为 deopt 回退目标
+- typed SSA：热点优化 IR，只服务于数值热点和相对稳定的 region
+
+更适合进入 typed SSA 的部分通常是：
+
+- 只涉及 `frame` 和有限 `heap` 的数值代码
+- loop body 内稳定的 slot 读写
+- 已知稳定 builtin 路径上的算术和比较
+
+更适合作为 SSA region 边界的部分通常是：
+
+- `eval`
+- `clear`
+- path 修改
+- mex 交互
+- 强动态调用分派
+
 ## 非目标
 
-这版 `HIR` 明确不承担以下职责：
+这版 `IR` 明确不承担以下职责：
 
 - 不要求全局 SSA 形式
 - 不要求承载主要优化框架
@@ -26,7 +67,7 @@
 
 ## 当前范围
 
-第一版 `HIR` 只覆盖最小可落地范围：
+第一版 `IR` 只覆盖最小可落地范围：
 
 - 只考虑 `.m` 文件输入
 - 只考虑 `script` 和 `function`
@@ -41,7 +82,7 @@
 
 ### 1. 语义优先
 
-凡是会影响 Matlab 动态语义的行为，都应在 `HIR` 中显式出现，而不是隐藏在普通变量读写里。尤其是：
+凡是会影响 Matlab 动态语义的行为，都应在 `IR` 中显式出现，而不是隐藏在普通变量读写里。尤其是：
 
 - workspace 访问
 - 动态函数解析
@@ -53,13 +94,13 @@
 
 ### 2. non-SSA，但允许局部值 ID
 
-`HIR` 不是 SSA IR，但允许用 `ValueId` 表达指令结果，方便表达式级数据流。真正的可变程序状态仍然通过 slot 表达。
+`IR` 不是 SSA IR，但允许用 `ValueId` 表达指令结果，方便表达式级数据流。真正的可变程序状态仍然通过 slot 表达。
 
 因此：
 
 - block 内可以有短生命周期值
 - block 间的可变状态必须落入 slot
-- `HIR` 本质上仍然是 non-SSA
+- `IR` 本质上仍然是 non-SSA
 
 ### 3. 语义对象与执行对象分层
 
@@ -73,11 +114,11 @@
 
 ### 4. 便于 lowering
 
-`HIR` 应容易 lowering 到 bytecode，因此不应过度引入只对优化器友好的复杂结构。
+`IR` 应容易 lowering 到 bytecode，因此不应过度引入只对优化器友好的复杂结构。
 
 ### 5. 便于后续 region 提取
 
-虽然 `HIR` 不是主优化 IR，但它应清楚表达哪些区域适合进入后续 typed SSA，哪些区域必须留在解释执行语义里。
+虽然 `IR` 不是主优化 IR，但它应清楚表达哪些区域适合进入后续 typed SSA，哪些区域必须留在解释执行语义里。
 
 ## 当前对象模型
 
@@ -106,12 +147,14 @@ SlotTable
   slots : Slot[]
 
 BasicBlock
+  parent : CodeUnit*
   label
   instructions : Instruction*
   predecessors : BasicBlock*
   successors   : BasicBlock*
 
 Instruction (base)
+  parent
   effect
   source_span
   attrs
@@ -122,6 +165,7 @@ Instruction (base)
 - `MFileUnit` 直接拥有全部 `CodeUnit`
 - `CodeUnit` 直接拥有全部 `BasicBlock`
 - `BasicBlock` 直接拥有全部 `Instruction`
+- `Instruction` 通过 `parent` 反向引用所属 `BasicBlock`
 - `FunctionUnit` 的函数接口只记录为 `SlotId` 列表，不再重复保存一份参数/返回值描述结构
 
 ## 文件与单元
@@ -150,7 +194,7 @@ Instruction (base)
 保留派生类的原因是：
 
 - `FunctionUnit` 需要持有 `param_slots` / `return_slots`
-- `ScriptUnit` 需要表达脚本环境句柄相关约束
+- `ScriptUnit` 需要表达工作区句柄相关约束
 
 ## 名字与存储模型
 
@@ -163,7 +207,7 @@ Matlab 的关键难点之一是“名字”不只是局部变量名，还可能�
 - path 上解析到的函数
 - mex 导出的函数
 
-因此第一版 `HIR` 必须避免把所有名字访问都压成 `load_slot/store_slot`。
+因此第一版 `IR` 必须避免把所有名字访问都压成 `load_slot/store_slot`。
 
 ### 静态可绑定名字
 
@@ -207,7 +251,7 @@ Matlab 的关键难点之一是“名字”不只是局部变量名，还可能�
 
 ## 控制流模型
 
-`HIR` 使用普通 CFG，而不是结构化语句树。
+`IR` 使用普通 CFG，而不是结构化语句树。
 
 当前实现中：
 
@@ -229,8 +273,11 @@ Matlab 的关键难点之一是“名字”不只是局部变量名，还可能�
 - `ConstInst`
 - `LoadSlotInst`
 - `StoreSlotInst`
+- `LoadWorkspaceInst`
+- `StoreWorkspaceInst`
+- `ApplyInst`
+- `CallInst`
 - `CopyInst`
-- `UndefInst`
 - `UnaryInst`
 - `BinaryInst`
 - `GotoInst`
@@ -262,32 +309,15 @@ Matlab 的关键难点之一是“名字”不只是局部变量名，还可能�
 
 这些内容如果在旧文档或旧讨论中出现，应以当前代码结构为准。
 
-## HIR 与 bytecode 的关系
+## IR 与 bytecode 的关系
 
-`HIR` 到 `bytecode` 的 lowering 应遵循以下原则：
+`IR` 到 `bytecode` 的 lowering 应遵循以下原则：
 
 - slot 直接映射到 frame layout
 - block 线性化为 bytecode 基本块和跳转
 - 动态语义保持显式，不能在 lowering 时偷偷静态化
 
-## HIR 与 typed SSA 的边界
-
-更适合进入 typed SSA 的部分：
-
-- 只涉及 `frame` 和有限 `heap` 的数值代码
-- loop body 内稳定的 slot 读写
-- 已知稳定 builtin 路径上的算术和比较
-
-更适合作为 region 边界的部分：
-
-- `eval`
-- `clear`
-- path 修改
-- mex 交互
-- 强动态调用分派
-
 ## 相关文档
 
-- [hir_schema.md](/home/zj/Desktop/Baltam_IR/doc/hir_schema.md)
-- [ir_design_evolution.md](/home/zj/Desktop/Baltam_IR/doc/ir_design_evolution.md)
+- [ir_schema.md](/home/zj/Desktop/Baltam_IR/doc/ir_schema.md)
 - [execution_strategy.md](/home/zj/Desktop/Baltam_IR/doc/execution_strategy.md)

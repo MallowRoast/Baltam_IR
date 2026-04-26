@@ -9,7 +9,7 @@
 ```text
 AST
  ↓
-HIR（non-SSA，语义 IR）
+IR（non-SSA，语义 IR）
  ↓
 Bytecode（解释执行 + profiling）
  ↓
@@ -342,6 +342,5 @@ Tier 2 的代码比 Tier 1 更投机，因此需要更明确的依赖跟踪。�
 
 ## 相关文档
 
-- [ir_design_evolution.md](/home/zj/Desktop/Baltam_IR/doc/ir_design_evolution.md)
-- [hir_draft.md](/home/zj/Desktop/Baltam_IR/doc/hir_draft.md)
-- [hir_schema.md](/home/zj/Desktop/Baltam_IR/doc/hir_schema.md)
+- [ir_draft.md](/home/zj/Desktop/Baltam_IR/doc/ir_draft.md)
+- [ir_schema.md](/home/zj/Desktop/Baltam_IR/doc/ir_schema.md)
