@@ -8,12 +8,19 @@
 
 其中，当前仓库主要关注 `IR` 这一层本身，以及围绕它的构建、lowering 和打印能力。
 
+如果只想快速建立当前文档结构的全局印象，可以先按这个顺序看：
+
+1. [README](./README.md)
+2. [IR Lowering Design](./doc/ir_lowering_design.md)
+3. [计划中与思考中的问题](./doc/planning_notes.md)
+4. [后续需要学习与确认的问题](./doc/learning_notes.md)
+
 ## 仓库想做什么
 
 这个仓库希望逐步搭出一条面向动态 `M` 语言的编译 / 执行前端链路，核心目标包括：
 
 - 设计一套适合 `M` 语言语义的 high-level IR
-- 明确 `IR`、bytecode、runtime、typed SSA` 之间的职责边界
+- 明确 `IR`、bytecode、runtime、`typed SSA` 之间的职责边界
 - 把脚本、函数、名字绑定、调用分派等高层语义先稳定地落到 `IR`
 - 为后续解释执行、profile、热点优化和 `LLVM IR` lowering 提供基础
 
@@ -74,12 +81,12 @@
 
 接下来更重要的工作主要在这几个方向：
 
-- 支持脚本 / 函数中的 `local` 函数
 - 继续补齐 `IR` 的表达能力，例如更复杂的调用、成员访问和索引语义
-- 逐步完善名字解析和调用分派规则
-- 梳理 `eval`、`clear`、路径变化等对环境稳定性的影响
-- 为 bytecode lowering 和 runtime 设计补足语义接口
-- 为后续 profile、guard、热点优化和 typed SSA 做准备
+- 对 script 逐步做名字稳定区间分析，把部分 `load_env` / `apply` 收敛成 `load_slot` / `call`
+- 在 function 中继续推进 `call_local`、函数内联和纯局部 slot 的寄存器化 / SSA 提升
+- 梳理 `eval`、`evalin`、`assignin`、`clear`、路径变化等对环境稳定性的影响
+- 为 bytecode lowering、runtime effect summary、world/workspace epoch 设计补足语义接口
+- 为后续 profile、guard、热点优化和 `typed SSA` 做准备
 
 从设计角度看，当前仓库仍然处在“先把语义边界和对象模型打稳”的阶段，而不是“全面铺开优化”的阶段。
 
@@ -92,6 +99,8 @@
 - [IR Builder Design](./doc/ir_builder_design.md)
 - [IR Lowering Design](./doc/ir_lowering_design.md)
 - [Local 函数支持方案](./doc/local_function_support_design.md)
+- [ValueId 类型事实与函数分派设计](./doc/value_type_dispatch_design.md)
 - [计划中与思考中的问题](./doc/planning_notes.md)
+- [后续需要学习与确认的问题](./doc/learning_notes.md)
 - [Execution Strategy](./doc/execution_strategy.md)
 - [更新日志](./doc/update_notes.md)
