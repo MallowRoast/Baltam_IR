@@ -2,6 +2,7 @@
 
 #include "ir/ir_lowering.h"
 #include "ir/ir_print.h"
+#include "ir/ir_verify.h"
 
 #include <sstream>
 #include <stdexcept>
@@ -49,6 +50,16 @@ inline void require_no_error_diagnostics(const IRBuildResult& result) {
 inline void require_ir_is_complete(const IRBuildResult& result) {
     require(result.mfile != nullptr, "结果文件单元不能为空");
     require_no_error_diagnostics(result);
+
+    const IRVerifyResult verify_result = verify_ir(*result.mfile);
+    if (!verify_result.ok()) {
+        for (const IRVerifyDiagnostic& diagnostic : verify_result.diagnostics) {
+            if (diagnostic.severity == IRVerifyDiagnostic::Error) {
+                fail("IR verifier 不应产生 Error 诊断: " + diagnostic.message);
+            }
+        }
+    }
+
     require(result.mfile->entry_unit != nullptr, "入口代码单元不能为空");
     require(!result.mfile->code_units.empty(), "至少应生成一个代码单元");
 

@@ -72,7 +72,7 @@ std::vector<std::shared_ptr<pcdata>>
 - 在 lowering 前先识别入口单元和文件内 local `FunctionUnit`
 - 为函数从 `mFileFunc` AST 预声明参数 slot 和返回值 slot
 - 为每个 unit 创建 `entry` 基本块
-- lower `test0 / test0_1 / test0_2 / test0_3` 所需的最小语句/表达式子集：
+- lower `test0 / test0_1 / test1 / test1_1` 所需的最小语句/表达式子集：
   - 简单赋值
   - 数值字面量
   - 名字读取
@@ -141,17 +141,17 @@ block 的创建与 `entry` 指定现在由 `CodeUnit` 自身完成，builder 只
 
 - `test/smoke_test/test0_smoke.cpp`
 - `test/smoke_test/test0_1_smoke.cpp`
-- `test/smoke_test/test0_2_smoke.cpp`
-- `test/smoke_test/test0_3_smoke.cpp`
+- `test/smoke_test/test1_smoke.cpp`
+- `test/smoke_test/test1_1_smoke.cpp`
 
 它会：
 
-- parse `test/m/test0/test0.m` / `test/m/test0/test0_1.m` / `test/m/test0/test0_2.m` /
-  `test/m/test0/test0_3.m`
+- parse `test/m/test0/test0.m` / `test/m/test0/test0_1.m` / `test/m/test1/test1.m` /
+  `test/m/test1/test1_1.m`
 - build 成 `IR` 并检查结构完整、没有 `Error` 诊断
 - 校验各自的核心侧重点是否 lower 正确：
-  - `test0_2`：脚本里即使定义了 local `sin`，主体中的 `sin(a)` 仍保留为 `apply`
-  - `test0_3`：函数里 `sin(a)` / `-a` 可命中 local `sin` / `uminus`，而 `plus = 1`
+  - `test1`：脚本里即使定义了 local `sin`，主体中的 `sin(a)` 仍保留为 `apply`
+  - `test1_1`：函数里 `sin(a)` / `-a` 可命中 local `sin` / `uminus`，而 `plus = 1`
     和 `cos = 1` 又会分别遮蔽 local `plus` / `cos`
 - 调用 `ir_print` 打印文本 IR
 - 校验关键打印结果与源码行号注释

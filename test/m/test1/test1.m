@@ -1,4 +1,4 @@
-% TEST0_2 在 test0 的脚本骨架上增加 local 函数 sin。
+% TEST1 在 test0 的脚本骨架上增加 local 函数 sin。
 %
 % 这个用例专门覆盖“脚本中的 local 函数”场景。虽然文件尾部定义了
 % `sin(x) = x + 1`，但脚本主体里的 `sin(a)` 目前仍应保守保持为 `apply`，

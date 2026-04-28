@@ -44,12 +44,12 @@ std::size_t count_local_calls_to(const CodeUnit& unit, std::string_view callee_n
 
 void verify_complete_ir(const IRBuildResult& result) {
     smoke_test::require_ir_is_complete(result);
-    smoke_test::require(result.mfile->is_function_file(), "test0_3 应构造成函数文件");
-    smoke_test::require(result.mfile->code_units.size() == 5, "test0_3 应生成主函数和四个 local 函数单元");
-    smoke_test::require(result.mfile->file_stem() == "test0_3", "文件 stem 应为 test0_3");
+    smoke_test::require(result.mfile->is_function_file(), "test1_1 应构造成函数文件");
+    smoke_test::require(result.mfile->code_units.size() == 5, "test1_1 应生成主函数和四个 local 函数单元");
+    smoke_test::require(result.mfile->file_stem() == "test1_1", "文件 stem 应为 test1_1");
     smoke_test::require(
-        result.mfile->entry_unit != nullptr && result.mfile->entry_unit->name == "test0_3",
-        "入口应为主函数 test0_3");
+        result.mfile->entry_unit != nullptr && result.mfile->entry_unit->name == "test1_1",
+        "入口应为主函数 test1_1");
 }
 
 void verify_core_focus(const IRBuildResult& result) {
@@ -96,11 +96,11 @@ void verify_core_focus(const IRBuildResult& result) {
 
 void verify_printed_ir(const std::string& printed_ir) {
     smoke_test::require(
-        printed_ir.find("; mfile \"" TEST0_3_MFILE_PATH "\"") != std::string::npos,
-        "应打印 test0_3 文件头");
+        printed_ir.find("; mfile \"" TEST1_1_MFILE_PATH "\"") != std::string::npos,
+        "应打印 test1_1 文件头");
     smoke_test::require(
-        printed_ir.find("define @test0_3() -> (%slot0 @c) {") != std::string::npos,
-        "应打印 test0_3 主函数头");
+        printed_ir.find("define @test1_1() -> (%slot0 @c) {") != std::string::npos,
+        "应打印 test1_1 主函数头");
     smoke_test::require(
         printed_ir.find("call_local @sin(") != std::string::npos,
         "主函数中的 sin(a) 应打印成 local call");
@@ -136,13 +136,13 @@ void verify_printed_ir(const std::string& printed_ir) {
 int main() {
     try {
         const baltam::smoke_test::SmokeArtifacts artifacts =
-            baltam::smoke_test::build_ir(TEST0_3_MFILE_PATH);
+            baltam::smoke_test::build_ir(TEST1_1_MFILE_PATH);
         baltam::verify_complete_ir(artifacts.result);
         baltam::verify_core_focus(artifacts.result);
         baltam::verify_printed_ir(artifacts.printed_ir);
         std::cout << artifacts.printed_ir << '\n';
     } catch (const std::exception& ex) {
-        std::cerr << "test0_3_smoke 失败: " << ex.what() << '\n';
+        std::cerr << "test1_1_smoke 失败: " << ex.what() << '\n';
         return 1;
     }
 

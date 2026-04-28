@@ -70,12 +70,12 @@
 
 - [test0.m](/home/zj/Desktop/Baltam_IR/test/m/test0/test0.m)
 - [test0_1.m](/home/zj/Desktop/Baltam_IR/test/m/test0/test0_1.m)
-- [test0_2.m](/home/zj/Desktop/Baltam_IR/test/m/test0/test0_2.m)
-- [test0_3.m](/home/zj/Desktop/Baltam_IR/test/m/test0/test0_3.m)
+- [test1.m](/home/zj/Desktop/Baltam_IR/test/m/test1/test1.m)
+- [test1_1.m](/home/zj/Desktop/Baltam_IR/test/m/test1/test1_1.m)
 - [test0_smoke.cpp](/home/zj/Desktop/Baltam_IR/test/smoke_test/test0_smoke.cpp)
 - [test0_1_smoke.cpp](/home/zj/Desktop/Baltam_IR/test/smoke_test/test0_1_smoke.cpp)
-- [test0_2_smoke.cpp](/home/zj/Desktop/Baltam_IR/test/smoke_test/test0_2_smoke.cpp)
-- [test0_3_smoke.cpp](/home/zj/Desktop/Baltam_IR/test/smoke_test/test0_3_smoke.cpp)
+- [test1_smoke.cpp](/home/zj/Desktop/Baltam_IR/test/smoke_test/test1_smoke.cpp)
+- [test1_1_smoke.cpp](/home/zj/Desktop/Baltam_IR/test/smoke_test/test1_1_smoke.cpp)
 
 ## 后续要做的
 

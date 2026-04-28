@@ -8,6 +8,8 @@ add_library(BALTAM_IR STATIC
     src/ir/ir_builder.cpp
     src/ir/ir_lowering.cpp
     src/ir/ir_print.cpp
+    src/ir/ir_type.cpp
+    src/ir/ir_verify.cpp
 )
 
 target_include_directories(BALTAM_IR

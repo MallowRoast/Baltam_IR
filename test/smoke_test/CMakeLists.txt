@@ -47,15 +47,29 @@ add_ir_smoke_test(
 )
 
 add_ir_smoke_test(
-    test0_2_smoke
-    test0_2_smoke.cpp
-    TEST0_2_MFILE_PATH
-    test/m/test0/test0_2.m
+    test1_smoke
+    test1_smoke.cpp
+    TEST1_MFILE_PATH
+    test/m/test1/test1.m
 )
 
 add_ir_smoke_test(
-    test0_3_smoke
-    test0_3_smoke.cpp
-    TEST0_3_MFILE_PATH
-    test/m/test0/test0_3.m
+    test1_1_smoke
+    test1_1_smoke.cpp
+    TEST1_1_MFILE_PATH
+    test/m/test1/test1_1.m
+)
+
+add_executable(ir_type_smoke
+    ir_type_smoke.cpp
+)
+
+target_link_libraries(ir_type_smoke
+    PRIVATE
+        BALTAM_IR
+)
+
+add_test(
+    NAME ir_type_smoke
+    COMMAND ir_type_smoke
 )

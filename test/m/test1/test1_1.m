@@ -1,5 +1,5 @@
-function c = test0_3()
-% TEST0_3 在 test0_1 的函数骨架上增加 local 函数 sin / cos / plus / uminus。
+function c = test1_1()
+% TEST1_1 在 test0_1 的函数骨架上增加 local 函数 sin / cos / plus / uminus。
 %
 % 这个用例专门覆盖“函数中的 local 函数分派”和“同名局部变量遮蔽”。
 %

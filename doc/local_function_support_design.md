@@ -2,8 +2,8 @@
 
 本文记录当前 `IR` 体系下，对 `local` 函数支持的最小设计方案。目标不是一次性覆盖全部 Matlab 函数解析规则，而是先支持当前测试样例里的这两条语义：
 
-1. `test0_2` 脚本中对 `sin` 的调用仍然保留为 `apply`
-2. `test0_3` 函数中对 `sin` 的调用可以直接分派到当前文件内的 `local` 函数
+1. `test1` 脚本中对 `sin` 的调用仍然保留为 `apply`
+2. `test1_1` 函数中对 `sin` 的调用可以直接分派到当前文件内的 `local` 函数
 
 ## 1. 当前目标与边界
 
@@ -23,9 +23,9 @@
 
 ## 2. 样例语义
 
-### 2.1 `test0_2`
+### 2.1 `test1`
 
-`test0_2` 是脚本文件，末尾有一个 `local` 函数 `sin(x) = x + 1`。
+`test1` 是脚本文件，末尾有一个 `local` 函数 `sin(x) = x + 1`。
 
 虽然 parser 已经能告诉我们文件里存在这个 local 函数，但当前脚本主体中的：
 
@@ -37,9 +37,9 @@ b = sin(a);
 
 也就是说，脚本里的 local 函数定义目前只做“文件结构记录”，不触发 `apply -> call` 收敛。
 
-### 2.2 `test0_3`
+### 2.2 `test1_1`
 
-`test0_3` 是函数文件，文件内同时存在主函数 `test0_3` 和 local 函数 `sin`。
+`test1_1` 是函数文件，文件内同时存在主函数 `test1_1` 和 local 函数 `sin`。
 
 在主函数中：
 
@@ -62,11 +62,11 @@ b = sin(a);
 
 从现有样例看：
 
-- `test0_2.m` 会返回两个 `pcdata`
+- `test1.m` 会返回两个 `pcdata`
   - 一个是脚本主体
   - 一个是 local 函数 `sin`
-- `test0_3.m` 也会返回两个 `pcdata`
-  - 一个是主函数 `test0_3`
+- `test1_1.m` 也会返回两个 `pcdata`
+  - 一个是主函数 `test1_1`
   - 一个是 local 函数 `sin`
 
 当前实现直接依赖 parser 给出的顺序约定：
@@ -83,8 +83,8 @@ b = sin(a);
 
 例如：
 
-- `test0_2.m` 中脚本单元是入口单元
-- `test0_3.m` 中 `test0_3` 与文件名一致，因此它是主函数
+- `test1.m` 中脚本单元是入口单元
+- `test1_1.m` 中 `test1_1` 与文件名一致，因此它是主函数
 - 同文件内的 `sin` 视为 local 函数
 
 ## 4. `MFileUnit` 中记录 local 函数
@@ -155,8 +155,8 @@ FunctionUnit* local_target = nullptr;
 
 这正好覆盖了当前的两条样例语义：
 
-- `test0_2`：脚本，所以仍然是 `apply`
-- `test0_3`：函数，且命中 local `sin`，所以收敛成 `Local call`
+- `test1`：脚本，所以仍然是 `apply`
+- `test1_1`：函数，且命中 local `sin`，所以收敛成 `Local call`
 
 ## 7. builder 状态管理
 
@@ -202,7 +202,7 @@ FunctionUnit* local_target = nullptr;
 3. 修改 `IRLowerer`，按“脚本或函数名等于文件名”的规则识别主单元和 local 函数
 4. 扩展 `CallInst`，支持 `Local` callee kind
 5. 更新 `IRPrinter`
-6. 为 `test0_2` / `test0_3` 增加 smoke test
+6. 为 `test1` / `test1_1` 增加 smoke test
 
 ## 10. 当前阶段的取舍
 
