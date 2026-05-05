@@ -41,6 +41,11 @@ struct IRPrintOptions {
     bool print_slot_table = true;
 
     /**
+     * @brief 是否在结果值指令后打印 `ValueTable` 中记录的类型事实。
+     */
+    bool print_type_facts = true;
+
+    /**
      * @brief 是否打印文件级头注释。
      */
     bool print_file_header = true;

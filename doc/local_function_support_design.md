@@ -37,7 +37,30 @@ b = sin(a);
 
 也就是说，脚本里的 local 函数定义目前只做“文件结构记录”，不触发 `apply -> call` 收敛。
 
-### 2.2 `test1_1`
+### 2.2 脚本变量不能与 local 函数同名
+
+MATLAB 不支持脚本主体声明与同文件 local 函数同名的变量。例如：
+
+```matlab
+f = 1;
+b = f(a);
+
+function y = f(x)
+y = x + 1;
+end
+```
+
+用 MATLAB CLI 运行这类脚本会报错：
+
+```text
+Declaring a variable with the same name as the local function "f" is not supported in scripts.
+```
+
+因此当前测试集中不保留“脚本 workspace 变量遮蔽同名 local 函数”的样例。脚本里的
+`A(...)` 仍然保守 lower 为 `apply`，但这条规则不依赖构造一个 MATLAB 本身拒绝的
+同名 local 函数用例。
+
+### 2.3 `test1_1`
 
 `test1_1` 是函数文件，文件内同时存在主函数 `test1_1` 和 local 函数 `sin`。
 

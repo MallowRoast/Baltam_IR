@@ -73,3 +73,17 @@ add_test(
     NAME ir_type_smoke
     COMMAND ir_type_smoke
 )
+
+add_executable(value_table_smoke
+    value_table_smoke.cpp
+)
+
+target_link_libraries(value_table_smoke
+    PRIVATE
+        BALTAM_IR
+)
+
+add_test(
+    NAME value_table_smoke
+    COMMAND value_table_smoke
+)

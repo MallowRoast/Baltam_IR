@@ -63,7 +63,7 @@
 
 例如脚本中的 `sin(a)`：
 
-- 即使 `a` 已知是 `float64`
+- 即使 `a` 已知是 `double`
 - 也不能只凭参数类型断定 `sin` 一定是 builtin
 
 因为它仍可能受 workspace 遮蔽、local 函数、`private`、路径变化等因素影响。
@@ -72,108 +72,59 @@
 
 第一版只解决“分派导向”的最小问题，不追求一次覆盖完整 Matlab 类型系统。
 
-当前建议范围：
+当前实现边界：
 
-- 先只对 `FunctionUnit` 做正式类型数据流
-- `ScriptUnit` 中的 `LoadWorkspaceInst` 结果默认保守为 `Any`
-- 先覆盖常量、slot 数据流、基础一元/二元算子、少量 builtin 摘要
+- IR builder 只写入“构建时能明确知道”的类型事实
+- `ConstInst` 写入精确常量类型事实；`CopyInst` 复制输入值的类型事实
+- `LoadSlotInst`、`LoadWorkspaceInst`、`UnaryInst`、`BinaryInst`、`ApplyInst`、`CallInst`
+  在构建阶段默认保持 `unknown`
+- `Any` 不作为构建阶段的默认值；它表示后续类型分析已经运行，但只能给出全集上界
+- 先在 `FunctionUnit` 中实现正式类型数据流，再逐步扩大到脚本稳定区间
 - 先不处理 `global`、`persistent`、closure 捕获、`eval` 引入的新名字
 
 如果后续脚本名字稳定区间分析已经把某些名字收敛成 slot，再把脚本里的对应区段逐步纳入同一套分析。
 
 ## 4. 类型事实模型
 
-### 4.1 `DispatchTag`
+### 4.1 类型集合表示
 
-第一版不需要一上来就构造很复杂的类型格，先保留一组足够服务调用分派的粗粒度标签即可：
+第一版不再单独维护 `DispatchTag`。类型事实直接复用现有 `TypeSet`：
 
-```cpp
-enum DispatchTag : std::uint16_t {
-    Any,
+- `TypeSet` 底层是 `std::bitset`
+- 单 bit 表示单一叶子类型
+- 多 bit 表示 union type
+- `TypeSet::any()` 在 `is_unknown == false` 时表示已分析但只能给出全集上界
+- `TypeSet::bottom()` 表示空集合
 
-    Logical,
-    Int64,
-    UInt64,
-    Float64,
-    Complex128,
-
-    CharArray,
-    StringScalar,
-    CellArray,
-    StructArray,
-
-    FunctionHandle,
-    WorkspaceHandle,
-    UserObject,
-};
-```
-
-这些标签的目标不是完整复刻运行时对象模型，而是：
-
-- 快速区分数值 builtin 路径
-- 区分对象方法分派与普通 builtin 分派
-- 区分函数句柄调用与名字调用
-
-### 4.2 `TypeCertainty`
-
-仅有“类型标签”还不够，还需要知道这个结论有多可靠：
-
-```cpp
-enum TypeCertainty : std::uint8_t {
-    Unknown,
-    UpperBound,
-    Exact,
-    GuardedExact,
-};
-```
-
-建议语义如下：
-
-- `Unknown`
-  目前没有形成可用判断
-- `UpperBound`
-  只知道一个保守上界，例如“某值一定是数值类中的某一类”
-- `Exact`
-  静态上已经能确定精确类型
-- `GuardedExact`
-  只有在某组 runtime guard 成立时才可视为精确类型
-
-### 4.3 `TypeFact`
+### 4.2 `TypeFact`
 
 第一版更合适的结构大致如下：
 
 ```cpp
 struct TypeFact {
-    DispatchTag tag = Any;
-    TypeCertainty certainty = Unknown;
-
-    InternedString class_name;
-
-    bool known_scalar = false;
+    bool is_unknown = true;
     bool is_scalar = false;
-
-    bool known_complex = false;
-    bool is_complex = false;
-
-    bool has_shape = false;
-    std::vector<std::int64_t> dims;
+    TypeSet types = TypeSet::any();
 };
 ```
 
 字段含义：
 
-- `tag`
-  供调用分派快速使用的主分类
-- `certainty`
-  说明该事实是精确结论还是仅为保守上界
-- `class_name`
-  主要给 `UserObject` 或特殊 handle 类值使用
-- `known_scalar/is_scalar`
-  区分标量 fast path 与一般数组路径
-- `known_complex/is_complex`
-  区分实数与复数路径
-- `has_shape/dims`
-  为后续更细的 builtin 摘要或 `typed SSA` 预留
+- `is_unknown`
+  当前还没有形成可用类型结论。此时 `types` 和 `is_scalar` 都不能作为优化依据
+- `is_scalar`
+  当前是否可视为标量。只有在 `is_unknown == false` 时才有意义
+- `types`
+  当前可能类型集合。只有在 `is_unknown == false` 时才有意义；实现上直接复用现有
+  `TypeSet`，它本身就是 `std::bitset`-backed 表示
+
+需要特别区分：
+
+- `unknown` 表示还没有可用事实，通常是 IR 构建后的默认状态
+- `Any` 表示已经完成某一轮分析，但分析只能给出“可能是任意类型”的保守上界
+
+因此，动态调用结果在构建阶段不应直接标成 `Any`。只有类型推导或调用解析 pass 明确运行后，
+才应把无法收窄的结果设为 `Any`。
 
 ## 5. IR 中的承载位置
 
@@ -186,13 +137,14 @@ struct TypeFact {
 
 同一个 `Slot` 在不同程序点可以存放不同类型的值，因此 `Slot` 本身不应被视为“当前值类型”的唯一载体。真正适合挂类型事实的是 `ValueId`。
 
-### 5.2 建议增加 `ValueInfo / ValueTable`
+### 5.2 `ValueInfo / ValueTable`
 
-当前 `CodeUnit` 已经拥有 `SlotTable`。对称地，可以再增加一张 `ValueTable`：
+当前 `CodeUnit` 已经拥有 `SlotTable`。对称地，`CodeUnit` 也持有一张 `ValueTable`：
 
 ```cpp
 struct ValueInfo {
     ValueId value_id = InvalidValueId;
+    std::size_t result_index = 0;
     TypeFact type_fact;
     Instruction* def = nullptr;
 };
@@ -200,12 +152,13 @@ struct ValueInfo {
 struct ValueTable {
     std::vector<ValueInfo> values;
 
+    bool empty() const noexcept;
     ValueInfo* find(ValueId value_id) noexcept;
     const ValueInfo* find(ValueId value_id) const noexcept;
 };
 ```
 
-然后在 `CodeUnit` 上增加：
+`CodeUnit` 上对应字段为：
 
 ```cpp
 ValueTable value_table;
@@ -216,6 +169,77 @@ ValueTable value_table;
 - 不破坏当前 `Instruction` 继承层次
 - 多结果调用仍可按 `results : ValueId[]` 逐项记录类型事实
 - printer、verifier、类型分析和后续 `typed SSA lowering` 都能共享这张表
+
+更具体的约束建议如下：
+
+- `ValueTable` 的作用域是单个 `CodeUnit`
+- `values[index]` 对应 `ValueId(index)`，也就是按当前 builder 的 unit-local 稠密 `ValueId`
+  直接索引
+- `ValueInfo::def` 是非拥有指针，指向定义该值的那条 `Instruction`
+- `ValueInfo::result_index` 用于区分多结果指令中的第几个结果；单结果指令固定为 `0`
+- `TypeFact` 是 side data，不要求在 builder 阶段立即填满；允许先保留默认值，后续由类型分析回填
+
+第一版推荐的 helper 语义：
+
+```cpp
+bool ValueTable::empty() const noexcept {
+    return values.empty();
+}
+
+ValueInfo* ValueTable::find(ValueId value_id) noexcept {
+    if (!value_id.is_valid() || value_id.value() >= values.size()) {
+        return nullptr;
+    }
+    return &values[value_id.value()];
+}
+```
+
+对应的 `const` 版本保持一致。
+
+### 5.2.1 builder 写入时机
+
+为了让 `ValueTable` 从 IR 构建阶段就保持自洽，当前按两步写入：
+
+1. `create_value()`
+
+- 分配新的 `ValueId`
+- 同步向 `current_unit->value_table.values` 追加一个占位 `ValueInfo`
+- 该占位项此时只填 `value_id`，`def == nullptr`，`result_index == 0`
+
+2. `append_instruction()`
+
+- 扫描这条指令产出的 `result` 或 `results`
+- 回填对应 `ValueInfo.def`
+- 多结果指令额外回填 `result_index`
+- 只有当 builder 能直接确定事实时才写入 `TypeFact`，否则保留默认 `unknown`
+
+这样有两个好处：
+
+- `ValueId` 分配后立刻能在 `ValueTable` 中查到，便于后续分析阶段直接按 id 访问
+- verifier 可以独立检查“值已分配”与“值已被某条指令定义”这两个条件
+
+### 5.2.2 verifier 约束
+
+引入 `ValueTable` 后，建议 verifier 增加以下检查：
+
+- `ValueTable` 中每个 `ValueInfo.value_id` 都必须有效，且与其下标一致
+- 若启用当前 builder 的稠密 id 假设，则 `values.size()` 应等于该 unit 中分配过的最大 `ValueId + 1`
+- 每个被某条指令产出的 `ValueId` 都必须在 `ValueTable` 中存在对应项
+- 每个 `ValueInfo.def` 若非空，必须属于当前 `CodeUnit`
+- `ValueInfo.def` 必须真的产出对应的 `ValueId`
+- 同一个 `ValueId` 只能由一条指令定义，这一约束仍以现有 verifier 的 `define_value` 规则为准，
+  但应再与 `ValueTable.def` 交叉校验
+
+### 5.2.3 第一版不做什么
+
+第一版建议明确不把以下内容塞进 `ValueTable`：
+
+- use-list
+- reaching-def 链
+- 跨 unit 的全局值编号
+- 调用解析事实
+
+这些信息要么维护成本高，要么不属于“`ValueId -> 元信息`”的核心职责。
 
 ### 5.3 `Slot` 只保留可选的类型约束
 
@@ -263,31 +287,42 @@ struct ResolutionFact {
 - 名字有没有稳定到只剩一小批候选目标
 - 参数类型有没有进一步把候选批次缩到单一目标
 
-## 7. 第一版类型事实如何产生
+## 7. 类型事实如何产生
 
-### 7.1 常量
+### 7.1 构建期种子事实
 
-- `ConstInst`
-  直接给出 `Exact` 类型事实
+IR builder 只写入不依赖数据流、不依赖名字解析、也不依赖 Matlab 动态分派的事实。
+
+- `ConstInst` 直接给出精确类型事实
+- `CopyInst` 复制输入值的 `TypeFact`
+- 其他结果值默认保持 `unknown`
 
 例如：
 
-- `Int64Constant -> Int64`
-- `Float64Constant -> Float64`
-- `StringLiteralConstant -> StringScalar`
+- `Int64Constant -> int64`
+- `Float64Constant -> double`
+- `StringLiteralConstant -> string`
 - `EmptyDoubleMatrixConstant`
-  当前可先记为 `Float64 + 非标量`，或者保守记为 `Any`
+  如果当前实现能明确表达空 double 矩阵，则可记录为 `double` 且非标量；否则保留 `unknown`
 
-### 7.2 复制与简单表达式
+Matlab 源码中的普通数字字面量当前按 double 语义降低；例如 `.m` 文件里的 `1` 会生成
+`Float64Constant`，用户可见 IR 打印为 `double`。
 
-- `CopyInst`
-  复制输入值的 `TypeFact`
-- `UnaryInst / BinaryInst`
-  通过 transfer function 推导结果类型
+### 7.2 后续类型推导 pass
 
-第一版完全可以只支持最小数值规则，例如：
+构建结束后，再由单独的类型推导 pass 逐步填充更多事实：
 
-- `float64 + float64 -> float64`
+- `LoadSlotInst` 可通过 slot reaching-def / 前向数据流获得类型事实
+- `LoadWorkspaceInst` 只有在脚本名字稳定区间分析能证明来源时才给出更强事实
+- `UnaryInst / BinaryInst` 只有在静态分派或 builtin 语义可证明时才给出具体结果类型
+- `ApplyInst / CallInst` 只有在名字解析和实参类型足够收敛时才给出具体结果类型
+
+若某个 pass 已经分析过但无法继续收窄，才把结果设为 `Any`。如果 pass 尚未覆盖该值，
+仍应保持 `unknown`。
+
+第一版类型推导完全可以只支持最小数值规则，例如：
+
+- `double + double -> double`
 - `int64 + int64 -> int64` 或保守提升到更宽上界
 - 比较运算结果 -> `Logical`
 
@@ -303,17 +338,20 @@ struct ResolutionFact {
 ### 7.4 workspace 读取
 
 - `LoadWorkspaceInst`
-  第一版默认给 `Any`
+  构建阶段默认保持 `unknown`
 
 除非后续单独做了脚本名字稳定区间分析，否则不应在这一层擅自给出更强类型结论。
+如果类型推导 pass 已经确认无法稳定该 workspace 读取，才可把它设为 `Any`。
 
 ### 7.5 调用结果
 
 - `ApplyInst`
-  在完成名字消歧前，结果默认保守为 `Any`
+  构建阶段默认保持 `unknown`
 - `CallInst`
-  若命中已知 builtin 摘要，则可根据实参类型生成更强结果
-  否则默认给 `Any`
+  构建阶段默认保持 `unknown`
+
+后续 pass 若命中已知 builtin 摘要，且名字解析与实参类型足够稳定，才可根据实参类型生成更强结果。
+否则，如果 pass 已经分析完仍无法收窄，结果可保守设为 `Any`。
 
 ## 8. 类型事实如何帮助分派
 
@@ -327,7 +365,7 @@ struct ResolutionFact {
 
 例如：
 
-- `sin(a)` 且 `a : Float64 Exact`
+- `sin(a)` 且 `a : double`
   可直接命中数值 builtin 路径
 - `sin(a)` 且 `a : UserObject`
   应转去对象方法或重载分派路径
@@ -367,7 +405,8 @@ OUT[block] : SlotId -> TypeFact
 
 - 相同精确类型可保持不变
 - 不同但兼容的类型可退化为共同上界
-- 差异过大时直接退回 `Any`
+- 若任一来源仍是 `unknown`，且当前 pass 没有足够信息补齐，则结果继续保持 `unknown`
+- 差异过大但分析已经完成时，可退回 `Any`
 
 第一版不一定要显式构造复杂 `Union`，完全可以先采用“必要时迅速保守化”的策略。
 
@@ -400,8 +439,9 @@ OUT[block] : SlotId -> TypeFact
 
 因此这里的类型事实设计应天然允许：
 
-- 回退到 `Any`
-- 降级成 `GuardedExact`
+- 在事实失效且尚未重新分析时回退到 `unknown`
+- 在分析确认只能给出全集上界时设为 `Any`
+- 降级成更保守的类型结论
 - 交给 bytecode / 解释器继续执行
 
 ## 11. 与 typed SSA 的关系
@@ -417,7 +457,8 @@ OUT[block] : SlotId -> TypeFact
 
 也就是说：
 
-- 主 `IR` 上允许存在大量 `Any`
+- 主 `IR` 构建后允许存在大量 `unknown`
+- 类型分析之后仍可能存在大量保守 `Any`
 - `typed SSA` 只吃最有价值、最稳定的那一部分类型事实
 
 ## 12. 第一阶段非目标
@@ -434,15 +475,20 @@ OUT[block] : SlotId -> TypeFact
 
 ## 13. 建议落地顺序
 
-建议按以下顺序实现：
+当前已经落地的基础部分：
 
-1. 在 `CodeUnit` 上增加 `ValueTable`
-2. 让 `create_value()` 同步创建 `ValueInfo`
-3. 先为 `ConstInst`、`CopyInst` 填入基础 `TypeFact`
-4. 增加 `FunctionUnit` 内基于 slot 的前向类型数据流
-5. 为少量数值 builtin 建立摘要表
-6. 在调用点引入 `ResolutionFact + TypeFact` 的联合收敛逻辑
-7. 再把这些事实接给 inline cache、baseline JIT 和后续 `typed SSA`
+- `CodeUnit` 持有 `ValueTable`
+- `create_value()` 同步创建占位 `ValueInfo`
+- `append_instruction()` 回填 `def` 和 `result_index`
+- `ConstInst` 写入基础常量类型事实
+- `CopyInst` 传播输入值类型事实
+
+后续建议顺序：
+
+1. 增加 `FunctionUnit` 内基于 slot 的前向类型数据流
+2. 为少量数值 builtin 建立摘要表
+3. 在调用点引入 `ResolutionFact + TypeFact` 的联合收敛逻辑
+4. 再把这些事实接给 inline cache、baseline JIT 和后续 `typed SSA`
 
 ## 14. 当前阶段的一句结论
 

@@ -368,7 +368,7 @@ private:
             emit_raw(block_labels_[block] + ':');
             for (const std::unique_ptr<Instruction>& instruction : block->instructions) {
                 if (instruction != nullptr) {
-                    emit_instruction(*instruction);
+                    emit_instruction(unit, *instruction);
                 }
             }
 
@@ -403,9 +403,9 @@ private:
         lines_.push_back({std::move(text), {}});
     }
 
-    void emit_instruction(const Instruction& instruction) {
+    void emit_instruction(const CodeUnit& unit, const Instruction& instruction) {
         IRRenderedLine line;
-        line.text = "  " + format_instruction(instruction);
+        line.text = "  " + format_instruction(unit, instruction);
         line.source_comment = format_instruction_source_comment(instruction);
         lines_.push_back(std::move(line));
     }
@@ -612,12 +612,14 @@ private:
             operand);
     }
 
-    [[nodiscard]] std::string format_result_prefix(const std::vector<ValueId>& results) const {
+    [[nodiscard]] std::string format_result_prefix(
+        const CodeUnit& unit,
+        const std::vector<ValueId>& results) const {
         if (results.empty()) {
             return {};
         }
         if (results.size() == 1U) {
-            return format_value_id(results.front()) + " = ";
+            return format_value_result(unit, results.front()) + " = ";
         }
 
         std::string text = "(";
@@ -625,10 +627,48 @@ private:
             if (i != 0) {
                 text += ", ";
             }
-            text += format_value_id(results[i]);
+            text += format_value_result(unit, results[i]);
         }
         text += ") = ";
         return text;
+    }
+
+    [[nodiscard]] std::string format_type_fact(const TypeFact& fact) const {
+        if (fact.is_unknown) {
+            return "unknown";
+        }
+
+        std::ostringstream os;
+        os << fact.types;
+        return os.str();
+    }
+
+    [[nodiscard]] std::string format_value_type(
+        const CodeUnit& unit,
+        ValueId value_id) const {
+        if (!options_.print_type_facts ||
+            !value_id.is_valid()) {
+            return {};
+        }
+
+        const ValueInfo* value_info = unit.value_table.find(value_id);
+        if (value_info == nullptr) {
+            return {};
+        }
+
+        return format_type_fact(value_info->type_fact);
+    }
+
+    [[nodiscard]] std::string format_value_result(
+        const CodeUnit& unit,
+        ValueId value_id) const {
+        const std::string value_text = format_value_id(value_id);
+        const std::string type_text = format_value_type(unit, value_id);
+        if (type_text.empty()) {
+            return value_text;
+        }
+
+        return "[" + value_text + ", " + type_text + "]";
     }
 
     [[nodiscard]] std::string format_operand_list(const std::vector<Operand>& operands) const {
@@ -643,12 +683,13 @@ private:
     }
 
     [[nodiscard]] std::string format_call_like(
+        const CodeUnit& unit,
         std::string_view opcode,
         const std::vector<ValueId>& results,
         const Operand& callee,
         const std::vector<Operand>& arguments,
         bool direct_callee) const {
-        std::string text = format_result_prefix(results);
+        std::string text = format_result_prefix(unit, results);
         text += std::string(opcode);
         text += ' ';
         text += direct_callee
@@ -688,15 +729,19 @@ private:
         return text;
     }
 
-    [[nodiscard]] std::string format_instruction(const Instruction& instruction) const {
+    [[nodiscard]] std::string format_instruction(
+        const CodeUnit& unit,
+        const Instruction& instruction) const {
         switch (instruction.type()) {
             case Instruction::Const: {
                 const auto& inst = static_cast<const ConstInst&>(instruction);
-                return format_value_id(inst.result) + " = const " + format_constant(inst.value);
+                return format_value_result(unit, inst.result) +
+                    " = const " + format_constant(inst.value);
             }
             case Instruction::LoadSlot: {
                 const auto& inst = static_cast<const LoadSlotInst&>(instruction);
-                return format_value_id(inst.result) + " = load_slot " + format_slot_ref(inst.slot_id);
+                return format_value_result(unit, inst.result) +
+                    " = load_slot " + format_slot_ref(inst.slot_id);
             }
             case Instruction::StoreSlot: {
                 const auto& inst = static_cast<const StoreSlotInst&>(instruction);
@@ -704,7 +749,7 @@ private:
             }
             case Instruction::LoadWorkspace: {
                 const auto& inst = static_cast<const LoadWorkspaceInst&>(instruction);
-                return format_value_id(inst.result) + " = load_env " +
+                return format_value_result(unit, inst.result) + " = load_env " +
                     format_slot_ref(inst.workspace_handle_slot) + ", " +
                     format_symbol(inst.symbol);
             }
@@ -717,6 +762,7 @@ private:
             case Instruction::Apply: {
                 const auto& inst = static_cast<const ApplyInst&>(instruction);
                 return format_call_like(
+                    unit,
                     "apply",
                     inst.results,
                     inst.callee_or_base,
@@ -726,7 +772,7 @@ private:
             case Instruction::Call: {
                 const auto& inst = static_cast<const CallInst&>(instruction);
                 if (inst.callee_kind == CallInst::Local) {
-                    std::string text = format_result_prefix(inst.results);
+                    std::string text = format_result_prefix(unit, inst.results);
                     text += "call_local ";
                     if (inst.local_target != nullptr) {
                         text += format_symbol(inst.local_target->name);
@@ -739,6 +785,7 @@ private:
                     return text;
                 }
                 return format_call_like(
+                    unit,
                     "call",
                     inst.results,
                     inst.callee,
@@ -747,17 +794,17 @@ private:
             }
             case Instruction::Copy: {
                 const auto& inst = static_cast<const CopyInst&>(instruction);
-                return format_value_id(inst.result) + " = copy " + format_operand(inst.value);
+                return format_value_result(unit, inst.result) + " = copy " + format_operand(inst.value);
             }
             case Instruction::Unary: {
                 const auto& inst = static_cast<const UnaryInst&>(instruction);
-                return format_value_id(inst.result) + " = " +
+                return format_value_result(unit, inst.result) + " = " +
                     std::string(unary_mnemonic(inst.op)) + ' ' +
                     format_operand(inst.operand);
             }
             case Instruction::Binary: {
                 const auto& inst = static_cast<const BinaryInst&>(instruction);
-                return format_value_id(inst.result) + " = " +
+                return format_value_result(unit, inst.result) + " = " +
                     std::string(binary_mnemonic(inst.op)) + ' ' +
                     format_operand(inst.lhs) + ", " + format_operand(inst.rhs);
             }

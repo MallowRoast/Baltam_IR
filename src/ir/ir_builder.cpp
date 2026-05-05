@@ -2,8 +2,188 @@
 
 #include <algorithm>
 #include <utility>
+#include <variant>
 
 namespace baltam {
+namespace {
+
+TypeFact unknown_type_fact() noexcept {
+    return {};
+}
+
+TypeFact type_fact(TypeSet types, bool is_scalar) noexcept {
+    TypeFact fact;
+    fact.is_unknown = false;
+    fact.is_scalar = is_scalar;
+    fact.types = types;
+    return fact;
+}
+
+TypeFact scalar_type_fact(TypeSet types) noexcept {
+    return type_fact(types, true);
+}
+
+TypeFact constant_type_fact(const LogicalConstant&) noexcept {
+    return scalar_type_fact(TypeSet::logical());
+}
+
+TypeFact constant_type_fact(const Int64Constant&) noexcept {
+    return scalar_type_fact(TypeSet::int64());
+}
+
+TypeFact constant_type_fact(const UInt64Constant&) noexcept {
+    return scalar_type_fact(TypeSet::uint64());
+}
+
+TypeFact constant_type_fact(const Float64Constant&) noexcept {
+    return scalar_type_fact(TypeSet::float64());
+}
+
+TypeFact constant_type_fact(const Complex128Constant&) noexcept {
+    return scalar_type_fact(TypeSet::complex());
+}
+
+TypeFact constant_type_fact(const CharLiteralConstant&) noexcept {
+    return type_fact(TypeSet::char_array(), false);
+}
+
+TypeFact constant_type_fact(const StringLiteralConstant&) noexcept {
+    return scalar_type_fact(TypeSet::string_scalar());
+}
+
+TypeFact constant_type_fact(const EmptyDoubleMatrixConstant&) noexcept {
+    return type_fact(TypeSet::float64(), false);
+}
+
+TypeFact constant_type_fact(const Constant& constant) {
+    return std::visit(
+        [](const auto& value) {
+            return constant_type_fact(value);
+        },
+        constant);
+}
+
+TypeFact operand_type_fact(const ValueTable& value_table, const Operand& operand) {
+    const auto* value_id = std::get_if<ValueId>(&operand);
+    if (value_id == nullptr) {
+        return unknown_type_fact();
+    }
+
+    const ValueInfo* value_info = value_table.find(*value_id);
+    return value_info != nullptr ? value_info->type_fact : unknown_type_fact();
+}
+
+TypeFact instruction_result_type_fact(
+    const ValueTable& value_table,
+    const Instruction* instruction) {
+    if (instruction == nullptr) {
+        return unknown_type_fact();
+    }
+
+    switch (instruction->type()) {
+        case Instruction::Const:
+            return constant_type_fact(static_cast<const ConstInst*>(instruction)->value);
+        case Instruction::LoadSlot:
+        case Instruction::LoadWorkspace:
+        case Instruction::Apply:
+        case Instruction::Call:
+            return unknown_type_fact();
+        case Instruction::Copy:
+            return operand_type_fact(
+                value_table,
+                static_cast<const CopyInst*>(instruction)->value);
+        case Instruction::Unary:
+        case Instruction::Binary:
+            return unknown_type_fact();
+        case Instruction::StoreSlot:
+        case Instruction::StoreWorkspace:
+        case Instruction::Goto:
+        case Instruction::Branch:
+        case Instruction::Return:
+            break;
+    }
+
+    return unknown_type_fact();
+}
+
+void bind_value_def(
+    ValueTable& value_table,
+    ValueId value_id,
+    std::size_t result_index,
+    Instruction* def,
+    TypeFact type_fact) {
+    ValueInfo* value_info = value_table.find(value_id);
+    if (value_info == nullptr) {
+        return;
+    }
+
+    value_info->result_index = result_index;
+    value_info->def = def;
+    value_info->type_fact = type_fact;
+}
+
+void bind_instruction_results(ValueTable& value_table, Instruction* instruction) {
+    if (instruction == nullptr) {
+        return;
+    }
+
+    const TypeFact result_type_fact = instruction_result_type_fact(value_table, instruction);
+
+    switch (instruction->type()) {
+        case Instruction::Const: {
+            const auto* inst = static_cast<const ConstInst*>(instruction);
+            bind_value_def(value_table, inst->result, 0, instruction, result_type_fact);
+            break;
+        }
+        case Instruction::LoadSlot: {
+            const auto* inst = static_cast<const LoadSlotInst*>(instruction);
+            bind_value_def(value_table, inst->result, 0, instruction, result_type_fact);
+            break;
+        }
+        case Instruction::LoadWorkspace: {
+            const auto* inst = static_cast<const LoadWorkspaceInst*>(instruction);
+            bind_value_def(value_table, inst->result, 0, instruction, result_type_fact);
+            break;
+        }
+        case Instruction::Apply: {
+            const auto* inst = static_cast<const ApplyInst*>(instruction);
+            for (std::size_t i = 0; i < inst->results.size(); ++i) {
+                bind_value_def(value_table, inst->results[i], i, instruction, result_type_fact);
+            }
+            break;
+        }
+        case Instruction::Call: {
+            const auto* inst = static_cast<const CallInst*>(instruction);
+            for (std::size_t i = 0; i < inst->results.size(); ++i) {
+                bind_value_def(value_table, inst->results[i], i, instruction, result_type_fact);
+            }
+            break;
+        }
+        case Instruction::Copy: {
+            const auto* inst = static_cast<const CopyInst*>(instruction);
+            bind_value_def(value_table, inst->result, 0, instruction, result_type_fact);
+            break;
+        }
+        case Instruction::Unary: {
+            const auto* inst = static_cast<const UnaryInst*>(instruction);
+            bind_value_def(value_table, inst->result, 0, instruction, result_type_fact);
+            break;
+        }
+        case Instruction::Binary: {
+            const auto* inst = static_cast<const BinaryInst*>(instruction);
+            bind_value_def(value_table, inst->result, 0, instruction, result_type_fact);
+            break;
+        }
+        case Instruction::StoreSlot:
+        case Instruction::StoreWorkspace:
+        case Instruction::Goto:
+        case Instruction::Branch:
+        case Instruction::Return:
+            break;
+    }
+}
+
+} // namespace
 
 void IRBuilder::reset() noexcept {
     owned_file_.reset();
@@ -222,7 +402,13 @@ ValueId IRBuilder::create_value() {
         return InvalidValueId;
     }
 
-    return current_unit_state_->ids.allocate_value();
+    const ValueId value_id = current_unit_state_->ids.allocate_value();
+
+    ValueInfo value_info;
+    value_info.value_id = value_id;
+    current_unit_state_->unit->value_table.values.push_back(value_info);
+
+    return value_id;
 }
 
 void IRBuilder::bind_name(std::string_view name, SlotId slot_id) {
@@ -364,6 +550,7 @@ void IRBuilder::append_instruction(std::unique_ptr<Instruction> instruction) {
     }
 
     instruction->parent = current_unit_state_->current_block;
+    bind_instruction_results(current_unit_state_->unit->value_table, instruction.get());
     current_unit_state_->current_block->instructions.push_back(std::move(instruction));
 }
 

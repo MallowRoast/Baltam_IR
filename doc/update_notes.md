@@ -21,11 +21,7 @@
 - 函数中的 local 函数调用可以静态分派
 - 支持一元 / 二元运算符对 local 函数的分派
 - 验证了函数中局部变量对 local 函数的遮蔽作用
-
-TODO：
-
-- 增加 `parent_get` 节点
-- 支持 `for / while / switch` 及其嵌套情况
+- MATLAB 不允许脚本变量与同文件 local 函数同名；因此不保留这类脚本遮蔽测试输入
 
 4. 增加第一版 IR verifier，见 [ir_verifier_design.md](/home/zj/Desktop/Baltam_IR/doc/ir_verifier_design.md)。
 
@@ -42,8 +38,13 @@ TODO：
 
 当前 type 层覆盖：
 
-- 使用 `TypeAtom` 枚举当前已知的叶子类型，包括 logical、整数、浮点/复数、文本、容器和 function handle
-- 使用 bitset-backed `TypeSet` 表示 bottom、any、单一类型和 union type
+- 使用 `TypeSet` 的静态成员构造入口表示当前已知的叶子类型和常用分类，包括 logical、整数、浮点/复数、文本、容器和 function handle
+- 使用 `std::bitset`-backed `TypeSet` 表示 bottom、any、单一类型和 union type
 - 提供 `join` / `meet` / subset / `maybe` / `definitely` 等基础集合操作
 - 提供 numeric、text、container、callable 等分类 helper，分类本身不作为独立 atom 存在
 - 提供稳定调试名和 `TypeSet` 输出格式，便于 smoke test、printer、verifier 和后续类型分析共享
+
+TODO：
+
+- 增加 `parent_get` 节点
+- 支持 `for / while / switch` 及其嵌套情况

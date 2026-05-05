@@ -1,226 +1,187 @@
 #pragma once
 
+#include <bitset>
+#include <cstddef>
 #include <cstdint>
 #include <iosfwd>
 
 namespace baltam {
 
 /**
- * @brief 第一版值类型原子。
- *
- * `TypeAtom` 只枚举类型格中的叶子类型。`Numeric`、`Text`、`Container`
- * 这类分类不作为 atom 存在，而是通过 `TypeSet` mask 表达。
- */
-enum class TypeAtom : std::uint8_t {
-    Logical,
-
-    Int64,
-    UInt64,
-    Float64,
-    Complex,
-
-    Char,
-    String,
-
-    Cell,
-    Struct,
-
-    FunctionHandle,
-};
-
-/**
- * @brief bitset-backed union type。
+ * @brief std::bitset-backed union type。
  *
  * - `bits == 0` 表示 Bottom / Empty。
- * - `bits == all_known_type_bits()` 表示 Top / Any。
- * - 单 bit 表示单一精确 atom。
+ * - `bits == TypeSet::any().bits` 表示 Top / Any。
+ * - 单 bit 表示单一精确叶子类型。
  * - 多 bit 表示 union。
  */
 struct TypeSet {
-    using bits_type = std::uint64_t;
+    static constexpr std::size_t BitCount = 10;
+    static_assert(BitCount <= 64, "TypeSet::BitCount must fit in uint64_t");
 
-    bits_type bits = 0;
+    using bits_type = std::bitset<BitCount>;
+
+    bits_type bits{};
+
+    constexpr TypeSet() noexcept = default;
+
+    explicit constexpr TypeSet(std::uint64_t raw_bits) noexcept : bits(raw_bits) {}
+
+    explicit TypeSet(bits_type raw_bits) noexcept : bits(raw_bits) {}
+
+    [[nodiscard]] bool operator==(TypeSet other) const noexcept {
+        return bits == other.bits;
+    }
+
+    [[nodiscard]] bool operator!=(TypeSet other) const noexcept {
+        return bits != other.bits;
+    }
 
     /**
      * @brief 判断当前集合是否为空类型集合。
      */
-    [[nodiscard]] constexpr bool empty() const noexcept {
-        return bits == 0;
+    [[nodiscard]] bool empty() const noexcept {
+        return bits.none();
     }
 
     /**
-     * @brief 判断当前集合是否包含指定 atom。
+     * @brief 判断当前集合是否完整包含另一个集合。
      */
-    [[nodiscard]] constexpr bool contains(TypeAtom atom) const noexcept;
+    [[nodiscard]] bool is_superset_of(TypeSet other) const noexcept {
+        return !other.empty() && other.is_subset_of(*this);
+    }
 
     /**
      * @brief 判断当前集合是否为另一个集合的子集。
      */
-    [[nodiscard]] constexpr bool is_subset_of(TypeSet other) const noexcept {
-        return (bits & ~other.bits) == 0;
+    [[nodiscard]] bool is_subset_of(TypeSet other) const noexcept {
+        return (bits & ~other.bits).none();
     }
+
+    /**
+     * @brief 返回两个类型集合的 join。
+     */
+    [[nodiscard]] TypeSet join(TypeSet other) const noexcept {
+        return TypeSet{bits | other.bits};
+    }
+
+    /**
+     * @brief 返回两个类型集合的 meet。
+     */
+    [[nodiscard]] TypeSet meet(TypeSet other) const noexcept {
+        return TypeSet{bits & other.bits};
+    }
+
+    /**
+     * @brief 判断当前集合是否可能属于某个分类。
+     */
+    [[nodiscard]] bool maybe(TypeSet category) const noexcept {
+        return (bits & category.bits).any();
+    }
+
+    /**
+     * @brief 判断当前集合是否必然属于某个分类。
+     *
+     * Bottom 不被视为“必然属于”任何分类。
+     */
+    [[nodiscard]] bool definitely(TypeSet category) const noexcept {
+        return !empty() && is_subset_of(category);
+    }
+
+    [[nodiscard]] static constexpr TypeSet bottom() noexcept {
+        return TypeSet{};
+    }
+
+    [[nodiscard]] static constexpr TypeSet any() noexcept {
+        return TypeSet(AnyMask);
+    }
+
+    [[nodiscard]] static constexpr TypeSet logical() noexcept {
+        return TypeSet(LogicalMask);
+    }
+
+    [[nodiscard]] static constexpr TypeSet int64() noexcept {
+        return TypeSet(Int64Mask);
+    }
+
+    [[nodiscard]] static constexpr TypeSet uint64() noexcept {
+        return TypeSet(UInt64Mask);
+    }
+
+    [[nodiscard]] static constexpr TypeSet float64() noexcept {
+        return TypeSet(Float64Mask);
+    }
+
+    [[nodiscard]] static constexpr TypeSet complex() noexcept {
+        return TypeSet(ComplexMask);
+    }
+
+    [[nodiscard]] static constexpr TypeSet char_array() noexcept {
+        return TypeSet(CharMask);
+    }
+
+    [[nodiscard]] static constexpr TypeSet string_scalar() noexcept {
+        return TypeSet(StringMask);
+    }
+
+    [[nodiscard]] static constexpr TypeSet cell_array() noexcept {
+        return TypeSet(CellMask);
+    }
+
+    [[nodiscard]] static constexpr TypeSet struct_array() noexcept {
+        return TypeSet(StructMask);
+    }
+
+    [[nodiscard]] static constexpr TypeSet function_handle() noexcept {
+        return TypeSet(FunctionHandleMask);
+    }
+
+    [[nodiscard]] static constexpr TypeSet integer() noexcept {
+        return TypeSet(Int64Mask | UInt64Mask);
+    }
+
+    [[nodiscard]] static constexpr TypeSet floating() noexcept {
+        return TypeSet(Float64Mask | ComplexMask);
+    }
+
+    [[nodiscard]] static constexpr TypeSet text() noexcept {
+        return TypeSet(CharMask | StringMask);
+    }
+
+    [[nodiscard]] static constexpr TypeSet container() noexcept {
+        return TypeSet(CellMask | StructMask);
+    }
+
+    [[nodiscard]] static constexpr TypeSet callable() noexcept {
+        return TypeSet(FunctionHandleMask);
+    }
+
+    [[nodiscard]] static constexpr TypeSet numeric() noexcept {
+        return TypeSet(
+            LogicalMask |
+            Int64Mask |
+            UInt64Mask |
+            Float64Mask |
+            ComplexMask);
+    }
+
+    friend std::ostream& operator<<(std::ostream& os, TypeSet type_set);
+
+private:
+    static constexpr std::uint64_t LogicalMask = std::uint64_t{1} << 0;
+    static constexpr std::uint64_t Int64Mask = std::uint64_t{1} << 1;
+    static constexpr std::uint64_t UInt64Mask = std::uint64_t{1} << 2;
+    static constexpr std::uint64_t Float64Mask = std::uint64_t{1} << 3;
+    static constexpr std::uint64_t ComplexMask = std::uint64_t{1} << 4;
+    static constexpr std::uint64_t CharMask = std::uint64_t{1} << 5;
+    static constexpr std::uint64_t StringMask = std::uint64_t{1} << 6;
+    static constexpr std::uint64_t CellMask = std::uint64_t{1} << 7;
+    static constexpr std::uint64_t StructMask = std::uint64_t{1} << 8;
+    static constexpr std::uint64_t FunctionHandleMask = std::uint64_t{1} << 9;
+    static constexpr std::uint64_t AnyMask =
+        BitCount >= 64
+            ? ~std::uint64_t{0}
+            : ((std::uint64_t{1} << BitCount) - 1);
 };
-
-/**
- * @brief 返回指定 atom 对应的 bit。
- */
-[[nodiscard]] constexpr TypeSet::bits_type type_atom_bit(TypeAtom atom) noexcept {
-    return TypeSet::bits_type{1} << static_cast<std::uint8_t>(atom);
-}
-
-constexpr bool TypeSet::contains(TypeAtom atom) const noexcept {
-    return (bits & type_atom_bit(atom)) != 0;
-}
-
-/**
- * @brief 所有当前已知 atom 的全集 bitmask。
- */
-[[nodiscard]] constexpr TypeSet::bits_type all_known_type_bits() noexcept {
-    return
-        type_atom_bit(TypeAtom::Logical) |
-        type_atom_bit(TypeAtom::Int64) |
-        type_atom_bit(TypeAtom::UInt64) |
-        type_atom_bit(TypeAtom::Float64) |
-        type_atom_bit(TypeAtom::Complex) |
-        type_atom_bit(TypeAtom::Char) |
-        type_atom_bit(TypeAtom::String) |
-        type_atom_bit(TypeAtom::Cell) |
-        type_atom_bit(TypeAtom::Struct) |
-        type_atom_bit(TypeAtom::FunctionHandle);
-}
-
-/**
- * @brief Bottom / Empty 类型集合。
- */
-[[nodiscard]] constexpr TypeSet bottom_type_set() noexcept {
-    return TypeSet{0};
-}
-
-/**
- * @brief Top / Any 类型集合。
- */
-[[nodiscard]] constexpr TypeSet any_type_set() noexcept {
-    return TypeSet{all_known_type_bits()};
-}
-
-/**
- * @brief 单一 atom 类型集合。
- */
-[[nodiscard]] constexpr TypeSet singleton_type_set(TypeAtom atom) noexcept {
-    return TypeSet{type_atom_bit(atom)};
-}
-
-/**
- * @brief 两个类型集合的 join。
- */
-[[nodiscard]] constexpr TypeSet join(TypeSet lhs, TypeSet rhs) noexcept {
-    return TypeSet{lhs.bits | rhs.bits};
-}
-
-/**
- * @brief 两个类型集合的 meet。
- */
-[[nodiscard]] constexpr TypeSet meet(TypeSet lhs, TypeSet rhs) noexcept {
-    return TypeSet{lhs.bits & rhs.bits};
-}
-
-/**
- * @brief 判断两个类型集合是否相等。
- */
-[[nodiscard]] constexpr bool operator==(TypeSet lhs, TypeSet rhs) noexcept {
-    return lhs.bits == rhs.bits;
-}
-
-/**
- * @brief 判断两个类型集合是否不等。
- */
-[[nodiscard]] constexpr bool operator!=(TypeSet lhs, TypeSet rhs) noexcept {
-    return !(lhs == rhs);
-}
-
-/**
- * @brief 逻辑类型分类。
- */
-[[nodiscard]] constexpr TypeSet logical_type_set() noexcept {
-    return singleton_type_set(TypeAtom::Logical);
-}
-
-/**
- * @brief 整数类型分类。
- */
-[[nodiscard]] constexpr TypeSet integer_type_set() noexcept {
-    return join(
-        singleton_type_set(TypeAtom::Int64),
-        singleton_type_set(TypeAtom::UInt64));
-}
-
-/**
- * @brief 浮点/复数类型分类。
- */
-[[nodiscard]] constexpr TypeSet floating_type_set() noexcept {
-    return join(
-        singleton_type_set(TypeAtom::Float64),
-        singleton_type_set(TypeAtom::Complex));
-}
-
-/**
- * @brief 数值类型分类。
- */
-[[nodiscard]] constexpr TypeSet numeric_type_set() noexcept {
-    return join(
-        logical_type_set(),
-        join(integer_type_set(), floating_type_set()));
-}
-
-/**
- * @brief 文本类型分类。
- */
-[[nodiscard]] constexpr TypeSet text_type_set() noexcept {
-    return join(
-        singleton_type_set(TypeAtom::Char),
-        singleton_type_set(TypeAtom::String));
-}
-
-/**
- * @brief 容器类型分类。
- */
-[[nodiscard]] constexpr TypeSet container_type_set() noexcept {
-    return join(
-        singleton_type_set(TypeAtom::Cell),
-        singleton_type_set(TypeAtom::Struct));
-}
-
-/**
- * @brief 可调用类型分类。
- */
-[[nodiscard]] constexpr TypeSet callable_type_set() noexcept {
-    return singleton_type_set(TypeAtom::FunctionHandle);
-}
-
-/**
- * @brief 判断 `value` 是否可能属于 `category`。
- */
-[[nodiscard]] constexpr bool maybe(TypeSet value, TypeSet category) noexcept {
-    return (value.bits & category.bits) != 0;
-}
-
-/**
- * @brief 判断 `value` 是否必然属于 `category`。
- *
- * Bottom 不被视为“必然属于”任何分类。
- */
-[[nodiscard]] constexpr bool definitely(TypeSet value, TypeSet category) noexcept {
-    return !value.empty() && value.is_subset_of(category);
-}
-
-/**
- * @brief 返回 atom 的稳定调试名。
- */
-[[nodiscard]] const char* type_atom_name(TypeAtom atom) noexcept;
-
-/**
- * @brief 将类型集合格式化为稳定调试文本。
- */
-std::ostream& operator<<(std::ostream& os, TypeSet type_set);
 
 } // namespace baltam

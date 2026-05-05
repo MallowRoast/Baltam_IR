@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ir/ir_inst.h"
+#include "ir/ir_type.h"
 
 #include <memory>
 #include <utility>
@@ -9,6 +10,15 @@
 namespace baltam {
 
 struct CodeUnit;
+
+/**
+ * @brief 第一版值类型事实。
+ */
+struct TypeFact {
+    bool is_unknown = true;
+    bool is_scalar = false;
+    TypeSet types = TypeSet::any();
+};
 
 /**
  * @brief slot 级语义属性。
@@ -167,6 +177,47 @@ struct SlotTable {
         return nullptr;
     }
 
+};
+
+/**
+ * @brief `ValueId` 对应的 side metadata。
+ */
+struct ValueInfo {
+    ValueId value_id = InvalidValueId;
+    std::size_t result_index = 0;
+    TypeFact type_fact;
+    Instruction* def = nullptr;
+};
+
+/**
+ * @brief `CodeUnit` 的值表。
+ */
+struct ValueTable {
+    std::vector<ValueInfo> values;
+
+    /**
+     * @brief 判断值表是否为空。
+     */
+    [[nodiscard]] bool empty() const noexcept {
+        return values.empty();
+    }
+
+    /**
+     * @brief 按 `ValueId` 查找值信息。
+     */
+    [[nodiscard]] ValueInfo* find(ValueId value_id) noexcept {
+        return const_cast<ValueInfo*>(std::as_const(*this).find(value_id));
+    }
+
+    /**
+     * @brief 按 `ValueId` 查找值信息。
+     */
+    [[nodiscard]] const ValueInfo* find(ValueId value_id) const noexcept {
+        if (!value_id.is_valid() || value_id.value() >= values.size()) {
+            return nullptr;
+        }
+        return &values[value_id.value()];
+    }
 };
 
 /**

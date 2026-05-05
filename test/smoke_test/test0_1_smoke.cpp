@@ -77,7 +77,7 @@ void verify_printed_ir(const std::string& printed_ir) {
     smoke_test::require(ret_slot_line.find("; ") == std::string::npos, "slot 行不应打印源码注释");
 
     const std::string call_line =
-        smoke_test::find_line_containing(printed_ir, "%3 = call @sin(%4)");
+        smoke_test::find_line_containing(printed_ir, "[%3, unknown] = call @sin(%4)");
     smoke_test::require(!call_line.empty(), "应打印 sin 的 call");
     smoke_test::require(call_line.find("; ") == std::string::npos, "call 行不应打印源码注释");
 

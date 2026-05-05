@@ -196,14 +196,6 @@ bool try_parse_number_constant(const numval& number_node, Constant& out_constant
         return false;
     }
 
-    char* int_end = nullptr;
-    errno = 0;
-    const long long int_value = std::strtoll(text.c_str(), &int_end, 10);
-    if (int_end != nullptr && *int_end == '\0' && errno != ERANGE) {
-        out_constant = Int64Constant{int_value};
-        return true;
-    }
-
     char* float_end = nullptr;
     errno = 0;
     const double float_value = std::strtod(text.c_str(), &float_end);

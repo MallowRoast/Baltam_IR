@@ -52,7 +52,7 @@ void verify_printed_ir(const std::string& printed_ir) {
         printed_ir.find("script @test1 {") != std::string::npos,
         "应打印 test1 脚本头");
     smoke_test::require(
-        printed_ir.find("%3 = apply @sin(%4)") != std::string::npos,
+        printed_ir.find("[%3, unknown] = apply @sin(%4)") != std::string::npos,
         "脚本主体中的 sin(a) 应打印成 apply");
     smoke_test::require(
         printed_ir.find("define @sin(%slot0 @x) -> (%slot1 @y) {") != std::string::npos,

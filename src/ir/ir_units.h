@@ -42,6 +42,7 @@ struct CodeUnit {
     MFileUnit* parent = nullptr;
     InternedString name;
     SlotTable slot_table;
+    ValueTable value_table;
     BasicBlock* entry_block = nullptr;
     std::vector<std::unique_ptr<BasicBlock>> basic_blocks;
     SourceSpan source_span;

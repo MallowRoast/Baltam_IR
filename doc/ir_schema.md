@@ -17,6 +17,7 @@
 - `ScriptUnit`
 - `FunctionUnit`
 - `SlotTable`
+- `ValueTable`
 - `BasicBlock`
 - `Instruction`
 
@@ -99,6 +100,7 @@ CodeUnit (abstract)
   parent        : MFileUnit*
   name          : InternedString
   slot_table    : SlotTable
+  value_table   : ValueTable
   entry_block   : BasicBlock*
   basic_blocks  : BasicBlock*[]
   source_span   : SourceSpan
@@ -112,6 +114,8 @@ CodeUnit (abstract)
   单元名。对函数来说是函数名；对脚本来说可直接使用文件名。
 - `slot_table`
   当前 unit 的全部 slot。
+- `value_table`
+  当前 unit 的全部 `ValueId` 元信息表。
 - `entry_block`
   CFG 入口块。
 - `basic_blocks`
@@ -228,7 +232,49 @@ SlotTable
 - `find_slot(SlotId)`
 - `find_hidden_slot(HiddenRole)`
 
-## 5. BasicBlock
+## 5. ValueInfo / ValueTable
+
+### 5.1 ValueInfo
+
+```text
+ValueInfo
+  value_id      : ValueId
+  result_index  : size_t
+  type_fact     : TypeFact
+  def           : Instruction*
+```
+
+### 字段说明
+
+- `value_id`
+  值级稳定句柄。
+- `result_index`
+  该值在定义指令结果列表中的序号；单结果指令固定为 `0`。
+- `type_fact`
+  当前附着在该值上的类型事实。
+- `def`
+  定义该值的指令，非拥有指针。
+
+### 5.2 ValueTable
+
+```text
+ValueTable
+  values : ValueInfo[]
+```
+
+### 字段说明
+
+- `values`
+  当前 `CodeUnit` 中全部值的 side table。推荐按 `ValueId.value()` 稠密索引。
+
+### ValueTable helper
+
+当前建议提供：
+
+- `empty()`
+- `find(ValueId)`
+
+## 6. BasicBlock
 
 当前结构如下：
 
@@ -277,9 +323,9 @@ BasicBlock
 - `terminator()`
 - `has_terminator()`
 
-## 6. Constant / UnaryOp / BinaryOp / Operand
+## 7. Constant / UnaryOp / BinaryOp / Operand
 
-### 6.1 Constant
+### 7.1 Constant
 
 当前常量集合包括：
 
@@ -298,7 +344,7 @@ BasicBlock
 Constant = variant<...>
 ```
 
-### 6.2 UnaryOp
+### 7.2 UnaryOp
 
 当前一元操作包括：
 
@@ -308,7 +354,7 @@ Constant = variant<...>
 - `Transpose`
 - `Ctranspose`
 
-### 6.3 BinaryOp
+### 7.3 BinaryOp
 
 当前二元操作包括：
 
@@ -317,7 +363,7 @@ Constant = variant<...>
 - 逻辑：`And/Or`
 - 比较：`Lt/Le/Gt/Ge/Eq/Ne`
 
-### 6.4 Operand
+### 7.4 Operand
 
 当前操作数集合是：
 
@@ -337,9 +383,9 @@ Operand = variant<
 
 当前版本不允许操作数直接承载立即数，所有进入数据流的字面量都应先经 `ConstInst` 物化成 `ValueId`。
 
-## 7. InstAttrs / EffectClass / Instruction
+## 8. InstAttrs / EffectClass / Instruction
 
-### 7.1 InstAttrs
+### 8.1 InstAttrs
 
 ```text
 InstAttrs
@@ -347,7 +393,7 @@ InstAttrs
   is_synthetic : bool
 ```
 
-### 7.2 EffectClass
+### 8.2 EffectClass
 
 ```text
 EffectClass
@@ -358,7 +404,7 @@ EffectClass
   opaque
 ```
 
-### 7.3 Instruction 基类
+### 8.3 Instruction 基类
 
 当前结构如下：
 

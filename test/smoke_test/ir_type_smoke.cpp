@@ -8,46 +8,50 @@ namespace baltam {
 namespace {
 
 void verify_top_bottom() {
-    smoke_test::require(bottom_type_set().empty(), "bottom 应为空集合");
-    smoke_test::require(!any_type_set().empty(), "any 不应为空集合");
-    smoke_test::require(bottom_type_set().is_subset_of(any_type_set()), "bottom 应是 any 的子集");
+    smoke_test::require(TypeSet::bottom().empty(), "bottom 应为空集合");
+    smoke_test::require(!TypeSet::any().empty(), "any 不应为空集合");
+    smoke_test::require(TypeSet::bottom().is_subset_of(TypeSet::any()), "bottom 应是 any 的子集");
 }
 
 void verify_join_meet() {
-    const TypeSet int64 = singleton_type_set(TypeAtom::Int64);
-    const TypeSet float64 = singleton_type_set(TypeAtom::Float64);
-    const TypeSet string = singleton_type_set(TypeAtom::String);
-    const TypeSet numeric_union = join(int64, float64);
+    const TypeSet int64 = TypeSet::int64();
+    const TypeSet float64 = TypeSet::float64();
+    const TypeSet string = TypeSet::string_scalar();
+    const TypeSet numeric_union = int64.join(float64);
 
-    smoke_test::require(numeric_union.contains(TypeAtom::Int64), "join 应包含 int64");
-    smoke_test::require(numeric_union.contains(TypeAtom::Float64), "join 应包含 float64");
-    smoke_test::require(!numeric_union.contains(TypeAtom::String), "join 不应包含 string");
-    smoke_test::require(meet(numeric_union, int64) == int64, "meet union 和 int64 应得到 int64");
-    smoke_test::require(meet(numeric_union, string).empty(), "不相交集合 meet 应得到 bottom");
+    smoke_test::require(numeric_union.is_superset_of(TypeSet::int64()), "join 应包含 int64");
+    smoke_test::require(numeric_union.is_superset_of(TypeSet::float64()), "join 应包含 float64");
+    smoke_test::require(!numeric_union.is_superset_of(TypeSet::string_scalar()), "join 不应包含 string");
+    smoke_test::require(numeric_union.meet(int64) == int64, "meet union 和 int64 应得到 int64");
+    smoke_test::require(numeric_union.meet(string).empty(), "不相交集合 meet 应得到 bottom");
 }
 
 void verify_categories() {
-    const TypeSet int64 = singleton_type_set(TypeAtom::Int64);
-    const TypeSet string = singleton_type_set(TypeAtom::String);
-    const TypeSet mixed = join(int64, string);
-    const TypeSet function_handle = singleton_type_set(TypeAtom::FunctionHandle);
+    const TypeSet int64 = TypeSet::int64();
+    const TypeSet string = TypeSet::string_scalar();
+    const TypeSet mixed = int64.join(string);
+    const TypeSet function_handle = TypeSet::function_handle();
 
-    smoke_test::require(definitely(int64, numeric_type_set()), "int64 应必然属于 numeric");
-    smoke_test::require(maybe(mixed, numeric_type_set()), "mixed 应可能属于 numeric");
-    smoke_test::require(!definitely(mixed, numeric_type_set()), "mixed 不应必然属于 numeric");
-    smoke_test::require(definitely(function_handle, callable_type_set()), "function handle 应必然 callable");
-    smoke_test::require(!maybe(int64, callable_type_set()), "int64 不应可能 callable");
+    smoke_test::require(int64.definitely(TypeSet::numeric()), "int64 应必然属于 numeric");
+    smoke_test::require(mixed.maybe(TypeSet::numeric()), "mixed 应可能属于 numeric");
+    smoke_test::require(!mixed.definitely(TypeSet::numeric()), "mixed 不应必然属于 numeric");
+    smoke_test::require(function_handle.definitely(TypeSet::callable()), "function handle 应必然 callable");
+    smoke_test::require(!int64.maybe(TypeSet::callable()), "int64 不应可能 callable");
 }
 
 void verify_formatting() {
     std::ostringstream output;
-    output << join(
-        singleton_type_set(TypeAtom::Int64),
-        singleton_type_set(TypeAtom::String));
+    output << TypeSet::int64().join(TypeSet::string_scalar());
 
     smoke_test::require(
         output.str() == "int64|string_scalar",
         "TypeSet 应按稳定顺序格式化 union");
+
+    std::ostringstream double_output;
+    double_output << TypeSet::float64();
+    smoke_test::require(
+        double_output.str() == "double",
+        "float64 类型集合应按 IR 文本习惯打印为 double");
 }
 
 } // namespace

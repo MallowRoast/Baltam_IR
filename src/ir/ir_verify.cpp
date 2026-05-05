@@ -149,6 +149,7 @@ private:
         }
 
         verify_slots(unit);
+        verify_value_table(unit);
         if (unit.is_function()) {
             verify_function_unit(static_cast<const FunctionUnit&>(unit));
         }
@@ -208,6 +209,63 @@ private:
                 error("函数调用约定 hidden slot 只能出现在函数代码单元中", slot.source_span);
             }
         }
+    }
+
+    void verify_value_table(const CodeUnit& unit) {
+        for (std::size_t index = 0; index < unit.value_table.values.size(); ++index) {
+            const ValueInfo& value_info = unit.value_table.values[index];
+            if (!value_info.value_id.is_valid()) {
+                error("value_table 中的 value_id 不能为空", unit.source_span);
+                continue;
+            }
+            if (value_info.value_id.value() != index) {
+                warning("value_table 未按 ValueId 稠密顺序排列", unit.source_span);
+            }
+            if (value_info.def == nullptr) {
+                continue;
+            }
+            if (value_info.def->parent == nullptr || value_info.def->parent->parent != &unit) {
+                error("ValueInfo.def 必须属于当前代码单元", unit.source_span);
+            }
+            if (!instruction_defines_value(*value_info.def, value_info.value_id, value_info.result_index)) {
+                error("ValueInfo.def 与记录的 ValueId/result_index 不一致", value_info.def->source_span);
+            }
+        }
+    }
+
+    [[nodiscard]] bool instruction_defines_value(
+        const Instruction& instruction,
+        ValueId value_id,
+        std::size_t result_index) const {
+        switch (instruction.type()) {
+            case Instruction::Const:
+                return static_cast<const ConstInst&>(instruction).result == value_id && result_index == 0;
+            case Instruction::LoadSlot:
+                return static_cast<const LoadSlotInst&>(instruction).result == value_id && result_index == 0;
+            case Instruction::LoadWorkspace:
+                return static_cast<const LoadWorkspaceInst&>(instruction).result == value_id && result_index == 0;
+            case Instruction::Copy:
+                return static_cast<const CopyInst&>(instruction).result == value_id && result_index == 0;
+            case Instruction::Unary:
+                return static_cast<const UnaryInst&>(instruction).result == value_id && result_index == 0;
+            case Instruction::Binary:
+                return static_cast<const BinaryInst&>(instruction).result == value_id && result_index == 0;
+            case Instruction::Apply: {
+                const auto& inst = static_cast<const ApplyInst&>(instruction);
+                return result_index < inst.results.size() && inst.results[result_index] == value_id;
+            }
+            case Instruction::Call: {
+                const auto& inst = static_cast<const CallInst&>(instruction);
+                return result_index < inst.results.size() && inst.results[result_index] == value_id;
+            }
+            case Instruction::StoreSlot:
+            case Instruction::StoreWorkspace:
+            case Instruction::Goto:
+            case Instruction::Branch:
+            case Instruction::Return:
+                return false;
+        }
+        return false;
     }
 
     void verify_function_unit(const FunctionUnit& function) {
