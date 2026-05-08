@@ -431,6 +431,9 @@ void IRLowerer::lower_stmt(const ast_ptr& node) {
         case node_flow_if:
             lower_if_stmt(std::static_pointer_cast<if_flow>(node));
             return;
+        case node_for:
+            lower_for_stmt(std::static_pointer_cast<flow>(node));
+            return;
         case node_multiple_func:
             lower_call_stmt(std::static_pointer_cast<multipleFuncCall>(node));
             return;
@@ -625,6 +628,249 @@ void IRLowerer::lower_if_stmt(const std::shared_ptr<if_flow>& if_node) {
     builder_.set_insert_point(exit_block);
 }
 
+void IRLowerer::lower_for_stmt(const std::shared_ptr<flow>& for_node) {
+    if (for_node == nullptr ||
+        for_node->var_ref() == nullptr ||
+        for_node->cond() == nullptr ||
+        for_node->tl() == nullptr) {
+        builder_.report(
+            IRBuildDiagnostic::Error,
+            "for 语句缺少循环变量、迭代表达式或循环体",
+            source_span_from(for_node));
+        return;
+    }
+
+    if (for_node->var_ref()->nodetype != node_name) {
+        builder_.report(
+            IRBuildDiagnostic::Error,
+            "当前 lowering 只支持名字形式的 for 循环变量",
+            source_span_from(for_node->var_ref()));
+        return;
+    }
+
+    CodeUnit* unit = builder_.current_unit();
+    if (unit == nullptr) {
+        builder_.report(
+            IRBuildDiagnostic::Error,
+            "没有活动代码单元，无法 lower for 语句",
+            source_span_from(for_node));
+        return;
+    }
+
+    // Matlab for lowering 使用显式 CFG：preheader 只执行一次，header 每轮判断，
+    // body 执行用户循环体，latch 维护内部迭代下标，exit 接后续语句。
+    BasicBlock* preheader_block =
+        unit->create_block("for.preheader", source_span_from(for_node));
+    BasicBlock* header_block =
+        unit->create_block("for.header", source_span_from(for_node));
+    BasicBlock* body_block =
+        unit->create_block("for.body", source_span_from(for_node->tl()));
+    BasicBlock* latch_block =
+        unit->create_block("for.latch", source_span_from(for_node));
+    BasicBlock* exit_block =
+        unit->create_block("for.end", source_span_from(for_node));
+
+    if (preheader_block == nullptr ||
+        header_block == nullptr ||
+        body_block == nullptr ||
+        latch_block == nullptr ||
+        exit_block == nullptr) {
+        return;
+    }
+
+    // 当前块自然落入 for.preheader，让 for 前的顺序语句和 loop CFG 接起来。
+    if (builder_.current_block() != nullptr &&
+        !builder_.current_block()->has_terminator()) {
+        std::unique_ptr<GotoInst> go = std::make_unique<GotoInst>();
+        go->target = preheader_block;
+        go->source_span = source_span_from(for_node);
+        builder_.append_instruction(std::move(go));
+    }
+
+    const std::string& loop_var_name =
+        std::static_pointer_cast<symref>(for_node->var_ref())->name();
+    const SourceSpan source_span = source_span_from(for_node);
+
+    // preheader 只求值一次迭代表达式；之后循环体内修改 a 或 i 不会改变迭代序列。
+    builder_.set_insert_point(preheader_block);
+    const ValueId iterable = lower_expr(for_node->cond());
+    if (!iterable.is_valid()) {
+        return;
+    }
+
+    // iter_index 是唯一的循环携带内部状态；类型固定为 int64，不参与用户名字查找。
+    const SlotId iter_index_slot = builder_.create_slot(
+        Slot::InternalLocal,
+        "__foreach_iter_index",
+        source_span,
+        [&] {
+            SlotAttrs attrs;
+            attrs.is_mutable = 1;
+            attrs.fixed_type = SlotAttrs::Int64Scalar;
+            return attrs;
+        }());
+    if (!iter_index_slot.is_valid()) {
+        return;
+    }
+
+    // foreach_init 返回循环不变量 state/max_iter，后续 block 直接复用这两个 ValueId。
+    const ValueId state = builder_.create_value();
+    const ValueId max_iter = builder_.create_value();
+    if (!state.is_valid() || !max_iter.is_valid()) {
+        return;
+    }
+
+    // internal.foreach_init 捕获当前 iterable，确定最大迭代次数和 runtime 状态。
+    std::unique_ptr<CallInst> init = std::make_unique<CallInst>();
+    init->callee_kind = CallInst::Direct;
+    init->dispatch_type = Internal;
+    init->callee = InternedString("foreach_init");
+    init->results.push_back(state);
+    init->results.push_back(max_iter);
+    init->arguments.push_back(iterable);
+    init->source_span = source_span;
+    init->attrs.is_synthetic = 1;
+    builder_.append_instruction(std::move(init));
+
+    // Matlab for 的内部迭代下标从 1 开始，用户循环变量稍后由 foreach_iterate 写入。
+    std::unique_ptr<ConstInst> initial_index = std::make_unique<ConstInst>();
+    initial_index->result = builder_.create_value();
+    initial_index->value = Int64Constant{1};
+    initial_index->source_span = source_span;
+    initial_index->attrs.is_synthetic = 1;
+    const ValueId iter_index = initial_index->result;
+    builder_.append_instruction(std::move(initial_index));
+
+    std::unique_ptr<StoreSlotInst> store_initial_index = std::make_unique<StoreSlotInst>();
+    store_initial_index->slot_id = iter_index_slot;
+    store_initial_index->value = iter_index;
+    store_initial_index->source_span = source_span;
+    store_initial_index->attrs.is_synthetic = 1;
+    builder_.append_instruction(std::move(store_initial_index));
+
+    std::unique_ptr<GotoInst> preheader_go = std::make_unique<GotoInst>();
+    preheader_go->target = header_block;
+    preheader_go->source_span = source_span;
+    preheader_go->attrs.is_synthetic = 1;
+    builder_.append_instruction(std::move(preheader_go));
+
+    // header 只用内部 int64 比较判断是否结束，不触发 Matlab 运算符重载。
+    builder_.set_insert_point(header_block);
+    std::unique_ptr<LoadSlotInst> load_iter_index = std::make_unique<LoadSlotInst>();
+    load_iter_index->result = builder_.create_value();
+    load_iter_index->slot_id = iter_index_slot;
+    load_iter_index->source_span = source_span;
+    load_iter_index->attrs.is_synthetic = 1;
+    const ValueId current_iter_index = load_iter_index->result;
+    builder_.append_instruction(std::move(load_iter_index));
+
+    std::unique_ptr<BinaryInst> done = std::make_unique<BinaryInst>();
+    done->result = builder_.create_value();
+    done->op = Gt;
+    done->dispatch_type = Internal;
+    done->lhs = current_iter_index;
+    done->rhs = max_iter;
+    done->source_span = source_span;
+    done->attrs.is_synthetic = 1;
+    const ValueId done_value = done->result;
+    builder_.append_instruction(std::move(done));
+
+    std::unique_ptr<BranchInst> branch = std::make_unique<BranchInst>();
+    branch->condition = done_value;
+    branch->true_target = exit_block;
+    branch->false_target = body_block;
+    branch->source_span = source_span;
+    branch->attrs.is_synthetic = 1;
+    builder_.append_instruction(std::move(branch));
+
+    // body 开始时按当前 iter_index 取出本轮循环变量值，再写入用户可见名字。
+    builder_.set_insert_point(body_block);
+    std::unique_ptr<LoadSlotInst> load_body_index = std::make_unique<LoadSlotInst>();
+    load_body_index->result = builder_.create_value();
+    load_body_index->slot_id = iter_index_slot;
+    load_body_index->source_span = source_span;
+    load_body_index->attrs.is_synthetic = 1;
+    const ValueId body_iter_index = load_body_index->result;
+    builder_.append_instruction(std::move(load_body_index));
+
+    const ValueId current_value = builder_.create_value();
+    if (!current_value.is_valid()) {
+        return;
+    }
+
+    std::unique_ptr<CallInst> iterate = std::make_unique<CallInst>();
+    iterate->callee_kind = CallInst::Direct;
+    iterate->dispatch_type = Internal;
+    iterate->callee = InternedString("foreach_iterate");
+    iterate->results.push_back(current_value);
+    iterate->arguments.push_back(state);
+    iterate->arguments.push_back(body_iter_index);
+    iterate->source_span = source_span;
+    iterate->attrs.is_synthetic = 1;
+    builder_.append_instruction(std::move(iterate));
+
+    if (!store_named_result(loop_var_name, current_value, source_span_from(for_node->var_ref()))) {
+        return;
+    }
+
+    // 用户循环体可能改写循环变量名，但不会影响内部 iter_index/state/max_iter。
+    lower_stmt(for_node->tl());
+    if (builder_.current_block() != nullptr &&
+        !builder_.current_block()->has_terminator()) {
+        std::unique_ptr<GotoInst> body_go = std::make_unique<GotoInst>();
+        body_go->target = latch_block;
+        body_go->source_span = source_span_from(for_node->tl());
+        body_go->attrs.is_synthetic = 1;
+        builder_.append_instruction(std::move(body_go));
+    }
+
+    // latch 是 normal fallthrough 和 continue 的汇合点，统一推进下一轮 iter_index。
+    builder_.set_insert_point(latch_block);
+    std::unique_ptr<LoadSlotInst> load_latch_index = std::make_unique<LoadSlotInst>();
+    load_latch_index->result = builder_.create_value();
+    load_latch_index->slot_id = iter_index_slot;
+    load_latch_index->source_span = source_span;
+    load_latch_index->attrs.is_synthetic = 1;
+    const ValueId latch_iter_index = load_latch_index->result;
+    builder_.append_instruction(std::move(load_latch_index));
+
+    std::unique_ptr<ConstInst> one = std::make_unique<ConstInst>();
+    one->result = builder_.create_value();
+    one->value = Int64Constant{1};
+    one->source_span = source_span;
+    one->attrs.is_synthetic = 1;
+    const ValueId one_value = one->result;
+    builder_.append_instruction(std::move(one));
+
+    // 自增同样是内部 int64 primitive，不走用户级 plus 分派。
+    std::unique_ptr<BinaryInst> next_index = std::make_unique<BinaryInst>();
+    next_index->result = builder_.create_value();
+    next_index->op = Add;
+    next_index->dispatch_type = Internal;
+    next_index->lhs = latch_iter_index;
+    next_index->rhs = one_value;
+    next_index->source_span = source_span;
+    next_index->attrs.is_synthetic = 1;
+    const ValueId next_index_value = next_index->result;
+    builder_.append_instruction(std::move(next_index));
+
+    std::unique_ptr<StoreSlotInst> store_next_index = std::make_unique<StoreSlotInst>();
+    store_next_index->slot_id = iter_index_slot;
+    store_next_index->value = next_index_value;
+    store_next_index->source_span = source_span;
+    store_next_index->attrs.is_synthetic = 1;
+    builder_.append_instruction(std::move(store_next_index));
+
+    std::unique_ptr<GotoInst> latch_go = std::make_unique<GotoInst>();
+    latch_go->target = header_block;
+    latch_go->source_span = source_span;
+    latch_go->attrs.is_synthetic = 1;
+    builder_.append_instruction(std::move(latch_go));
+
+    // 后续语句从 for.end 继续 lower；break 也会跳到这个出口块。
+    builder_.set_insert_point(exit_block);
+}
+
 bool IRLowerer::append_call_arguments(
     std::vector<Operand>& arguments,
     const ast_ptr& in_args) {
@@ -702,9 +948,10 @@ bool IRLowerer::lower_named_invoke(
     if (!name_is_bound_variable) {
         if (const FunctionUnit* local_target = lookup_local_function(call->name())) {
             std::unique_ptr<CallInst> inst = std::make_unique<CallInst>();
-            inst->callee_kind = CallInst::Local;
+            inst->callee_kind = CallInst::Direct;
+            inst->dispatch_type = MFunction;
             inst->callee = InternedString(call->name());
-            inst->local_target = const_cast<FunctionUnit*>(local_target);
+            inst->m_function_target = const_cast<FunctionUnit*>(local_target);
             inst->source_span = source_span;
 
             for (std::size_t i = 0; i < result_count; ++i) {
@@ -893,9 +1140,10 @@ ValueId IRLowerer::lower_expr(const ast_ptr& node) {
                 if (const FunctionUnit* local_target = lookup_local_function(function_name)) {
                     if (builder_.find_name(function_name) == nullptr) {
                         std::unique_ptr<CallInst> inst = std::make_unique<CallInst>();
-                        inst->callee_kind = CallInst::Local;
+                        inst->callee_kind = CallInst::Direct;
+                        inst->dispatch_type = MFunction;
                         inst->callee = InternedString(function_name);
-                        inst->local_target = const_cast<FunctionUnit*>(local_target);
+                        inst->m_function_target = const_cast<FunctionUnit*>(local_target);
                         inst->source_span = source_span;
 
                         const ValueId result = builder_.create_value();
@@ -989,9 +1237,10 @@ ValueId IRLowerer::lower_expr(const ast_ptr& node) {
                 if (const FunctionUnit* local_target = lookup_local_function(function_name)) {
                     if (builder_.find_name(function_name) == nullptr) {
                         std::unique_ptr<CallInst> inst = std::make_unique<CallInst>();
-                        inst->callee_kind = CallInst::Local;
+                        inst->callee_kind = CallInst::Direct;
+                        inst->dispatch_type = MFunction;
                         inst->callee = InternedString(function_name);
-                        inst->local_target = const_cast<FunctionUnit*>(local_target);
+                        inst->m_function_target = const_cast<FunctionUnit*>(local_target);
                         inst->source_span = source_span;
 
                         const ValueId result = builder_.create_value();
@@ -1048,6 +1297,37 @@ ValueId IRLowerer::lower_expr(const ast_ptr& node) {
 
             return results.front();
         }
+        case node_colon: {
+            if (node->branch.size() != 2U && node->branch.size() != 3U) {
+                builder_.report(
+                    IRBuildDiagnostic::Error,
+                    "当前 lowering 暂不支持该冒号表达式",
+                    source_span_from(node));
+                return InvalidValueId;
+            }
+
+            std::unique_ptr<CallInst> inst = std::make_unique<CallInst>();
+            inst->callee_kind = CallInst::Direct;
+            inst->callee = InternedString("colon");
+            inst->source_span = source_span_from(node);
+
+            const ValueId result = builder_.create_value();
+            if (!result.is_valid()) {
+                return InvalidValueId;
+            }
+            inst->results.push_back(result);
+
+            for (const ast_ptr& branch : node->branch) {
+                const ValueId argument = lower_expr(branch);
+                if (!argument.is_valid()) {
+                    return InvalidValueId;
+                }
+                inst->arguments.push_back(argument);
+            }
+
+            builder_.append_instruction(std::move(inst));
+            return result;
+        }
         default:
             builder_.report(
                 IRBuildDiagnostic::Error,
@@ -1060,7 +1340,6 @@ ValueId IRLowerer::lower_expr(const ast_ptr& node) {
 
 void IRLowerer::predeclare_function_signature(const pcdata& parsed_unit) {
     SlotAttrs attrs;
-    attrs.is_user_visible = 1;
     attrs.is_mutable = 1;
 
     if (parsed_unit.ast != nullptr && parsed_unit.ast->nodetype == node_mfile_func) {
@@ -1125,7 +1404,6 @@ SlotId IRLowerer::ensure_slot_binding(std::string_view name, SourceSpan source_s
     }
 
     SlotAttrs attrs;
-    attrs.is_user_visible = 1;
     attrs.is_mutable = 1;
 
     const SlotId slot_id = builder_.create_slot(

@@ -44,7 +44,21 @@
 - 提供 numeric、text、container、callable 等分类 helper，分类本身不作为独立 atom 存在
 - 提供稳定调试名和 `TypeSet` 输出格式，便于 smoke test、printer、verifier 和后续类型分析共享
 
+6. 增加第一版 `for` 循环 lowering，见 [for_loop_lowering_design.md](/home/zj/Desktop/Baltam_IR/doc/for_loop_lowering_design.md)。
+
+当前支持：
+
+- 使用 `for.preheader / for.header / for.body / for.latch / for.end` 五块 CFG 形状
+- `1:10` 这类 `node_colon` 表达式 lower 为非 internal 的特殊运算符 `colon` call
+- `for` 协议 lower 出 `internal.foreach_init` 和 `internal.foreach_iterate` 两个 helper 调用
+- 使用 `extern / int64` 类型事实记录 `foreach_init` 的 state / max_iter，并只用内部
+  `internal_local` slot 保存 `__foreach_iter_index`
+- header 比较和 latch 自增打印为 `internal.cmp_gt` / `internal.add`，不走 Matlab
+  运算符重载
+- 通过 `test/m/test2/test2.m` 和 `test/smoke_test/test2_smoke.cpp` 覆盖简单循环
+
 TODO：
 
 - 增加 `parent_get` 节点
-- 支持 `for / while / switch` 及其嵌套情况
+- 支持 `while / switch` 及控制流嵌套情况
+- 补齐 `for` 的 `break / continue`、嵌套循环和更完整迭代协议

@@ -34,6 +34,7 @@ std::ostream& operator<<(std::ostream& os, TypeSet type_set) {
     append_leaf(TypeSet::cell_array(), "cell_array");
     append_leaf(TypeSet::struct_array(), "struct_array");
     append_leaf(TypeSet::function_handle(), "function_handle");
+    append_leaf(TypeSet::external_object(), "extern");
 
     return os;
 }

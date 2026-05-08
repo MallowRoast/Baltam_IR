@@ -2,7 +2,7 @@
 %
 % 这个用例专门覆盖“脚本中的 local 函数”场景。虽然文件尾部定义了
 % `sin(x) = x + 1`，但脚本主体里的 `sin(a)` 目前仍应保守保持为 `apply`，
-% 而不是在 lowering 阶段直接静态分派成 `call_local`。
+% 而不是在 lowering 阶段直接静态分派成 `call mfunc`。
 %
 % 也就是说，这个用例的重点不是 local 函数体本身，而是验证：
 % - 同文件 local 函数已经能被收集到 `MFileUnit`

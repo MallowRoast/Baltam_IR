@@ -135,26 +135,28 @@ std::unordered_map<InternedString, FunctionUnit*> local_function_map;
 - “按名字直接调用某个 symbol”
 - “已经静态命中当前文件内某个 local 函数”
 
-因此建议把 `CallInst::CalleeKind` 扩成：
+因此 `CallInst` 使用 `dispatch_type = MFunction` 表达已经静态命中某个 M 函数。
+`callee_kind` 仍只描述 callee 的表示形式：
 
 ```cpp
 enum CalleeKind : std::uint8_t {
     Direct,
-    Local,
     Indirect,
 };
 ```
 
-同时在 `CallInst` 中增加：
+同时在 `CallInst` 中保留静态 M 函数目标：
 
 ```cpp
-FunctionUnit* local_target = nullptr;
+DispatchType dispatch_type = MFunction;
+FunctionUnit* m_function_target = nullptr;
 ```
 
 其中：
 
 - `Direct`：仍沿用 `callee = InternedString(...)`
-- `Local`：`callee` 仍可保留函数名，真正的静态目标由 `local_target` 指向
+- `dispatch_type = MFunction`：`callee` 仍可保留函数名，真正的静态目标由
+  `m_function_target` 指向
 - `Indirect`：继续通过 `ValueId` / `SlotId` 等 operand 表达
 
 这样可以明确表达：
@@ -208,7 +210,7 @@ FunctionUnit* local_target = nullptr;
 可以改成：
 
 ```text
-%3 = call_local @sin(%4)
+%3 = call mfunc @sin(%4)
 ```
 
 或其他等价格式。关键是要能区分：

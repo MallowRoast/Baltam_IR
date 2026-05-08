@@ -13,6 +13,7 @@
 namespace baltam {
 
 struct if_flow;
+struct flow;
 struct multipleFuncCall;
 struct symasgn;
 class pcdata;
@@ -54,6 +55,7 @@ private:
     void lower_assign_stmt(const std::shared_ptr<symasgn>& assign);
     void lower_call_stmt(const std::shared_ptr<multipleFuncCall>& call);
     void lower_if_stmt(const std::shared_ptr<if_flow>& if_node);
+    void lower_for_stmt(const std::shared_ptr<flow>& for_node);
     [[nodiscard]] ValueId lower_expr(const ast_ptr& node);
     /**
      * @brief 统一 lower 调用实参列表。

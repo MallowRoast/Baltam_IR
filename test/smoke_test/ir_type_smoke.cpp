@@ -31,12 +31,15 @@ void verify_categories() {
     const TypeSet string = TypeSet::string_scalar();
     const TypeSet mixed = int64.join(string);
     const TypeSet function_handle = TypeSet::function_handle();
+    const TypeSet external_object = TypeSet::external_object();
 
     smoke_test::require(int64.definitely(TypeSet::numeric()), "int64 应必然属于 numeric");
     smoke_test::require(mixed.maybe(TypeSet::numeric()), "mixed 应可能属于 numeric");
     smoke_test::require(!mixed.definitely(TypeSet::numeric()), "mixed 不应必然属于 numeric");
     smoke_test::require(function_handle.definitely(TypeSet::callable()), "function handle 应必然 callable");
     smoke_test::require(!int64.maybe(TypeSet::callable()), "int64 不应可能 callable");
+    smoke_test::require(!external_object.maybe(TypeSet::numeric()), "extern 不应属于 numeric");
+    smoke_test::require(!external_object.maybe(TypeSet::callable()), "extern 不应属于 callable");
 }
 
 void verify_formatting() {
@@ -52,6 +55,12 @@ void verify_formatting() {
     smoke_test::require(
         double_output.str() == "double",
         "float64 类型集合应按 IR 文本习惯打印为 double");
+
+    std::ostringstream external_object_output;
+    external_object_output << TypeSet::external_object();
+    smoke_test::require(
+        external_object_output.str() == "extern",
+        "external object 应按 extern 打印");
 }
 
 } // namespace

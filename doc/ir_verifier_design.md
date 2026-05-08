@@ -135,6 +135,8 @@ verifier 会检查：
 - `Slot::Hidden` 必须设置非 `None` 的 `hidden_role`
 - 非 `Hidden` slot 的 `hidden_role` 必须为 `None`
 - 除 `None` 外，同一个 `HiddenRole` 在同一 `CodeUnit` 中最多出现一次
+- `Slot::InternalLocal` 可用于 lowering/runtime 内部普通状态，但不能设置
+  `hidden_role`
 - `WorkspaceHandle` 只能出现在 `ScriptUnit`
 - `Nargin / Nargout / Varargin / Varargout` 只能出现在 `FunctionUnit`
 
@@ -210,20 +212,20 @@ verifier 会检查：
 - `GotoInst::target` 必须非空，且属于同一 `CodeUnit`
 - `BranchInst::true_target / false_target` 必须非空，且属于同一 `CodeUnit`
 
-`CallInst` 还会按 `callee_kind` 做额外检查：
+`CallInst` 还会按 `callee_kind / dispatch_type` 做额外检查：
 
 - `Direct`
-  - `local_target` 必须为空
   - `callee` 必须是非空 `InternedString`
-- `Local`
-  - `local_target` 必须非空
-  - `local_target` 必须属于同一个 `MFileUnit`
-  - `callee` 必须是非空 `InternedString`
-  - `callee` 名字必须与 `local_target->name` 一致
 - `Indirect`
-  - `local_target` 必须为空
+  - 不能使用 `Internal / MFunction` 静态分派
   - `callee` 不能是 `InternedString`
   - `callee` 如果是 `ValueId` 或 `SlotId`，必须满足普通 operand 引用规则
+- `dispatch_type = Internal`
+  - `callee_kind` 必须是 `Direct`
+- `dispatch_type = MFunction`
+  - `m_function_target` 必须非空
+  - `m_function_target` 必须属于同一个 `MFileUnit`
+  - `callee` 名字必须与 `m_function_target->name` 一致
 
 ## 当前不检查的范围
 

@@ -16,7 +16,7 @@ namespace baltam {
  * - 多 bit 表示 union。
  */
 struct TypeSet {
-    static constexpr std::size_t BitCount = 10;
+    static constexpr std::size_t BitCount = 11;
     static_assert(BitCount <= 64, "TypeSet::BitCount must fit in uint64_t");
 
     using bits_type = std::bitset<BitCount>;
@@ -136,6 +136,10 @@ struct TypeSet {
         return TypeSet(FunctionHandleMask);
     }
 
+    [[nodiscard]] static constexpr TypeSet external_object() noexcept {
+        return TypeSet(ExternalObjectMask);
+    }
+
     [[nodiscard]] static constexpr TypeSet integer() noexcept {
         return TypeSet(Int64Mask | UInt64Mask);
     }
@@ -178,6 +182,7 @@ private:
     static constexpr std::uint64_t CellMask = std::uint64_t{1} << 7;
     static constexpr std::uint64_t StructMask = std::uint64_t{1} << 8;
     static constexpr std::uint64_t FunctionHandleMask = std::uint64_t{1} << 9;
+    static constexpr std::uint64_t ExternalObjectMask = std::uint64_t{1} << 10;
     static constexpr std::uint64_t AnyMask =
         BitCount >= 64
             ? ~std::uint64_t{0}

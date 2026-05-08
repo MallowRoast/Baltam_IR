@@ -337,6 +337,160 @@
 
 也就是说，脚本 local 不是天然不能删除，而是删除条件比函数文件更强。
 
+### Pass 6：通用 CFG simplify
+
+#### 目标
+
+在不改变语义的前提下，清理 lowering 或其他 pass 留下的冗余 CFG 结构，减少解释执行时的
+block dispatch 成本，并给后续分析提供更小、更规整的图。
+
+这条 pass 不应是 `for` 专用优化。`for` 当前保留
+`preheader / header / body / latch / end` 的 canonical form，是为了让 `break / continue`、
+loop 分析、SSA 构造和后续循环优化更容易识别。是否减少 block 数量，应交给通用
+CFG 清理规则处理。
+
+#### 第一阶段可以覆盖的规则
+
+- 删除不可达 block。
+- 合并空的直通 block，例如只包含 `br label %next` 且没有必须保留的语义标记。
+- 折叠连续跳转，例如 `A -> B -> C` 中 `B` 只是空跳转块时，把 `A` 改跳 `C`。
+- 合并只有一个 predecessor、一个 successor，且不会改变源码注释 / debug 边界语义的 block。
+- 删除或更新过时的 predecessor / successor 边，保证 CFG 边和 terminator 目标一致。
+
+#### 与 `for` lowering 的关系
+
+`for` lowering 仍应先生成规范的五块形状：
+
+```text
+for.preheader -> for.header -> for.body -> for.latch -> for.header
+                         \-> for.end
+```
+
+后续如果某个具体循环没有 `break / continue`，且 `latch` 只包含简单自增和回跳，
+CFG simplify 可以选择性地把 `body -> latch` 这类结构压缩掉。
+
+但这个优化不应在 lowering 阶段做，原因是：
+
+- lowering 阶段更重要的是输出稳定、容易验证的语义形状
+- `continue` 的自然目标是 `latch`，提前合并会增加后续支持 `continue` 的复杂度
+- loop 分析、类型推导、SSA 提升等 pass 更容易消费 canonical loop form
+- block 数量是否真的影响性能，需要等解释器或 bytecode 执行路径稳定后再评估
+
+#### 运行时机
+
+这条 pass 可以有两个使用点：
+
+- lowering 后，作为进入解释执行或打印前的可选清理
+- 内联、DCE、常量折叠等变换后，作为通用 cleanup pass 重复运行
+
+第一阶段更建议默认保守：先提供 pass 和测试，不急着改变当前 smoke test 的打印基线。
+等需要面向执行性能时，再决定是否默认启用。
+
+### Pass 7：常量折叠
+
+#### 目标
+
+把已经能静态证明结果的表达式提前求值，减少运行时计算，并为死分支消除、DCE 和
+CFG simplify 暴露更多机会。
+
+#### 第一阶段可以覆盖的规则
+
+- 简单 `ConstInst` 传播到只依赖常量的纯运算。
+- 对已知纯且语义稳定的 `UnaryInst / BinaryInst` 做折叠。
+- 对比较结果做折叠，例如两个已知常量比较后生成 logical 常量。
+- 对不影响动态语义的内部 helper，可在其语义完全固定后增加专门规则。
+
+#### 安全边界
+
+- 不能因为语法是 `add / colon / sin` 就直接折叠；Matlab 调用和运算可能动态分派。
+- `ApplyInst` 默认不能折叠，除非前置 pass 已经证明调用目标和参数语义稳定。
+- `CallInst(Direct)` 也不天然等于可折叠；只有已知 pure builtin / internal helper 才能折叠。
+- 如果 `ValueId` 的类型事实仍是 `unknown`，且折叠规则依赖具体类型，就必须保守跳过。
+
+也就是说，这条 pass 的关键前提不是“看起来像常量表达式”，而是：
+
+> 操作语义已经静态确定，并且输入都是可用常量事实。
+
+### Pass 8：复制消除 / copy propagation
+
+#### 目标
+
+消除 IR 层面的冗余 `CopyInst` 和单纯值别名，减少无意义的中间 `ValueId`，并简化后续
+DCE、常量折叠和 SSA 提升的输入。
+
+这里的“复制消除”只指 IR 数据流里的 `copy` 或等价别名传播，不是运行时对象的
+copy-on-write，也不是函数调用参数的物理复制。
+
+#### 第一阶段可以覆盖的规则
+
+- `x = copy y` 后，若 `x` 的所有 use 都可安全替换为 `y`，则替换 use 并删除该 `CopyInst`。
+- 多级 copy 链压缩，例如 `x = copy y; z = copy x` 可直接让 `z` 使用 `y`。
+- 常量 copy 可与常量传播协同，让后续常量折叠直接看到原始常量。
+
+#### 需要注意的问题
+
+- 替换 use 时必须维护 `ValueTable`、def-use 信息和 verifier 约束。
+- 如果后续 `CopyInst` 被赋予额外语义，例如 materialize、guarded copy 或对象边界，
+  就不能再按普通别名处理。
+- 当前阶段更适合先做局部、显式 use 列表或扫描式替换版本，等 def-use 基础设施稳定后再扩展。
+
+### Pass 9：死分支消除
+
+#### 目标
+
+当 `BranchInst` 的条件已经能静态确定时，把条件分支改写成无条件跳转，并删除不可达路径。
+
+这条 pass 通常吃常量折叠的结果。例如：
+
+```text
+%c = const true
+br %c, label %then, label %else
+```
+
+可以改写成：
+
+```text
+br label %then
+```
+
+然后交给 CFG simplify 删除不可达的 `else` 路径。
+
+#### 第一阶段可以覆盖的规则
+
+- 条件直接是 logical 常量。
+- 条件来自已折叠出的 logical `ConstInst`。
+- `if` / loop header 中明显恒真或恒假的条件。
+
+#### 安全边界
+
+- Matlab 条件表达式本身的 truthiness 规则可能不只是 scalar bool，不能擅自把任意常量对象当作
+  C/C++ 风格布尔值处理。
+- 如果条件值来自 `ApplyInst` 或动态 `CallInst`，即使看起来名字是 `true/false` 相关函数，也不能折叠。
+- 对循环分支做消除时要特别注意是否会改变 loop 结构；删除后必须立刻跑 CFG 验证和 CFG simplify。
+
+### Pass 10：死代码消除
+
+#### 目标
+
+删除没有 observable effect、且结果也不再被使用的指令，减少 IR 体量。
+
+#### 第一阶段可以覆盖的规则
+
+- 删除未使用结果的 `ConstInst`。
+- 删除未使用结果且无副作用的 `CopyInst`。
+- 删除未使用结果且已知 pure 的 `UnaryInst / BinaryInst`。
+- 删除不可达 block 中的所有指令，这部分通常配合 CFG simplify 完成。
+
+#### 安全边界
+
+- `StoreSlotInst / StoreWorkspaceInst` 不能仅因为结果为空就删除；它们表达写入。
+- `ApplyInst / CallInst` 默认不能删除，因为可能有副作用、抛错、修改动态环境或触发分派逻辑。
+- `LoadWorkspaceInst` 是否可删除需要谨慎：即使只是读，也可能涉及动态 workspace 查询和错误行为。
+- 删除指令后必须同步更新 `ValueTable`、CFG 状态和后续 use 信息。
+
+第一版 DCE 更适合作为保守 pass：只删除明确 pure、明确无 use 的内容。等 effect model 更细以后，
+再逐步扩大可删范围。
+
 ### 粗略顺序
 
 当前更合理的实现顺序是：
@@ -344,8 +498,11 @@
 1. 先做 script 名字稳定区间分析
 2. 基于稳定结果把部分 `LoadWorkspaceInst` 收敛成 `LoadSlotInst`
 3. 再基于同一份稳定信息，把部分 `apply` 收敛成 `call`
-4. 再对满足前提的静态 `call` / `call_local` 做函数内联
-5. 再对 function 内的纯局部 slot 做寄存器化 / SSA 提升，先从单 block 或稳定 region 开始
-6. 最后做基于 `call_local` 可达性的 local function DCE；若内联后出现新的死 local 函数，可以再重复一轮
+4. 跑一轮基础 cleanup：复制消除、常量折叠、死分支消除、CFG simplify、DCE
+5. 再对满足前提的静态 `call` / `call_local` 做函数内联
+6. 内联后重复基础 cleanup，吃掉内联暴露出来的 copy、常量、死分支和死代码
+7. 再对 function 内的纯局部 slot 做寄存器化 / SSA 提升，先从单 block 或稳定 region 开始
+8. 最后做基于 `call_local` 可达性的 local function DCE；若内联后出现新的死 local 函数，可以再重复一轮
+9. 每个会改 CFG 的 pass 之后，都可以再跑一轮 CFG simplify 作为 cleanup
 
 原因很简单：第二个 pass 依赖的前提，和第一个 pass 证明的其实是同一类事实；函数内联又依赖调用目标已经先收敛成足够稳定的静态 `call`；而寄存器化 / SSA 提升则最适合放在内联之后，去吃掉内联额外暴露出来的局部 slot 数据流机会。

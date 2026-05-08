@@ -132,6 +132,105 @@ void verify_append_instruction_records_simple_type_facts() {
     smoke_test::require(!copied_info->type_fact.is_scalar, "copy 应复制输入标量事实");
 }
 
+void verify_load_slot_uses_fixed_slot_type() {
+    IRBuilder builder;
+    MFileUnit& mfile = builder.begin_file("value_table_smoke.m");
+    (void)mfile;
+
+    ScriptUnit& unit = builder.begin_script_unit("value_table_smoke", SourceSpan::invalid());
+    BasicBlock* entry = unit.create_block("entry", SourceSpan::invalid());
+    smoke_test::require(unit.set_entry_block(entry), "应成功设置入口块");
+    builder.set_current_unit(&unit);
+    builder.set_insert_point(entry);
+
+    SlotAttrs attrs;
+    attrs.is_mutable = 1;
+    attrs.fixed_type = SlotAttrs::Int64Scalar;
+    const SlotId slot = builder.create_slot(
+        Slot::InternalLocal,
+        "__fixed_int64_slot",
+        SourceSpan::invalid(),
+        attrs);
+    smoke_test::require(slot.is_valid(), "应成功创建 fixed int64 slot");
+
+    const ValueId loaded = builder.create_value();
+    auto load_inst = std::make_unique<LoadSlotInst>();
+    load_inst->result = loaded;
+    load_inst->slot_id = slot;
+    builder.append_instruction(std::move(load_inst));
+
+    const ValueInfo* loaded_info = unit.value_table.find(loaded);
+    smoke_test::require(loaded_info != nullptr, "load_slot 结果应存在于 value_table");
+    smoke_test::require(!loaded_info->type_fact.is_unknown,
+                        "fixed slot 的 load_slot 结果不应是 unknown");
+    smoke_test::require(loaded_info->type_fact.types == TypeSet::int64(),
+                        "fixed int64 slot 的 load_slot 结果应为 int64");
+    smoke_test::require(loaded_info->type_fact.is_scalar,
+                        "fixed int64 slot 的 load_slot 结果应为 scalar");
+}
+
+void verify_internal_add_uses_matching_operand_type() {
+    IRBuilder builder;
+    MFileUnit& mfile = builder.begin_file("value_table_smoke.m");
+    (void)mfile;
+
+    ScriptUnit& unit = builder.begin_script_unit("value_table_smoke", SourceSpan::invalid());
+    BasicBlock* entry = unit.create_block("entry", SourceSpan::invalid());
+    smoke_test::require(unit.set_entry_block(entry), "应成功设置入口块");
+    builder.set_current_unit(&unit);
+    builder.set_insert_point(entry);
+
+    const ValueId int_lhs = builder.create_value();
+    auto int_lhs_inst = std::make_unique<ConstInst>();
+    int_lhs_inst->result = int_lhs;
+    int_lhs_inst->value = Int64Constant{1};
+    builder.append_instruction(std::move(int_lhs_inst));
+
+    const ValueId int_rhs = builder.create_value();
+    auto int_rhs_inst = std::make_unique<ConstInst>();
+    int_rhs_inst->result = int_rhs;
+    int_rhs_inst->value = Int64Constant{2};
+    builder.append_instruction(std::move(int_rhs_inst));
+
+    const ValueId int_sum = builder.create_value();
+    auto int_add_inst = std::make_unique<BinaryInst>();
+    int_add_inst->result = int_sum;
+    int_add_inst->op = Add;
+    int_add_inst->dispatch_type = Internal;
+    int_add_inst->lhs = int_lhs;
+    int_add_inst->rhs = int_rhs;
+    builder.append_instruction(std::move(int_add_inst));
+
+    const ValueInfo* int_sum_info = unit.value_table.find(int_sum);
+    smoke_test::require(int_sum_info != nullptr, "internal add 结果应存在于 value_table");
+    smoke_test::require(!int_sum_info->type_fact.is_unknown,
+                        "同类型 internal add 结果不应是 unknown");
+    smoke_test::require(int_sum_info->type_fact.types == TypeSet::int64(),
+                        "int64 + int64 的 internal add 结果应为 int64");
+    smoke_test::require(int_sum_info->type_fact.is_scalar,
+                        "标量 internal add 结果应保持 scalar");
+
+    const ValueId double_rhs = builder.create_value();
+    auto double_rhs_inst = std::make_unique<ConstInst>();
+    double_rhs_inst->result = double_rhs;
+    double_rhs_inst->value = Float64Constant{3.0};
+    builder.append_instruction(std::move(double_rhs_inst));
+
+    const ValueId mixed_sum = builder.create_value();
+    auto mixed_add_inst = std::make_unique<BinaryInst>();
+    mixed_add_inst->result = mixed_sum;
+    mixed_add_inst->op = Add;
+    mixed_add_inst->dispatch_type = Internal;
+    mixed_add_inst->lhs = int_lhs;
+    mixed_add_inst->rhs = double_rhs;
+    builder.append_instruction(std::move(mixed_add_inst));
+
+    const ValueInfo* mixed_sum_info = unit.value_table.find(mixed_sum);
+    smoke_test::require(mixed_sum_info != nullptr, "mixed internal add 结果应存在于 value_table");
+    smoke_test::require(mixed_sum_info->type_fact.is_unknown,
+                        "不同类型 internal add 结果应保持 unknown");
+}
+
 } // namespace
 } // namespace baltam
 
@@ -140,6 +239,8 @@ int main() {
         baltam::verify_create_value_registers_placeholder();
         baltam::verify_append_instruction_binds_definition();
         baltam::verify_append_instruction_records_simple_type_facts();
+        baltam::verify_load_slot_uses_fixed_slot_type();
+        baltam::verify_internal_add_uses_matching_operand_type();
         std::cout << "value_table_smoke passed\n";
     } catch (const std::exception& ex) {
         std::cerr << "value_table_smoke 失败: " << ex.what() << '\n';

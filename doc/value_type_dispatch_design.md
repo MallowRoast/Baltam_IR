@@ -76,8 +76,11 @@
 
 - IR builder 只写入“构建时能明确知道”的类型事实
 - `ConstInst` 写入精确常量类型事实；`CopyInst` 复制输入值的类型事实
-- `LoadSlotInst`、`LoadWorkspaceInst`、`UnaryInst`、`BinaryInst`、`ApplyInst`、`CallInst`
-  在构建阶段默认保持 `unknown`
+- `LoadSlotInst` 只有在读取固定类型 slot 时写入类型事实，否则保持 `unknown`
+- 少数 `dispatch_type = Internal` 的 call / binary primitive 拥有构建期摘要；动态分派
+  或未知 internal 目标仍保持 `unknown`
+- `LoadWorkspaceInst`、`UnaryInst`、`ApplyInst` 以及动态 `BinaryInst / CallInst` 在构建阶段
+  默认保持 `unknown`
 - `Any` 不作为构建阶段的默认值；它表示后续类型分析已经运行，但只能给出全集上界
 - 先在 `FunctionUnit` 中实现正式类型数据流，再逐步扩大到脚本稳定区间
 - 先不处理 `global`、`persistent`、closure 捕获、`eval` 引入的新名字
@@ -294,7 +297,9 @@ struct ResolutionFact {
 IR builder 只写入不依赖数据流、不依赖名字解析、也不依赖 Matlab 动态分派的事实。
 
 - `ConstInst` 直接给出精确类型事实
+- `LoadSlotInst` 如果读取的 slot 带有 `SlotAttrs::fixed_type`，则直接使用该固定类型
 - `CopyInst` 复制输入值的 `TypeFact`
+- 已知 internal helper / primitive 可以写入保守摘要
 - 其他结果值默认保持 `unknown`
 
 例如：
@@ -304,6 +309,12 @@ IR builder 只写入不依赖数据流、不依赖名字解析、也不依赖 Ma
 - `StringLiteralConstant -> string`
 - `EmptyDoubleMatrixConstant`
   如果当前实现能明确表达空 double 矩阵，则可记录为 `double` 且非标量；否则保留 `unknown`
+- `SlotAttrs::Int64Scalar -> int64 scalar`
+- `internal.foreach_init(iterable) -> (extern scalar, int64 scalar)`
+- `internal.cmp_gt(lhs, rhs) -> logical scalar`
+- `internal.add(lhs, rhs)`
+  只有当左右操作数都已有类型事实，且 `TypeSet` 与 scalar 属性完全一致时，结果才继承
+  该类型；否则保持 `unknown`
 
 Matlab 源码中的普通数字字面量当前按 double 语义降低；例如 `.m` 文件里的 `1` 会生成
 `Float64Constant`，用户可见 IR 打印为 `double`。
@@ -312,7 +323,7 @@ Matlab 源码中的普通数字字面量当前按 double 语义降低；例如 `
 
 构建结束后，再由单独的类型推导 pass 逐步填充更多事实：
 
-- `LoadSlotInst` 可通过 slot reaching-def / 前向数据流获得类型事实
+- 没有固定类型的 `LoadSlotInst` 可通过 slot reaching-def / 前向数据流获得类型事实
 - `LoadWorkspaceInst` 只有在脚本名字稳定区间分析能证明来源时才给出更强事实
 - `UnaryInst / BinaryInst` 只有在静态分派或 builtin 语义可证明时才给出具体结果类型
 - `ApplyInst / CallInst` 只有在名字解析和实参类型足够收敛时才给出具体结果类型
@@ -323,7 +334,8 @@ Matlab 源码中的普通数字字面量当前按 double 语义降低；例如 `
 第一版类型推导完全可以只支持最小数值规则，例如：
 
 - `double + double -> double`
-- `int64 + int64 -> int64` 或保守提升到更宽上界
+- `int64 + int64 -> int64`
+- 两侧类型事实不一致的内部 `add -> unknown`
 - 比较运算结果 -> `Logical`
 
 ### 7.3 slot 数据流
@@ -348,7 +360,8 @@ Matlab 源码中的普通数字字面量当前按 double 语义降低；例如 `
 - `ApplyInst`
   构建阶段默认保持 `unknown`
 - `CallInst`
-  构建阶段默认保持 `unknown`
+  动态分派的调用构建阶段默认保持 `unknown`；少数 internal helper 可以按内置摘要写入
+  类型事实，例如 `internal.foreach_init`
 
 后续 pass 若命中已知 builtin 摘要，且名字解析与实参类型足够稳定，才可根据实参类型生成更强结果。
 否则，如果 pass 已经分析完仍无法收窄，结果可保守设为 `Any`。

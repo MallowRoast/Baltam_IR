@@ -230,24 +230,27 @@ Matlab 的关键难点之一是“名字”不只是局部变量名，还可能�
 
 `SlotTable` 属于 `CodeUnit`，而不属于某个 `BasicBlock`。这是因为 slot 生命周期天然跨 block。
 
-第一版 `Slot` 只区分四类：
+第一版 `Slot` 区分五类：
 
 - `arg`
 - `local`
+- `internal_local`
 - `ret`
 - `hidden`
 
 其中：
 
-- `arg/local/ret` 用于表达常规 frame 状态
+- `arg/local/ret` 用于表达用户源码可命名的常规 frame 状态
+- `internal_local` 用于表达 lowering/runtime 创建的普通内部状态，例如 for
+  lowering 的迭代下标
 - `hidden` 用于表达 `nargin`、`nargout`、`varargin`、`varargout`、`script environment handle`
 
 当前实现中，slot 分类完全由：
 
 - `Slot::type`
-- `SlotAttrs::hidden_role`
 
-决定，不再维护额外的并行分类索引。
+决定；只有 `Slot::Hidden` 需要再通过 `SlotAttrs::hidden_role` 细分特殊角色。
+不再维护额外的并行分类索引。
 
 ## 控制流模型
 

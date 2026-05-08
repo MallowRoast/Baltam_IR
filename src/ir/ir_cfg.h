@@ -22,13 +22,30 @@ struct TypeFact {
 
 /**
  * @brief slot 级语义属性。
+ *
+ * `Slot::Type` 决定 slot 在 frame 中的语义分类。这里仅保存不改变 slot 身份的补充
+ * 事实，例如是否可变、是否有固定类型，以及 `Slot::Hidden` 专用的隐藏角色。
  */
 struct SlotAttrs {
     /**
-     * @brief `hidden slot` 的角色类型。
+     * @brief slot 级固定类型事实。
+     *
+     * 大多数 slot 的类型需要依赖后续分析收窄，因此保持 `Unknown`。少数
+     * lowering/runtime 内部 slot 的类型由 IR schema 静态决定，可通过该字段声明。
+     */
+    enum FixedType : std::uint8_t {
+        Unknown,
+        Int64Scalar,
+    };
+
+    /**
+     * @brief `Slot::Hidden` 的角色类型。
      *
      * 这类 slot 不对应用户源码中的普通局部变量，而是承载调用约定或执行环境
-     * 所必需的运行时状态。这样设计的目的主要有三点：
+     * 所必需的特殊运行时状态。普通 lowering 内部局部状态应使用
+     * `Slot::InternalLocal`，不要占用 hidden role。
+     *
+     * hidden slot 这样设计的目的主要有三点：
      * 1. 让 frame 布局保持稳定，不因可变参数个数或环境对象细节而动态改变。
      * 2. 把用户可见变量与运行时辅助状态分开，降低后续优化和验证的歧义。
      * 3. 让 bytecode、解释器和 JIT 都能通过统一的 slot 机制访问这些隐藏状态。
@@ -45,11 +62,14 @@ struct SlotAttrs {
     /**
      * @brief 构造一个清零后的 slot 属性集合。
      */
-    SlotAttrs() noexcept : is_user_visible(0), is_mutable(0), hidden_role(None) {}
+    SlotAttrs() noexcept
+        : is_mutable(0),
+          hidden_role(None),
+          fixed_type(Unknown) {}
 
-    std::uint8_t is_user_visible : 1;
     std::uint8_t is_mutable : 1;
     std::uint8_t hidden_role : 3;
+    std::uint8_t fixed_type : 2;
 };
 
 /**
@@ -60,10 +80,11 @@ struct Slot {
      * @brief slot 的类别。
      */
     enum Type : std::uint8_t {
-        Arg,
-        Local,
-        Ret,
-        Hidden,
+        Arg,            ///< 函数输入参数 slot。
+        Local,          ///< 用户源码中的普通局部变量 slot。
+        InternalLocal,  ///< lowering/runtime 创建的普通内部局部状态 slot。
+        Ret,            ///< 函数返回值 slot。
+        Hidden,         ///< 带 `HiddenRole` 的特殊 ABI/runtime slot。
     };
 
     SlotId slot_id = InvalidSlotId;
@@ -91,6 +112,15 @@ struct Slot {
     }
 
     /**
+     * @brief 判断当前 slot 是否为 lowering/runtime 内部局部 slot。
+     *
+     * @return `type == InternalLocal` 时返回 true。
+     */
+    [[nodiscard]] bool is_internal_local() const noexcept {
+        return type == InternalLocal;
+    }
+
+    /**
      * @brief 判断当前 slot 是否为返回值 slot。
      *
      * @return `type == Ret` 时返回 true。
@@ -112,8 +142,9 @@ struct Slot {
 /**
  * @brief `CodeUnit` 的 slot 表。
  *
- * 当前版本直接使用单一 `slots` 容器保存全部 slot 定义，slot 的分类由
- * `Slot::type` 与 `SlotAttrs::hidden_role` 决定，不再额外维护并行分类索引。
+ * 当前版本直接使用单一 `slots` 容器保存全部 slot 定义。普通分类由
+ * `Slot::type` 决定，只有 `Slot::Hidden` 需要再通过 `SlotAttrs::hidden_role`
+ * 指明具体 ABI/runtime 角色。
  */
 struct SlotTable {
     std::vector<Slot> slots;

@@ -170,9 +170,9 @@ FunctionUnit
 
 ```text
 SlotAttrs
-  is_user_visible : bool
   is_mutable      : bool
   hidden_role     : HiddenRole
+  fixed_type      : FixedType
 ```
 
 其中 `HiddenRole` 当前包括：
@@ -184,12 +184,23 @@ SlotAttrs
 - `Varargout`
 - `WorkspaceHandle`
 
+`hidden_role` 只对 `Slot::Hidden` 有意义。普通 lowering 内部状态不使用
+`HiddenRole`，而是通过 `Slot::InternalLocal` 表达。
+
+`FixedType` 当前包括：
+
+- `Unknown`
+- `Int64Scalar`
+
+它用于表达 schema 已经完全确定的 slot 类型，例如 for lowering 里的内部
+`iter_index`。
+
 ### 4.2 Slot
 
 ```text
 Slot
   slot_id       : SlotId
-  type          : arg | local | ret | hidden
+  type          : arg | local | internal_local | ret | hidden
   name          : InternedString
   source_span   : SourceSpan
   attrs         : SlotAttrs
@@ -201,6 +212,13 @@ Slot
   slot 级稳定句柄。
 - `type`
   slot 的类别。
+  - `arg`：函数输入参数。
+  - `local`：用户源码中的普通局部变量。
+  - `internal_local`：lowering/runtime 创建的普通内部局部状态，可重复出现，不带
+    `HiddenRole`。
+  - `ret`：函数返回值。
+  - `hidden`：带 `HiddenRole` 的特殊 ABI/runtime slot，同一角色在一个
+    `CodeUnit` 中至多出现一次。
 - `name`
   源码名字或编译器生成名字。
 - `source_span`
@@ -273,6 +291,31 @@ ValueTable
 
 - `empty()`
 - `find(ValueId)`
+
+### 5.3 构建期类型事实
+
+`IRBuilder` 在 `append_instruction()` 时会给能够静态确定的结果写入第一版
+`TypeFact`。当前规则是保守的种子事实，不等价于完整类型推导：
+
+- `ConstInst`
+  根据常量种类写入精确类型事实，例如 `Int64Constant -> int64 scalar`、
+  `Float64Constant -> double scalar`。
+- `LoadSlotInst`
+  如果读取的 slot 带有 `SlotAttrs::fixed_type`，结果值使用该固定类型；否则保持
+  `unknown`。
+- `CopyInst`
+  复制输入 `ValueId` 当前已有的 `TypeFact`。
+- `CallInst(dispatch_type = internal)`
+  只有已知 internal helper 有构建期摘要。当前 `internal.foreach_init` 的第 0 个
+  结果为 `extern scalar`，第 1 个结果为 `int64 scalar`；其他 internal call 结果
+  保持 `unknown`。
+- `BinaryInst(dispatch_type = internal)`
+  `internal.cmp_gt` 结果为 `logical scalar`；`internal.add` 只有在左右操作数都已有
+  类型事实、且 `TypeSet` 与 scalar 属性完全一致时，结果才继承该类型，否则保持
+  `unknown`。
+
+动态分派的 `UnaryInst / BinaryInst / CallInst`、`ApplyInst` 和 `LoadWorkspaceInst` 在
+构建期默认保持 `unknown`，等待后续类型分析或调用解析 pass 收窄。
 
 ## 6. BasicBlock
 
@@ -456,23 +499,34 @@ Instruction
   - `arguments      : Operand[]`
   - 表示尚未消歧的源码层 `A(...)`
 - `CallInst`
-  - `results      : ValueId[]`
-  - `callee_kind  : direct | indirect`
-  - `callee       : Operand`
-  - `arguments    : Operand[]`
-  - 只表示已经确认是调用的语义
+  - `results           : ValueId[]`
+  - `callee_kind       : direct | indirect`
+  - `dispatch_type     : dynamic | builtin | internal | mfunction`
+  - `callee            : Operand`
+  - `m_function_target : FunctionUnit*`
+  - `arguments         : Operand[]`
+  - 只表示已经确认是调用的语义；`callee_kind` 说明 callee 的表示形式，
+    `dispatch_type` 说明调用目标是否已经静态确定以及目标类别。
+  - 静态分派到 local M 函数是 `dispatch_type = mfunction` 的一种，IR 中必须保存
+    对应的 `FunctionUnit*` 作为函数实例目标。
+  - lowering / runtime 内部 C++ helper 使用 `dispatch_type = internal`，打印为
+    `internal.xxx` 目标，不参与普通用户名字解析。
 - `CopyInst`
   - `result : ValueId`
   - `value  : Operand`
 - `UnaryInst`
-  - `result  : ValueId`
-  - `op      : UnaryOp`
-  - `operand : Operand`
+  - `result        : ValueId`
+  - `op            : UnaryOp`
+  - `dispatch_type : dynamic | builtin | internal`
+  - `operand       : Operand`
 - `BinaryInst`
-  - `result : ValueId`
-  - `op     : BinaryOp`
-  - `lhs    : Operand`
-  - `rhs    : Operand`
+  - `result        : ValueId`
+  - `op            : BinaryOp`
+  - `dispatch_type : dynamic | builtin | internal`
+  - `lhs           : Operand`
+  - `rhs           : Operand`
+  - 运算符如果静态分派到 M 函数，不继续保留为 `UnaryInst` / `BinaryInst`，
+    而是 lower 成 `CallInst(dispatch_type = mfunction)`。
 
 ### 8.2 终结类指令
 

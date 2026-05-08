@@ -29,7 +29,7 @@ std::size_t count_local_calls_to(const CodeUnit& unit, std::string_view callee_n
             }
 
             const auto* call = static_cast<const CallInst*>(inst_ptr.get());
-            if (call->callee_kind != CallInst::Local) {
+            if (call->dispatch_type != MFunction) {
                 continue;
             }
 
@@ -79,7 +79,7 @@ void verify_core_focus(const IRBuildResult& result) {
 
     smoke_test::require(
         smoke_test::count_instructions(*entry, Instruction::Call) == 2,
-        "主函数中应有两条 local call 指令");
+        "主函数中应有两条静态 M 函数 call 指令");
     smoke_test::require(
         smoke_test::count_instructions(*entry, Instruction::Apply) == 1,
         "主函数中应有一条 apply 指令用于 cos(a)");
@@ -102,14 +102,14 @@ void verify_printed_ir(const std::string& printed_ir) {
         printed_ir.find("define @test1_1() -> (%slot0 @c) {") != std::string::npos,
         "应打印 test1_1 主函数头");
     smoke_test::require(
-        printed_ir.find("call_local @sin(") != std::string::npos,
-        "主函数中的 sin(a) 应打印成 local call");
+        printed_ir.find("call mfunc @sin(") != std::string::npos,
+        "主函数中的 sin(a) 应打印成静态 M 函数 call");
     smoke_test::require(
-        printed_ir.find("call_local @uminus(") != std::string::npos,
-        "e = -a 应打印成 local uminus call");
+        printed_ir.find("call mfunc @uminus(") != std::string::npos,
+        "e = -a 应打印成静态 M 函数 uminus call");
     smoke_test::require(
-        printed_ir.find("call_local @cos(") == std::string::npos,
-        "cos(a) 不应打印成 local call");
+        printed_ir.find("call mfunc @cos(") == std::string::npos,
+        "cos(a) 不应打印成静态 M 函数 call");
     smoke_test::require(
         printed_ir.find("local @cos") != std::string::npos,
         "主函数中应存在名为 cos 的局部变量槽位");

@@ -72,7 +72,7 @@ std::vector<std::shared_ptr<pcdata>>
 - 在 lowering 前先识别入口单元和文件内 local `FunctionUnit`
 - 为函数从 `mFileFunc` AST 预声明参数 slot 和返回值 slot
 - 为每个 unit 创建 `entry` 基本块
-- lower `test0 / test0_1 / test1 / test1_1` 所需的最小语句/表达式子集：
+- lower `test0 / test0_1 / test1 / test1_1 / test2` 所需的最小语句/表达式子集：
   - 简单赋值
   - 数值字面量
   - 名字读取
@@ -82,6 +82,8 @@ std::vector<std::shared_ptr<pcdata>>
   - 带输出参数的圆括号应用语句
   - 文件内 `local` 函数的最小分派
   - `if / else`
+  - `for` 循环，当前采用 `for.preheader / for.header / for.body / for.latch / for.end`
+    五块 CFG 形状，详见 [for_loop_lowering_design.md](./for_loop_lowering_design.md)
   - 显式 `return`
   - 隐式 `return`
 
@@ -93,16 +95,17 @@ std::vector<std::shared_ptr<pcdata>>
 - `script` 中的 `A(...)` 先保留为 `ApplyInst`
 - `function` 中的 `A(...)` 会根据 lowering 期名字绑定表分派：
   若 `A` 尚未绑定为变量，且命中文件内 `local` 函数，则直接 lower 成
-  `CallInst(Local)`，打印时显示为 `call_local @A(...)`；
+  `CallInst(dispatch_type = MFunction)`，打印时显示为 `call mfunc @A(...)`，
+  并在 IR 中保存对应 `FunctionUnit*` 作为静态函数实例目标；
   若 `A` 尚未绑定为变量，且未命中文件内 `local` 函数，则直接 lower 成
-  `CallInst(Direct)`；
+  `CallInst(callee_kind = Direct, dispatch_type = Dynamic)`；
   若 `A` 已绑定为 slot 名字，则保留为 `ApplyInst`
 - `MFileUnit` 当前会记录入口单元之外的 local `FunctionUnit`，供 function lowering
   使用；script 主体当前仍不会因为 local 函数存在而把 `apply` 收敛成 `call`
 - `function` 中的一元 / 二元运算也会尝试按 Matlab 同名规则命中文件内 local 函数：
   例如 `+` 对应 `plus`，一元 `-` 对应 `uminus`。若这些名字未被局部变量遮蔽，
-  则表达式会直接 lower 成 `call_local`；若已经被局部变量遮蔽，则回退为普通
-  `UnaryInst` / `BinaryInst`
+  则表达式会直接 lower 成 `CallInst(dispatch_type = MFunction)`；若已经被局部变量
+  遮蔽，则回退为普通 `UnaryInst` / `BinaryInst`
 - `WorkspaceHandle` hidden slot 只出现在 `ScriptUnit`，并在第一次脚本名字读写时按需创建；
   当前脚本环境槽位名字采用 `<script_name>_env`
 
@@ -143,16 +146,20 @@ block 的创建与 `entry` 指定现在由 `CodeUnit` 自身完成，builder 只
 - `test/smoke_test/test0_1_smoke.cpp`
 - `test/smoke_test/test1_smoke.cpp`
 - `test/smoke_test/test1_1_smoke.cpp`
+- `test/smoke_test/test2_smoke.cpp`
 
 它会：
 
 - parse `test/m/test0/test0.m` / `test/m/test0/test0_1.m` / `test/m/test1/test1.m` /
-  `test/m/test1/test1_1.m`
+  `test/m/test1/test1_1.m` / `test/m/test2/test2.m`
 - build 成 `IR` 并检查结构完整、没有 `Error` 诊断
 - 校验各自的核心侧重点是否 lower 正确：
   - `test1`：脚本里即使定义了 local `sin`，主体中的 `sin(a)` 仍保留为 `apply`
   - `test1_1`：函数里 `sin(a)` / `-a` 可命中 local `sin` / `uminus`，而 `plus = 1`
     和 `cos = 1` 又会分别遮蔽 local `plus` / `cos`
+  - `test2`：简单 `for i = 1:10` 生成五块 loop CFG，其中 `colon` lower 为非
+    internal 的普通 `call`，`foreach_init` 和 `foreach_iterate` lower 为
+    可静态确定的 `internal.foreach_init` / `internal.foreach_iterate` 调用
 - 调用 `ir_print` 打印文本 IR
 - 校验关键打印结果与源码行号注释
 
@@ -160,7 +167,7 @@ block 的创建与 `entry` 指定现在由 `CodeUnit` 自身完成，builder 只
 
 当前 lowering 仍未覆盖完整 Matlab 语义，典型缺口包括：
 
-- `for / while / break / continue`
+- `while / break / continue`
 - `switch`
 - `try / catch`
 - 嵌套函数、匿名函数、闭包

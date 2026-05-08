@@ -183,12 +183,55 @@ const char* binary_mnemonic(BinaryOp op) noexcept {
     return "binary";
 }
 
+const char* internal_binary_mnemonic(BinaryOp op) noexcept {
+    switch (op) {
+        case Add:
+            return "internal.add";
+        case Gt:
+            return "internal.cmp_gt";
+        case Sub:
+        case Mul:
+        case Rdiv:
+        case Ldiv:
+        case Pow:
+        case ElemMul:
+        case ElemRdiv:
+        case ElemLdiv:
+        case ElemPow:
+        case And:
+        case Or:
+        case Lt:
+        case Le:
+        case Ge:
+        case Eq:
+        case Ne:
+            break;
+    }
+    return "internal";
+}
+
+const char* call_mnemonic(const CallInst& inst) noexcept {
+    switch (inst.dispatch_type) {
+        case Dynamic:
+            return "call";
+        case Builtin:
+            return "call builtin";
+        case Internal:
+            return "call";
+        case MFunction:
+            return "call mfunc";
+    }
+    return "call";
+}
+
 const char* slot_type_name(Slot::Type type) noexcept {
     switch (type) {
         case Slot::Arg:
             return "arg";
         case Slot::Local:
             return "local";
+        case Slot::InternalLocal:
+            return "internal_local";
         case Slot::Ret:
             return "ret";
         case Slot::Hidden:
@@ -213,6 +256,16 @@ const char* hidden_role_name(SlotAttrs::HiddenRole role) noexcept {
             return "env";
     }
     return "hidden";
+}
+
+const char* fixed_slot_type_name(SlotAttrs::FixedType fixed_type) noexcept {
+    switch (fixed_type) {
+        case SlotAttrs::Unknown:
+            return "";
+        case SlotAttrs::Int64Scalar:
+            return "int64";
+    }
+    return "";
 }
 
 std::string trim_ascii_spaces(std::string_view text) {
@@ -688,13 +741,21 @@ private:
         const std::vector<ValueId>& results,
         const Operand& callee,
         const std::vector<Operand>& arguments,
-        bool direct_callee) const {
+        bool direct_callee,
+        std::string_view direct_callee_prefix = {}) const {
         std::string text = format_result_prefix(unit, results);
         text += std::string(opcode);
         text += ' ';
-        text += direct_callee
-            ? format_symbol(std::get<InternedString>(callee))
-            : format_operand(callee);
+        if (direct_callee) {
+            const InternedString& direct_name = std::get<InternedString>(callee);
+            if (direct_callee_prefix.empty()) {
+                text += format_symbol(direct_name);
+            } else {
+                text += format_symbol(std::string(direct_callee_prefix) + std::string(direct_name));
+            }
+        } else {
+            text += format_operand(callee);
+        }
         text += '(';
         text += format_operand_list(arguments);
         text += ')';
@@ -724,6 +785,13 @@ private:
         if (!slot.name.empty()) {
             text += ' ';
             text += format_symbol(slot.name);
+        }
+
+        const char* fixed_type =
+            fixed_slot_type_name(static_cast<SlotAttrs::FixedType>(slot.attrs.fixed_type));
+        if (fixed_type[0] != '\0') {
+            text += " : ";
+            text += fixed_type;
         }
 
         return text;
@@ -771,26 +839,14 @@ private:
             }
             case Instruction::Call: {
                 const auto& inst = static_cast<const CallInst&>(instruction);
-                if (inst.callee_kind == CallInst::Local) {
-                    std::string text = format_result_prefix(unit, inst.results);
-                    text += "call_local ";
-                    if (inst.local_target != nullptr) {
-                        text += format_symbol(inst.local_target->name);
-                    } else {
-                        text += format_local_function_symbol(inst.local_target);
-                    }
-                    text += '(';
-                    text += format_operand_list(inst.arguments);
-                    text += ')';
-                    return text;
-                }
                 return format_call_like(
                     unit,
-                    "call",
+                    call_mnemonic(inst),
                     inst.results,
                     inst.callee,
                     inst.arguments,
-                    inst.callee_kind == CallInst::Direct);
+                    inst.callee_kind == CallInst::Direct,
+                    inst.dispatch_type == Internal ? "internal." : "");
             }
             case Instruction::Copy: {
                 const auto& inst = static_cast<const CopyInst&>(instruction);
@@ -804,6 +860,11 @@ private:
             }
             case Instruction::Binary: {
                 const auto& inst = static_cast<const BinaryInst&>(instruction);
+                if (inst.dispatch_type == Internal) {
+                    return format_value_result(unit, inst.result) + " = " +
+                        std::string(internal_binary_mnemonic(inst.op)) + ' ' +
+                        format_operand(inst.lhs) + ", " + format_operand(inst.rhs);
+                }
                 return format_value_result(unit, inst.result) + " = " +
                     std::string(binary_mnemonic(inst.op)) + ' ' +
                     format_operand(inst.lhs) + ", " + format_operand(inst.rhs);

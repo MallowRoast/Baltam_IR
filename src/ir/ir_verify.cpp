@@ -208,6 +208,11 @@ private:
                 !unit.is_function()) {
                 error("函数调用约定 hidden slot 只能出现在函数代码单元中", slot.source_span);
             }
+
+            if (slot.attrs.fixed_type != SlotAttrs::Unknown &&
+                slot.attrs.fixed_type != SlotAttrs::Int64Scalar) {
+                error("slot fixed_type 不合法", slot.source_span);
+            }
         }
     }
 
@@ -589,33 +594,34 @@ private:
     }
 
     void verify_call(const CallInst& inst, const CodeUnit& unit, const MFileUnit& mfile) {
+        if (inst.dispatch_type == Internal && inst.callee_kind != CallInst::Direct) {
+            error("Internal call 必须使用 Direct callee kind", inst.source_span);
+        }
+        if (inst.dispatch_type == MFunction) {
+            if (inst.m_function_target == nullptr) {
+                error("MFunction call 必须记录 m_function_target", inst.source_span);
+            } else if (!contains_unit(mfile, inst.m_function_target)) {
+                error("MFunction call 的 m_function_target 必须属于同一个文件", inst.source_span);
+            }
+        } else if (inst.m_function_target != nullptr) {
+            error("非 MFunction call 的 m_function_target 必须为空", inst.source_span);
+        }
+
         switch (inst.callee_kind) {
             case CallInst::Direct:
-                if (inst.local_target != nullptr) {
-                    error("Direct call 的 local_target 必须为空", inst.source_span);
-                }
                 if (!std::holds_alternative<InternedString>(inst.callee) ||
                     std::get<InternedString>(inst.callee).empty()) {
                     error("Direct call 的 callee 必须是非空名字", inst.source_span);
                 }
-                break;
-            case CallInst::Local:
-                if (inst.local_target == nullptr) {
-                    error("Local call 的 local_target 不能为空", inst.source_span);
-                } else if (!contains_unit(mfile, inst.local_target)) {
-                    error("Local call 的 local_target 必须属于同一个文件", inst.source_span);
-                }
-                if (!std::holds_alternative<InternedString>(inst.callee) ||
-                    std::get<InternedString>(inst.callee).empty()) {
-                    error("Local call 的 callee 必须是非空名字", inst.source_span);
-                } else if (inst.local_target != nullptr &&
-                           std::get<InternedString>(inst.callee) != inst.local_target->name) {
-                    error("Local call 的 callee 名字必须与 local_target 一致", inst.source_span);
+                if (inst.dispatch_type == MFunction &&
+                    inst.m_function_target != nullptr &&
+                    std::get<InternedString>(inst.callee) != inst.m_function_target->name) {
+                    error("MFunction call 的 callee 名字必须与 m_function_target 一致", inst.source_span);
                 }
                 break;
             case CallInst::Indirect:
-                if (inst.local_target != nullptr) {
-                    error("Indirect call 的 local_target 必须为空", inst.source_span);
+                if (inst.dispatch_type == MFunction || inst.dispatch_type == Internal) {
+                    error("Indirect call 不能使用静态 MFunction/Internal 分派", inst.source_span);
                 }
                 if (std::holds_alternative<InternedString>(inst.callee)) {
                     error("Indirect call 的 callee 不能是名字操作数", inst.source_span);

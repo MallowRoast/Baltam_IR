@@ -117,6 +117,26 @@ enum BinaryOp : std::uint8_t {
 };
 
 /**
+ * @brief 调用与运算的分派类型。
+ *
+ * - `Dynamic` 表示仍按 Matlab 运行时规则解析，运算符可能被用户类型重载。
+ * - `Builtin` 表示已静态解析到 Matlab 内置实现。
+ * - `Internal` 表示 IR/runtime 内部实现，不参与 Matlab 名字查找和运算符重载；
+ *   printer 统一显示为 `internal.xxx` 目标或内部运算 mnemonic。
+ * - `MFunction` 表示已静态解析到某个 M 函数实例。
+ *
+ * 运算符如果静态分派到 M 函数，不继续保留为 `UnaryInst` / `BinaryInst`，而应 lower
+ * 成 `CallInst`，并通过 `dispatch_type = MFunction` 与 `m_function_target` 记录目标。
+ */
+enum DispatchType : std::uint8_t {
+    Dynamic,
+    Builtin,
+    Internal,
+    MFunction,
+};
+
+
+/**
  * @brief 第一版 IR 操作数集合。
  *
  * 操作数保持为轻量值类型，因为它们本质上是某条指令上的输入边，而不是独立 IR 节点。
@@ -346,12 +366,16 @@ public:
  * 其中：
  * - `Direct` 表示 callee 作为已知可调用名出现，通常由 `InternedString` 承载
  * - `Indirect` 表示通过值发起调用，例如函数句柄，通常由 `ValueId` 或 `SlotId` 承载
+ *
+ * 静态分派到 local M 函数也是 `dispatch_type = MFunction` 的一种，目标函数实例由
+ * `m_function_target` 保存。这里不再单独保留 `Local` callee kind。
+ * `dispatch_type = Internal` 的 direct call 使用普通 helper 名保存在 `callee` 中，
+ * 打印时统一加上 `internal.` 前缀。
  */
 class CallInst final : public Instruction {
 public:
     enum CalleeKind : std::uint8_t {
         Direct,
-        Local,
         Indirect,
     };
 
@@ -364,8 +388,9 @@ public:
 
     std::vector<ValueId> results;
     CalleeKind callee_kind = Direct;
+    DispatchType dispatch_type = Dynamic;
     Operand callee;
-    FunctionUnit* local_target = nullptr;
+    FunctionUnit* m_function_target = nullptr;
     std::vector<Operand> arguments;
 };
 
@@ -395,6 +420,7 @@ public:
 
     ValueId result = InvalidValueId;
     UnaryOp op = Uplus;
+    DispatchType dispatch_type = Dynamic;
     Operand operand;
 };
 
@@ -410,6 +436,7 @@ public:
 
     ValueId result = InvalidValueId;
     BinaryOp op = Add;
+    DispatchType dispatch_type = Dynamic;
     Operand lhs;
     Operand rhs;
 };

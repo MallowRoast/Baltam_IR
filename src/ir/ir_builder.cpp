@@ -23,6 +23,17 @@ TypeFact scalar_type_fact(TypeSet types) noexcept {
     return type_fact(types, true);
 }
 
+TypeFact fixed_slot_type_fact(SlotAttrs::FixedType fixed_type) noexcept {
+    switch (fixed_type) {
+        case SlotAttrs::Unknown:
+            return unknown_type_fact();
+        case SlotAttrs::Int64Scalar:
+            return scalar_type_fact(TypeSet::int64());
+    }
+
+    return unknown_type_fact();
+}
+
 TypeFact constant_type_fact(const LogicalConstant&) noexcept {
     return scalar_type_fact(TypeSet::logical());
 }
@@ -55,6 +66,26 @@ TypeFact constant_type_fact(const EmptyDoubleMatrixConstant&) noexcept {
     return type_fact(TypeSet::float64(), false);
 }
 
+TypeFact internal_call_result_type_fact(const CallInst& inst, std::size_t result_index) noexcept {
+    if (inst.dispatch_type != Internal ||
+        inst.callee_kind != CallInst::Direct ||
+        !std::holds_alternative<InternedString>(inst.callee)) {
+        return unknown_type_fact();
+    }
+
+    const InternedString& callee = std::get<InternedString>(inst.callee);
+    if (callee == "foreach_init") {
+        if (result_index == 0U) {
+            return scalar_type_fact(TypeSet::external_object());
+        }
+        if (result_index == 1U) {
+            return scalar_type_fact(TypeSet::int64());
+        }
+    }
+
+    return unknown_type_fact();
+}
+
 TypeFact constant_type_fact(const Constant& constant) {
     return std::visit(
         [](const auto& value) {
@@ -73,7 +104,60 @@ TypeFact operand_type_fact(const ValueTable& value_table, const Operand& operand
     return value_info != nullptr ? value_info->type_fact : unknown_type_fact();
 }
 
+TypeFact matching_add_result_type_fact(
+    const ValueTable& value_table,
+    const BinaryInst& inst) {
+    const TypeFact lhs_fact = operand_type_fact(value_table, inst.lhs);
+    const TypeFact rhs_fact = operand_type_fact(value_table, inst.rhs);
+
+    // Internal add is not always an int64 index op. Preserve the operand type only
+    // when both sides already carry the same concrete type fact.
+    if (lhs_fact.is_unknown ||
+        rhs_fact.is_unknown ||
+        lhs_fact.types != rhs_fact.types ||
+        lhs_fact.is_scalar != rhs_fact.is_scalar) {
+        return unknown_type_fact();
+    }
+
+    return lhs_fact;
+}
+
+TypeFact binary_result_type_fact(
+    const ValueTable& value_table,
+    const BinaryInst& inst) {
+    if (inst.dispatch_type != Internal) {
+        return unknown_type_fact();
+    }
+
+    switch (inst.op) {
+        case Add:
+            return matching_add_result_type_fact(value_table, inst);
+        case Gt:
+            return scalar_type_fact(TypeSet::logical());
+        case Sub:
+        case Mul:
+        case Rdiv:
+        case Ldiv:
+        case Pow:
+        case ElemMul:
+        case ElemRdiv:
+        case ElemLdiv:
+        case ElemPow:
+        case And:
+        case Or:
+        case Lt:
+        case Le:
+        case Ge:
+        case Eq:
+        case Ne:
+            break;
+    }
+
+    return unknown_type_fact();
+}
+
 TypeFact instruction_result_type_fact(
+    const CodeUnit* unit,
     const ValueTable& value_table,
     const Instruction* instruction) {
     if (instruction == nullptr) {
@@ -83,7 +167,16 @@ TypeFact instruction_result_type_fact(
     switch (instruction->type()) {
         case Instruction::Const:
             return constant_type_fact(static_cast<const ConstInst*>(instruction)->value);
-        case Instruction::LoadSlot:
+        case Instruction::LoadSlot: {
+            if (unit == nullptr) {
+                return unknown_type_fact();
+            }
+            const auto* inst = static_cast<const LoadSlotInst*>(instruction);
+            const Slot* slot = unit->slot_table.find_slot(inst->slot_id);
+            return slot != nullptr
+                ? fixed_slot_type_fact(static_cast<SlotAttrs::FixedType>(slot->attrs.fixed_type))
+                : unknown_type_fact();
+        }
         case Instruction::LoadWorkspace:
         case Instruction::Apply:
         case Instruction::Call:
@@ -93,8 +186,11 @@ TypeFact instruction_result_type_fact(
                 value_table,
                 static_cast<const CopyInst*>(instruction)->value);
         case Instruction::Unary:
-        case Instruction::Binary:
             return unknown_type_fact();
+        case Instruction::Binary:
+            return binary_result_type_fact(
+                value_table,
+                static_cast<const BinaryInst&>(*instruction));
         case Instruction::StoreSlot:
         case Instruction::StoreWorkspace:
         case Instruction::Goto:
@@ -122,12 +218,20 @@ void bind_value_def(
     value_info->type_fact = type_fact;
 }
 
-void bind_instruction_results(ValueTable& value_table, Instruction* instruction) {
+void bind_instruction_results(CodeUnit* unit, Instruction* instruction) {
     if (instruction == nullptr) {
         return;
     }
 
-    const TypeFact result_type_fact = instruction_result_type_fact(value_table, instruction);
+    if (unit == nullptr) {
+        return;
+    }
+
+    ValueTable& value_table = unit->value_table;
+    const TypeFact result_type_fact = instruction_result_type_fact(
+        unit,
+        value_table,
+        instruction);
 
     switch (instruction->type()) {
         case Instruction::Const: {
@@ -155,7 +259,10 @@ void bind_instruction_results(ValueTable& value_table, Instruction* instruction)
         case Instruction::Call: {
             const auto* inst = static_cast<const CallInst*>(instruction);
             for (std::size_t i = 0; i < inst->results.size(); ++i) {
-                bind_value_def(value_table, inst->results[i], i, instruction, result_type_fact);
+                const TypeFact call_result_type_fact = inst->dispatch_type == Internal
+                    ? internal_call_result_type_fact(*inst, i)
+                    : result_type_fact;
+                bind_value_def(value_table, inst->results[i], i, instruction, call_result_type_fact);
             }
             break;
         }
@@ -387,7 +494,6 @@ SlotId IRBuilder::create_hidden_slot(
 
     SlotAttrs attrs;
     attrs.hidden_role = role;
-    attrs.is_user_visible = 0;
     attrs.is_mutable = 0;
 
     return create_slot(Slot::Hidden, name, source_span, attrs);
@@ -550,7 +656,7 @@ void IRBuilder::append_instruction(std::unique_ptr<Instruction> instruction) {
     }
 
     instruction->parent = current_unit_state_->current_block;
-    bind_instruction_results(current_unit_state_->unit->value_table, instruction.get());
+    bind_instruction_results(current_unit_state_->unit, instruction.get());
     current_unit_state_->current_block->instructions.push_back(std::move(instruction));
 }
 
