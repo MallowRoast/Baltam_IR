@@ -56,6 +56,8 @@ private:
     void lower_call_stmt(const std::shared_ptr<multipleFuncCall>& call);
     void lower_if_stmt(const std::shared_ptr<if_flow>& if_node);
     void lower_for_stmt(const std::shared_ptr<flow>& for_node);
+    void lower_break_stmt(const ast_ptr& node);
+    void lower_continue_stmt(const ast_ptr& node);
     [[nodiscard]] ValueId lower_expr(const ast_ptr& node);
     /**
      * @brief 统一 lower 调用实参列表。
@@ -113,9 +115,43 @@ private:
     [[nodiscard]] SlotId lookup_slot_binding(std::string_view name, SourceSpan source_span);
     [[nodiscard]] SlotId ensure_workspace_handle_slot(SourceSpan source_span);
 
+    /**
+     * @brief 当前正在 lowering 的循环控制流目标。
+     *
+     * `break` / `continue` 的目标不是语句自身能独立决定的，而是由最近一层循环提供：
+     * `break` 跳到循环出口，`continue` 跳到循环 latch。用 vector 按栈保存这些目标，
+     * 可以让嵌套循环自然使用最近一层 loop context，并在离开循环体时恢复外层目标。
+     */
+    struct LoopControlContext {
+        BasicBlock* break_target = nullptr;
+        BasicBlock* continue_target = nullptr;
+    };
+
+    /**
+     * @brief 当前循环体 lowering 期间的 loop context 作用域守卫。
+     *
+     * 构造时把当前循环的 `break / continue` 目标压入 `loop_stack_`，析构时自动弹出。
+     * 这样 `lower_break_stmt()` / `lower_continue_stmt()` 总能通过栈顶找到最近一层循环，
+     * 同时避免循环体 lowering 中出现提前返回时遗留错误的控制流目标。
+     */
+    class ScopedLoopContext final {
+    public:
+        ScopedLoopContext(IRLowerer& lowerer, LoopControlContext context);
+
+        ScopedLoopContext(const ScopedLoopContext&) = delete;
+        ScopedLoopContext& operator=(const ScopedLoopContext&) = delete;
+
+        ~ScopedLoopContext();
+
+    private:
+        IRLowerer& lowerer_;
+    };
+
     IRBuilder builder_;
     std::string source_text_;
     std::vector<SourceSpan::offset_type> line_offsets_;
+    // 这里把 vector 当作小型栈使用；相比 std::stack，调试和必要时遍历诊断更直接。
+    std::vector<LoopControlContext> loop_stack_;
 };
 
 /**

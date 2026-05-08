@@ -209,6 +209,18 @@ bool try_parse_number_constant(const numval& number_node, Constant& out_constant
 
 } // namespace
 
+IRLowerer::ScopedLoopContext::ScopedLoopContext(
+    IRLowerer& lowerer,
+    LoopControlContext context)
+    : lowerer_(lowerer) {
+    lowerer_.loop_stack_.push_back(std::move(context));
+}
+
+IRLowerer::ScopedLoopContext::~ScopedLoopContext() {
+    // 确保 lower 当前循环体的任何提前返回路径都不会泄漏 loop context。
+    lowerer_.loop_stack_.pop_back();
+}
+
 void IRLowerer::load_source_text(const NormalizedPath& path) {
     source_text_.clear();
     line_offsets_.clear();
@@ -287,6 +299,7 @@ IRBuildResult IRLowerer::lower_parsed_units(
     builder_.reset();
     source_text_.clear();
     line_offsets_.clear();
+    loop_stack_.clear();
 
     if (parsed_units.empty()) {
         builder_.report(
@@ -433,6 +446,12 @@ void IRLowerer::lower_stmt(const ast_ptr& node) {
             return;
         case node_for:
             lower_for_stmt(std::static_pointer_cast<flow>(node));
+            return;
+        case node_break:
+            lower_break_stmt(node);
+            return;
+        case node_continue:
+            lower_continue_stmt(node);
             return;
         case node_multiple_func:
             lower_call_stmt(std::static_pointer_cast<multipleFuncCall>(node));
@@ -814,6 +833,7 @@ void IRLowerer::lower_for_stmt(const std::shared_ptr<flow>& for_node) {
     }
 
     // 用户循环体可能改写循环变量名，但不会影响内部 iter_index/state/max_iter。
+    const ScopedLoopContext loop_context(*this, {exit_block, latch_block});
     lower_stmt(for_node->tl());
     if (builder_.current_block() != nullptr &&
         !builder_.current_block()->has_terminator()) {
@@ -869,6 +889,36 @@ void IRLowerer::lower_for_stmt(const std::shared_ptr<flow>& for_node) {
 
     // 后续语句从 for.end 继续 lower；break 也会跳到这个出口块。
     builder_.set_insert_point(exit_block);
+}
+
+void IRLowerer::lower_break_stmt(const ast_ptr& node) {
+    if (loop_stack_.empty() || loop_stack_.back().break_target == nullptr) {
+        builder_.report(
+            IRBuildDiagnostic::Error,
+            "break 语句必须出现在循环体内",
+            source_span_from(node));
+        return;
+    }
+
+    std::unique_ptr<GotoInst> go = std::make_unique<GotoInst>();
+    go->target = loop_stack_.back().break_target;
+    go->source_span = source_span_from(node);
+    builder_.append_instruction(std::move(go));
+}
+
+void IRLowerer::lower_continue_stmt(const ast_ptr& node) {
+    if (loop_stack_.empty() || loop_stack_.back().continue_target == nullptr) {
+        builder_.report(
+            IRBuildDiagnostic::Error,
+            "continue 语句必须出现在循环体内",
+            source_span_from(node));
+        return;
+    }
+
+    std::unique_ptr<GotoInst> go = std::make_unique<GotoInst>();
+    go->target = loop_stack_.back().continue_target;
+    go->source_span = source_span_from(node);
+    builder_.append_instruction(std::move(go));
 }
 
 bool IRLowerer::append_call_arguments(

@@ -151,7 +151,8 @@ block 的创建与 `entry` 指定现在由 `CodeUnit` 自身完成，builder 只
 它会：
 
 - parse `test/m/test0/test0.m` / `test/m/test0/test0_1.m` / `test/m/test1/test1.m` /
-  `test/m/test1/test1_1.m` / `test/m/test2/test2.m`
+  `test/m/test1/test1_1.m` / `test/m/test2/test2.m` / `test/m/test2/test2_1.m` /
+  `test/m/test2/test2_3.m` / `test/m/test2/test2_4.m`
 - build 成 `IR` 并检查结构完整、没有 `Error` 诊断
 - 校验各自的核心侧重点是否 lower 正确：
   - `test1`：脚本里即使定义了 local `sin`，主体中的 `sin(a)` 仍保留为 `apply`
@@ -160,6 +161,10 @@ block 的创建与 `entry` 指定现在由 `CodeUnit` 自身完成，builder 只
   - `test2`：简单 `for i = 1:10` 生成五块 loop CFG，其中 `colon` lower 为非
     internal 的普通 `call`，`foreach_init` 和 `foreach_iterate` lower 为
     可静态确定的 `internal.foreach_init` / `internal.foreach_iterate` 调用
+  - `test2_1`：循环体内 `continue` 跳到 `for.latch`，`break` 跳到 `for.end`
+  - `test2_3`：嵌套 `for` 生成两套独立 loop CFG 和 internal 迭代状态
+  - `test2_4`：嵌套 `for` 中内层 `continue` 和外层 `break` 分别命中最近一层
+    loop context 的正确目标
 - 调用 `ir_print` 打印文本 IR
 - 校验关键打印结果与源码行号注释
 
@@ -167,7 +172,7 @@ block 的创建与 `entry` 指定现在由 `CodeUnit` 自身完成，builder 只
 
 当前 lowering 仍未覆盖完整 Matlab 语义，典型缺口包括：
 
-- `while / break / continue`
+- `while`
 - `switch`
 - `try / catch`
 - 嵌套函数、匿名函数、闭包

@@ -9,6 +9,7 @@
 #include <sstream>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -412,8 +413,9 @@ private:
         }
 
         assign_block_labels(unit);
-        for (std::size_t i = 0; i < unit.basic_blocks.size(); ++i) {
-            const BasicBlock* block = unit.basic_blocks[i].get();
+        const std::vector<const BasicBlock*> blocks = layout_blocks(unit);
+        for (std::size_t i = 0; i < blocks.size(); ++i) {
+            const BasicBlock* block = blocks[i];
             if (block == nullptr) {
                 continue;
             }
@@ -425,7 +427,7 @@ private:
                 }
             }
 
-            if (i + 1U < unit.basic_blocks.size()) {
+            if (i + 1U < blocks.size()) {
                 emit_raw({});
             }
         }
@@ -463,6 +465,121 @@ private:
         lines_.push_back(std::move(line));
     }
 
+    [[nodiscard]] std::vector<const BasicBlock*> layout_blocks(const CodeUnit& unit) const {
+        std::vector<const BasicBlock*> ordered;
+        std::unordered_set<const BasicBlock*> visited;
+        std::vector<const BasicBlock*> deferred;
+        std::vector<const BasicBlock*> deferred_returns;
+
+        const auto visit = [&](const BasicBlock* start, const auto& visit_ref) -> void {
+            if (start == nullptr || !visited.insert(start).second) {
+                return;
+            }
+
+            ordered.push_back(start);
+            for (const BasicBlock* successor : layout_successors(*start)) {
+                if (should_defer_layout_successor(*start, successor)) {
+                    if (is_return_block(successor)) {
+                        deferred_returns.push_back(successor);
+                    } else {
+                        deferred.push_back(successor);
+                    }
+                    continue;
+                }
+                visit_ref(successor, visit_ref);
+            }
+        };
+
+        visit(unit.entry_block, visit);
+
+        for (std::size_t i = 0; i < deferred.size(); ++i) {
+            visit(deferred[i], visit);
+        }
+
+        for (std::size_t i = 0; i < deferred_returns.size(); ++i) {
+            visit(deferred_returns[i], visit);
+        }
+
+        for (const auto& block_ptr : unit.basic_blocks) {
+            visit(block_ptr.get(), visit);
+        }
+
+        return ordered;
+    }
+
+    [[nodiscard]] std::vector<const BasicBlock*> layout_successors(
+        const BasicBlock& block) const {
+        const Instruction* terminator = block.terminator();
+        if (terminator == nullptr) {
+            return {};
+        }
+
+        switch (terminator->type()) {
+            case Instruction::Goto: {
+                const auto& go = static_cast<const GotoInst&>(*terminator);
+                return {go.target};
+            }
+            case Instruction::Branch: {
+                const auto& branch = static_cast<const BranchInst&>(*terminator);
+                if (is_loop_exit_block(branch.true_target) &&
+                    !is_loop_exit_block(branch.false_target)) {
+                    return unique_layout_successors({branch.false_target, branch.true_target});
+                }
+                return unique_layout_successors({branch.true_target, branch.false_target});
+            }
+            case Instruction::Return:
+            default:
+                return {};
+        }
+    }
+
+    [[nodiscard]] std::vector<const BasicBlock*> unique_layout_successors(
+        std::initializer_list<const BasicBlock*> successors) const {
+        std::vector<const BasicBlock*> unique;
+        for (const BasicBlock* successor : successors) {
+            if (successor == nullptr) {
+                continue;
+            }
+            if (std::find(unique.begin(), unique.end(), successor) == unique.end()) {
+                unique.push_back(successor);
+            }
+        }
+        return unique;
+    }
+
+    [[nodiscard]] bool should_defer_layout_successor(
+        const BasicBlock& block,
+        const BasicBlock* successor) const {
+        if (successor == nullptr) {
+            return false;
+        }
+
+        if (is_loop_latch_block(successor) &&
+            !is_loop_latch_block(&block)) {
+            return true;
+        }
+
+        if (is_loop_exit_block(successor)) {
+            return true;
+        }
+
+        return false;
+    }
+
+    [[nodiscard]] bool is_loop_latch_block(const BasicBlock* block) const {
+        return block != nullptr && block->label == "for.latch";
+    }
+
+    [[nodiscard]] bool is_loop_exit_block(const BasicBlock* block) const {
+        return block != nullptr && block->label == "for.end";
+    }
+
+    [[nodiscard]] bool is_return_block(const BasicBlock* block) const {
+        return block != nullptr &&
+            block->terminator() != nullptr &&
+            block->terminator()->type() == Instruction::Return;
+    }
+
     [[nodiscard]] std::string format_source_comment(SourceSpan source_span) const {
         if (!options_.print_source_comments ||
             !source_span.is_valid() ||
@@ -498,6 +615,8 @@ private:
             case Instruction::StoreWorkspace:
             case Instruction::Branch:
                 return true;
+            case Instruction::Goto:
+                return is_explicit_loop_control_goto(instruction);
             case Instruction::Return:
                 return instruction.source_span.is_valid();
             case Instruction::Apply: {
@@ -519,6 +638,25 @@ private:
             return {};
         }
         return format_source_comment(instruction.source_span);
+    }
+
+    [[nodiscard]] bool is_explicit_loop_control_goto(
+        const Instruction& instruction) const {
+        if (instruction.attrs.is_synthetic != 0 ||
+            !instruction.source_span.is_valid() ||
+            source_text_.empty() ||
+            instruction.source_span.end_offset > source_text_.size()) {
+            return false;
+        }
+
+        const std::string excerpt = collapse_source_excerpt(
+            source_text_.substr(
+                instruction.source_span.begin_offset,
+                instruction.source_span.end_offset - instruction.source_span.begin_offset));
+        return excerpt == "break;" ||
+            excerpt == "break" ||
+            excerpt == "continue;" ||
+            excerpt == "continue";
     }
 
     void build_source_line_offsets() {

@@ -254,7 +254,9 @@ br %done, label %for.end, label %for.body
 - 根据 `state` 和当前 `iter_index` 取当前迭代值
 - 把当前值写给循环变量
 - lower 循环体
-- 跳转到 `for.latch`
+- 普通 fallthrough 跳转到 `for.latch`
+- `continue` 也跳转到 `for.latch`，从而继续执行内部迭代下标自增
+- `break` 跳转到 `for.end`，直接离开当前循环
 
 形态：
 
@@ -363,12 +365,12 @@ for.end:
 
 ## 9. 当前实现差异与限制
 
-第一版 `for` lowering 仍有明确边界：
+当前 `for` lowering 仍有明确边界：
 
 - 循环变量只支持名字形式。
-- 暂不支持 `break / continue`。
-- 暂未建立 loop stack，因此后续支持 `break / continue` 时需要记录当前 loop 的
-  `exit_block` 和 `latch_block`。
+- 支持循环体内 `break / continue`：
+  - `break` 通过当前 loop context 跳转到 `for.end`
+  - `continue` 通过当前 loop context 跳转到 `for.latch`
 - `node_colon` 当前统一 lower 为普通 `call @colon(...)`，不做常量折叠，也不标记为 `internal`。
 - 当前实现已经只把 `iter_index` 落到 internal local slot，并通过
   `SlotAttrs::fixed_type = Int64Scalar` 声明固定类型。
@@ -383,8 +385,14 @@ for.end:
 当前对应测试：
 
 - `test/m/test2/test2.m`
+- `test/m/test2/test2_1.m`
+- `test/m/test2/test2_3.m`
+- `test/m/test2/test2_4.m`
 - `test/m/test2/verify_for_snapshot_semantics.m`
 - `test/smoke_test/test2_smoke.cpp`
+- `test/smoke_test/test2_1_smoke.cpp`
+- `test/smoke_test/test2_3_smoke.cpp`
+- `test/smoke_test/test2_4_smoke.cpp`
 
 测试重点：
 
@@ -394,5 +402,10 @@ for.end:
 - `1:10` 生成一次非 internal 的 `colon` call。
 - `for` 协议生成一次 `internal.foreach_init` 和一次 `internal.foreach_iterate`。
 - 循环体 `s = s + i` 通过 `load_env / add / store_env` 表达。
+- `test2_1` 覆盖 `continue -> for.latch` 和 `break -> for.end`。
+- `test2_3` 覆盖嵌套 `for`，要求内外两层各自生成独立的五块 loop CFG、
+  `foreach_init / foreach_iterate` 协议和 internal iter_index slot。
+- `test2_4` 覆盖嵌套循环中最近一层 loop context 的选择：内层 `continue` 跳内层
+  `for.latch.1`，外层 `break` 跳外层 `for.end`。
 - Matlab CLI 验证 `for i = a` 的迭代次数和每轮开始时写入 `i` 的值不会因为循环体内
   修改 `i` 或 `a` 而改变。

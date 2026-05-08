@@ -67,6 +67,27 @@ add_ir_smoke_test(
     test/m/test2/test2.m
 )
 
+add_ir_smoke_test(
+    test2_1_smoke
+    test2_1_smoke.cpp
+    TEST2_1_MFILE_PATH
+    test/m/test2/test2_1.m
+)
+
+add_ir_smoke_test(
+    test2_3_smoke
+    test2_3_smoke.cpp
+    TEST2_3_MFILE_PATH
+    test/m/test2/test2_3.m
+)
+
+add_ir_smoke_test(
+    test2_4_smoke
+    test2_4_smoke.cpp
+    TEST2_4_MFILE_PATH
+    test/m/test2/test2_4.m
+)
+
 add_executable(ir_type_smoke
     ir_type_smoke.cpp
 )

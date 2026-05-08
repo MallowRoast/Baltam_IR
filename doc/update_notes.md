@@ -56,9 +56,17 @@
 - header 比较和 latch 自增打印为 `internal.cmp_gt` / `internal.add`，不走 Matlab
   运算符重载
 - 通过 `test/m/test2/test2.m` 和 `test/smoke_test/test2_smoke.cpp` 覆盖简单循环
+- 通过 loop context 支持 `for` 循环体内的 `break / continue`，分别跳到
+  `for.end / for.latch`
+- 通过 `test/m/test2/test2_1.m` 和 `test/smoke_test/test2_1_smoke.cpp` 覆盖
+  `break / continue` lowering
+- 通过 `test/m/test2/test2_3.m` 和 `test/smoke_test/test2_3_smoke.cpp` 覆盖嵌套
+  `for` lowering
+- 通过 `test/m/test2/test2_4.m` 和 `test/smoke_test/test2_4_smoke.cpp` 覆盖嵌套
+  `for` 中内层 `continue` 与外层 `break` 的目标选择
 
 TODO：
 
 - 增加 `parent_get` 节点
 - 支持 `while / switch` 及控制流嵌套情况
-- 补齐 `for` 的 `break / continue`、嵌套循环和更完整迭代协议
+- 补齐 `for` 的更完整迭代协议
