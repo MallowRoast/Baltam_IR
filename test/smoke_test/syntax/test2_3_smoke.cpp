@@ -2,8 +2,8 @@
 
 #include <cstddef>
 #include <iostream>
-#include <sstream>
 #include <string_view>
+#include <sstream>
 #include <variant>
 
 namespace baltam {
@@ -59,9 +59,9 @@ std::string find_line_containing_all(
 
 void verify_complete_ir(const IRBuildResult& result) {
     smoke_test::require_ir_is_complete(result);
-    smoke_test::require(result.mfile->is_script_file(), "test2_4 应构造成脚本文件");
-    smoke_test::require(result.mfile->code_units.size() == 1, "test2_4 只应生成脚本单元");
-    smoke_test::require(result.mfile->file_stem() == "test2_4", "文件 stem 应为 test2_4");
+    smoke_test::require(result.mfile->is_script_file(), "test2_3 应构造成脚本文件");
+    smoke_test::require(result.mfile->code_units.size() == 1, "test2_3 只应生成脚本单元");
+    smoke_test::require(result.mfile->file_stem() == "test2_3", "文件 stem 应为 test2_3");
 }
 
 void verify_core_focus(const IRBuildResult& result) {
@@ -79,16 +79,16 @@ void verify_core_focus(const IRBuildResult& result) {
     smoke_test::require(count_internal_calls(*entry, "foreach_iterate") == 2,
                         "两层 for 应各自迭代 foreach 状态");
     smoke_test::require(smoke_test::count_instructions(*entry, Instruction::Branch) == 4,
-                        "test2_4 应包含两个 for header 分支和两个 if 分支");
+                        "test2_3 应包含两个 for header 分支和两个 if 分支");
 }
 
 void verify_printed_ir(const std::string& printed_ir) {
     smoke_test::require(
-        printed_ir.find("; mfile \"" TEST2_4_MFILE_PATH "\"") != std::string::npos,
-        "应打印 test2_4 文件头");
+        printed_ir.find("; mfile \"" TEST2_3_MFILE_PATH "\"") != std::string::npos,
+        "应打印 test2_3 文件头");
     smoke_test::require(
-        printed_ir.find("script @test2_4 {") != std::string::npos,
-        "应打印 test2_4 脚本头");
+        printed_ir.find("script @test2_3 {") != std::string::npos,
+        "应打印 test2_3 脚本头");
     smoke_test::require(
         printed_ir.find("for.latch:") != std::string::npos &&
             printed_ir.find("for.latch.1:") != std::string::npos,
@@ -115,13 +115,13 @@ void verify_printed_ir(const std::string& printed_ir) {
 int main() {
     try {
         const baltam::smoke_test::SmokeArtifacts artifacts =
-            baltam::smoke_test::build_ir(TEST2_4_MFILE_PATH);
+            baltam::smoke_test::build_ir(TEST2_3_MFILE_PATH);
         baltam::verify_complete_ir(artifacts.result);
         baltam::verify_core_focus(artifacts.result);
         baltam::verify_printed_ir(artifacts.printed_ir);
         std::cout << artifacts.printed_ir << '\n';
     } catch (const std::exception& ex) {
-        std::cerr << "test2_4_smoke 失败: " << ex.what() << '\n';
+        std::cerr << "test2_3_smoke 失败: " << ex.what() << '\n';
         return 1;
     }
 

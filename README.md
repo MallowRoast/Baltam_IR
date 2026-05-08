@@ -12,8 +12,10 @@
 
 1. [README](./README.md)
 2. [IR Lowering Design](./doc/ir_lowering_design.md)
-3. [计划中与思考中的问题](./doc/planning_notes.md)
-4. [后续需要学习与确认的问题](./doc/learning_notes.md)
+3. [循环 Lowering 设计](./doc/loop_lowering_design.md)
+4. [CFG DOT 输出设计](./doc/cfg_dot_design.md)
+5. [计划中与思考中的问题](./doc/planning_notes.md)
+6. [后续需要学习与确认的问题](./doc/learning_notes.md)
 
 ## 仓库想做什么
 
@@ -40,6 +42,9 @@
 - `IRBuilder`
 - `IRLowerer`
 - `IRPrinter`
+- `IRVerifier`
+- `ValueId` 类型事实表示
+- `ir_cfg_dot` 控制流图导出工具
 
 目前已经支持的范围包括：
 
@@ -53,17 +58,22 @@
 - 带输出参数的圆括号应用语句
 - 文件内 `local` 函数的最小支持
 - `if / else`
+- `for` / `while` 循环
+- 循环内 `break / continue`
+- 嵌套 `for`、嵌套 `while`、以及 `for / while` 混合嵌套
 - 显式 `return` 与隐式 `return`
 
 在现有实现里：
 
-- 脚本变量访问会 lower 成 `load_workspace` / `store_workspace`
+- 脚本变量访问会 lower 成 `LoadWorkspaceInst` / `StoreWorkspaceInst`，文本 IR 打印为
+  `load_env` / `store_env`
 - 函数变量访问会 lower 成 `load_slot` / `store_slot`
 - 函数中的名字调用会根据名字绑定情况，在 `Apply` 和 `Call` 之间分派
 - 对于文件内 `local` 函数：
   - 脚本主体中的名字调用当前仍保留为 `Apply`
   - 函数主体中的名字调用若命中 `local` 函数，可直接分派为 `Call`
-  - 函数主体中的一元 / 二元运算若命中同名 local 函数，也可直接分派为 `call_local`
+  - 函数主体中的一元 / 二元运算若命中同名 local 函数，也可直接分派为
+    `dispatch_type = MFunction`，打印为 `call mfunc`
   - 若这些名字已经被局部变量遮蔽，则回退为普通运算或 `Apply`
 
 当前仓库已经有基础 smoke test：
@@ -72,10 +82,12 @@
 - [test0_1.m](/home/zj/Desktop/Baltam_IR/test/m/test0/test0_1.m)
 - [test1.m](/home/zj/Desktop/Baltam_IR/test/m/test1/test1.m)
 - [test1_1.m](/home/zj/Desktop/Baltam_IR/test/m/test1/test1_1.m)
-- [test0_smoke.cpp](/home/zj/Desktop/Baltam_IR/test/smoke_test/test0_smoke.cpp)
-- [test0_1_smoke.cpp](/home/zj/Desktop/Baltam_IR/test/smoke_test/test0_1_smoke.cpp)
-- [test1_smoke.cpp](/home/zj/Desktop/Baltam_IR/test/smoke_test/test1_smoke.cpp)
-- [test1_1_smoke.cpp](/home/zj/Desktop/Baltam_IR/test/smoke_test/test1_1_smoke.cpp)
+- [test2.m](/home/zj/Desktop/Baltam_IR/test/m/test2/test2.m) 到
+  [test2_3.m](/home/zj/Desktop/Baltam_IR/test/m/test2/test2_3.m)
+- [test3.m](/home/zj/Desktop/Baltam_IR/test/m/test3/test3.m) 到
+  [test3_3.m](/home/zj/Desktop/Baltam_IR/test/m/test3/test3_3.m)
+- 语法闭环测试位于 [test/smoke_test/syntax](/home/zj/Desktop/Baltam_IR/test/smoke_test/syntax)
+- 功能 smoke test 位于 [test/smoke_test/feature](/home/zj/Desktop/Baltam_IR/test/smoke_test/feature)
 
 ## 后续要做的
 
@@ -83,7 +95,7 @@
 
 - 继续补齐 `IR` 的表达能力，例如更复杂的调用、成员访问和索引语义
 - 对 script 逐步做名字稳定区间分析，把部分 `load_env` / `apply` 收敛成 `load_slot` / `call`
-- 在 function 中继续推进 `call_local`、函数内联和纯局部 slot 的寄存器化 / SSA 提升
+- 在 function 中继续推进静态 `MFunction` 调用、函数内联和纯局部 slot 的寄存器化 / SSA 提升
 - 梳理 `eval`、`evalin`、`assignin`、`clear`、路径变化等对环境稳定性的影响
 - 为 bytecode lowering、runtime effect summary、world/workspace epoch 设计补足语义接口
 - 为后续 profile、guard、热点优化和 `typed SSA` 做准备
@@ -98,6 +110,8 @@
 - [IR Schema](./doc/ir_schema.md)
 - [IR Builder Design](./doc/ir_builder_design.md)
 - [IR Lowering Design](./doc/ir_lowering_design.md)
+- [循环 Lowering 设计](./doc/loop_lowering_design.md)
+- [CFG DOT 输出设计](./doc/cfg_dot_design.md)
 - [Local 函数支持方案](./doc/local_function_support_design.md)
 - [ValueId 类型事实与函数分派设计](./doc/value_type_dispatch_design.md)
 - [计划中与思考中的问题](./doc/planning_notes.md)

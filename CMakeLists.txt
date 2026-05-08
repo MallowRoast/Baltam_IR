@@ -30,6 +30,25 @@ target_link_libraries(BALTAM_IR
         /opt/Baltamatica/lib/libbt_logger.so
 )
 
+add_executable(ir_cfg_dot
+    tools/cfg_dot.cpp
+    tools/cfg_dot_main.cpp
+)
+
+target_include_directories(ir_cfg_dot
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+set_target_properties(ir_cfg_dot PROPERTIES
+    BUILD_RPATH "/opt/Baltamatica/lib"
+)
+
+target_link_libraries(ir_cfg_dot
+    PRIVATE
+        BALTAM_IR
+)
+
 # 这里统一指向 `/opt/Baltamatica/lib`，保证主库与后续 builtin/plugin 使用同一套 runtime。
 set(CMAKE_BUILD_RPATH
     "/opt/Baltamatica/lib")

@@ -44,29 +44,27 @@
 - 提供 numeric、text、container、callable 等分类 helper，分类本身不作为独立 atom 存在
 - 提供稳定调试名和 `TypeSet` 输出格式，便于 smoke test、printer、verifier 和后续类型分析共享
 
-6. 增加第一版 `for` 循环 lowering，见 [for_loop_lowering_design.md](/home/zj/Desktop/Baltam_IR/doc/for_loop_lowering_design.md)。
+6. 增加 `for / while` 循环 lowering，见 [loop_lowering_design.md](/home/zj/Desktop/Baltam_IR/doc/loop_lowering_design.md)。
 
 当前支持：
 
-- 使用 `for.preheader / for.header / for.body / for.latch / for.end` 五块 CFG 形状
-- `1:10` 这类 `node_colon` 表达式 lower 为非 internal 的特殊运算符 `colon` call
-- `for` 协议 lower 出 `internal.foreach_init` 和 `internal.foreach_iterate` 两个 helper 调用
-- 使用 `extern / int64` 类型事实记录 `foreach_init` 的 state / max_iter，并只用内部
-  `internal_local` slot 保存 `__foreach_iter_index`
-- header 比较和 latch 自增打印为 `internal.cmp_gt` / `internal.add`，不走 Matlab
-  运算符重载
-- 通过 `test/m/test2/test2.m` 和 `test/smoke_test/test2_smoke.cpp` 覆盖简单循环
-- 通过 loop context 支持 `for` 循环体内的 `break / continue`，分别跳到
-  `for.end / for.latch`
-- 通过 `test/m/test2/test2_1.m` 和 `test/smoke_test/test2_1_smoke.cpp` 覆盖
-  `break / continue` lowering
-- 通过 `test/m/test2/test2_3.m` 和 `test/smoke_test/test2_3_smoke.cpp` 覆盖嵌套
-  `for` lowering
-- 通过 `test/m/test2/test2_4.m` 和 `test/smoke_test/test2_4_smoke.cpp` 覆盖嵌套
-  `for` 中内层 `continue` 与外层 `break` 的目标选择
+- 支持简单 `for` 循环，例如 `for i = 1:10 ... end`
+- 支持 `for` 循环体内的 `break / continue`
+- 支持嵌套 `for` 循环，以及嵌套循环中的 `break / continue`
+- 支持简单 `while` 循环，例如 `while i < 10 ... end`
+- 支持 `while` 循环体内的 `break / continue`
+- 支持 `for / while` 相互嵌套，以及混合嵌套中的 `break / continue`
+
+7. 增加 CFG DOT 输出工具，见 [cfg_dot_design.md](/home/zj/Desktop/Baltam_IR/doc/cfg_dot_design.md)。
+
+当前支持：
+
+- `ir_cfg_dot <input.m> -o <output.dot>` 生成单个 `.m` 文件对应的 Graphviz DOT
+- 可选 `--svg` / `--png` 通过 Graphviz `dot` 渲染图片
+- `generate_cfg_dot` 构建目标会为 `test/m` 下当前语法用例生成 DOT 到 `build/test/cfg_dot`
 
 TODO：
 
 - 增加 `parent_get` 节点
-- 支持 `while / switch` 及控制流嵌套情况
+- 支持 `switch` 及更多控制流嵌套情况
 - 补齐 `for` 的更完整迭代协议

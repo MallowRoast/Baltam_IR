@@ -1,8 +1,15 @@
-# For 循环 Lowering 设计
+# 循环 Lowering 设计
 
 ## 目标
 
-本文记录当前 `src/ir/ir_lowering.cpp` 中 `for` 循环的第一版 lowering 规则。
+本文记录当前 `src/ir/ir_lowering.cpp` 中循环语句的 lowering 规则。
+
+当前已覆盖 `for` 循环、`while` 循环、循环内 `break / continue`，以及 `for / while`
+的嵌套组合。
+
+## `for` 循环
+
+### 目标
 
 当前目标不是完整覆盖 Matlab `for` 的全部语义，而是先把以下最小闭环打通：
 
@@ -21,10 +28,9 @@ for i = 1:10
 end
 ```
 
-## 1. 基本 CFG 形状
+### 1. 基本 CFG 形状
 
-`for` lowering 沿用旧 `dev` 分支的五块结构。这里的“5 个分支”在当前 IR 中对应
-5 个 loop basic block：
+`for` lowering 使用五块 canonical CFG。这里的“五块”对应 5 个 loop basic block：
 
 ```text
 entry
@@ -49,7 +55,7 @@ for.end
 
 当前 `test2.m` 中循环之后没有后续语句，所以 `for.end` 里接隐式 `ret`。
 
-## 2. `1:10` 的表达式 lowering
+### 2. `1:10` 的表达式 lowering
 
 Matlab 的冒号表达式 `1:10` 在 AST 中是 `node_colon`。
 
@@ -69,7 +75,7 @@ Matlab 的冒号表达式 `1:10` 在 AST 中是 `node_colon`。
 1. `1:10` 先 lower 成普通 `call @colon(...)`，它是 call 节点，但不是 `internal`
 2. `for` 协议再消费该 iterable，生成静态内部 helper `foreach_init / foreach_iterate`
 
-## 3. Matlab `for` 的迭代快照语义
+### 3. Matlab `for` 的迭代快照语义
 
 Matlab 的 `for i = a ... end` 会在进入循环时确定当前循环的迭代来源。循环体内对
 `i` 或 `a` 的后续赋值，不会改变这个已经建立的迭代协议：
@@ -86,7 +92,7 @@ Matlab 的 `for i = a ... end` 会在进入循环时确定当前循环的迭代�
 迭代状态驱动后续 header/body/latch。不能在每一轮重新读取用户变量 `a`，也不能用
 用户变量 `i` 本身作为循环推进状态。
 
-## 4. 两个内部 helper
+### 4. 两个内部 helper
 
 当前 `for` 协议使用两个内部 helper：
 
@@ -121,9 +127,9 @@ call @internal.foreach_init(...)
 call @internal.foreach_iterate(...)
 ```
 
-## 5. 循环携带状态
+### 5. 循环携带状态
 
-旧 `dev` 分支的 non-SSA lowering 可以直接覆盖同一个 `NamedValue`：
+如果使用可覆盖的 non-SSA lowering，可以直接覆盖同一个循环下标值：
 
 ```text
 foreach_iter_index = foreach_iter_index + 1
@@ -170,7 +176,7 @@ fixed_type = Int64Scalar
 这类单例角色，不适合每个循环都创建多份的状态槽。当前做法是
 `internal_local slot`，直接通过 `Slot::InternalLocal` 表示 lowering 内部状态。
 
-## 6. 内部 index 运算
+### 6. 内部 index 运算
 
 `iter_index` 和 `max_iter` 都是 lowering/runtime 内部整型标量。二者之间的比较和
 `iter_index` 的自增完全是静态分派的内部 primitive，不适用 Matlab 用户级运算符
@@ -199,9 +205,9 @@ plus(iter_index, 1)
 打印器显示为 `internal.cmp_gt` / `internal.add`，后续解释器、优化器和 verifier
 不能把它们按 Matlab overloadable operator 处理。
 
-## 7. 各 block 语义
+### 7. 各 block 语义
 
-### 7.1 `for.preheader`
+#### 7.1 `for.preheader`
 
 职责：
 
@@ -221,7 +227,7 @@ store_slot %iter_index_slot, %initial_index
 br label %for.header
 ```
 
-### 7.2 `for.header`
+#### 7.2 `for.header`
 
 职责：
 
@@ -247,7 +253,7 @@ br %done, label %for.end, label %for.body
 
 这里 `internal.cmp_gt` 是静态内部比较，不参与 Matlab `gt/lt` 运算符重载。
 
-### 7.3 `for.body`
+#### 7.3 `for.body`
 
 职责：
 
@@ -284,7 +290,7 @@ store_env %env, @s, %sum
 这里 `s + i` 是用户程序中的 Matlab 加法，仍然可以按表面语义动态分派或等待后续类型
 推导；它和内部 `iter_index` 自增不是同一类运算。
 
-### 7.4 `for.latch`
+#### 7.4 `for.latch`
 
 职责：
 
@@ -304,7 +310,7 @@ br label %for.header
 
 这里 `internal.add` 是静态内部自增，不参与 Matlab `plus` 运算符重载。
 
-### 7.5 `for.end`
+#### 7.5 `for.end`
 
 职责：
 
@@ -312,7 +318,7 @@ br label %for.header
 - 如果源码中循环后还有语句，则继续 lower 后续语句
 - 如果没有后续语句，则由通用逻辑补隐式 `ret`
 
-## 8. `test2.m` 的目标 IR 形态
+### 8. `test2.m` 的目标 IR 形态
 
 省略源码注释后，`test/m/test2/test2.m` 的核心 IR 应收敛为：
 
@@ -363,7 +369,7 @@ for.end:
 }
 ```
 
-## 9. 当前实现差异与限制
+### 9. 当前实现边界
 
 当前 `for` lowering 仍有明确边界：
 
@@ -380,19 +386,18 @@ for.end:
   动态 `cmp.lt / add`。
 - `state / max_iter` 由 internal helper 签名提供 `extern / int64` 类型事实。
 
-## 10. 测试覆盖
+### 10. 测试覆盖
 
 当前对应测试：
 
 - `test/m/test2/test2.m`
 - `test/m/test2/test2_1.m`
+- `test/m/test2/test2_2.m`
 - `test/m/test2/test2_3.m`
-- `test/m/test2/test2_4.m`
-- `test/m/test2/verify_for_snapshot_semantics.m`
-- `test/smoke_test/test2_smoke.cpp`
-- `test/smoke_test/test2_1_smoke.cpp`
-- `test/smoke_test/test2_3_smoke.cpp`
-- `test/smoke_test/test2_4_smoke.cpp`
+- `test/smoke_test/syntax/test2_smoke.cpp`
+- `test/smoke_test/syntax/test2_1_smoke.cpp`
+- `test/smoke_test/syntax/test2_2_smoke.cpp`
+- `test/smoke_test/syntax/test2_3_smoke.cpp`
 
 测试重点：
 
@@ -403,9 +408,180 @@ for.end:
 - `for` 协议生成一次 `internal.foreach_init` 和一次 `internal.foreach_iterate`。
 - 循环体 `s = s + i` 通过 `load_env / add / store_env` 表达。
 - `test2_1` 覆盖 `continue -> for.latch` 和 `break -> for.end`。
-- `test2_3` 覆盖嵌套 `for`，要求内外两层各自生成独立的五块 loop CFG、
+- `test2_2` 覆盖嵌套 `for`，要求内外两层各自生成独立的五块 loop CFG、
   `foreach_init / foreach_iterate` 协议和 internal iter_index slot。
-- `test2_4` 覆盖嵌套循环中最近一层 loop context 的选择：内层 `continue` 跳内层
+- `test2_3` 覆盖嵌套循环中最近一层 loop context 的选择：内层 `continue` 跳内层
   `for.latch.1`，外层 `break` 跳外层 `for.end`。
-- Matlab CLI 验证 `for i = a` 的迭代次数和每轮开始时写入 `i` 的值不会因为循环体内
-  修改 `i` 或 `a` 而改变。
+
+## `while` 循环
+
+`while` lowering 保持和 `for` 一致的显式 CFG 风格，并复用当前
+`loop_stack_` / `LoopControlContext` 机制。
+
+### 1. 基本 CFG 形状
+
+当前采用四块结构：
+
+```text
+current
+  -> while.header
+
+while.header
+  -> while.body  // cond true
+  -> while.end   // cond false
+
+while.body
+  -> while.latch
+
+while.latch
+  -> while.header
+
+while.end
+  -> 后续 continuation
+```
+
+相比只使用 `while.header / while.body / while.end` 三块，单独保留 `while.latch`
+有两个好处：
+
+- `continue` 和循环体普通 fallthrough 可以统一汇合到 latch，再回到 header 重新求值条件。
+- 后续如果需要插入循环计数、profile hook、debug hook 或 cleanup，latch 有稳定落点。
+
+### 2. 各 block 语义
+
+#### 2.1 `while.header`
+
+职责：
+
+- 每轮重新 lower 并求值 `while` 条件表达式
+- 条件为真进入 `while.body`
+- 条件为假进入 `while.end`
+
+形态：
+
+```text
+while.header:
+  %cond = ...
+  br %cond, label %while.body, label %while.end
+```
+
+当前沿用 `if` 的条件 lowering 规则，直接把条件表达式结果交给 `BranchInst`。
+后续如果需要严格建模 Matlab 条件 truthiness，可以统一在 `if / while` 条件位置插入
+内部 helper，例如 `internal.to_logical_condition`。
+
+#### 2.2 `while.body`
+
+职责：
+
+- lower 用户循环体
+- 普通 fallthrough 跳转到 `while.latch`
+
+形态：
+
+```text
+while.body:
+  ...
+  br label %while.latch
+```
+
+#### 2.3 `while.latch`
+
+职责：
+
+- 作为普通 fallthrough 和 `continue` 的汇合点
+- 回跳 `while.header`，让条件在下一轮重新求值
+
+形态：
+
+```text
+while.latch:
+  br label %while.header
+```
+
+#### 2.4 `while.end`
+
+职责：
+
+- 作为循环退出后的 continuation
+- 如果源码中循环后还有语句，则继续 lower 后续语句
+- 如果没有后续语句，则由通用逻辑补隐式 `ret`
+
+### 3. `break / continue`
+
+`while` lowering 应复用当前 loop context 栈：
+
+```text
+break_target    = while.end
+continue_target = while.latch
+```
+
+因此：
+
+- `break` 跳到 `while.end`
+- `continue` 跳到 `while.latch`，再统一回到 `while.header` 重新求值条件
+
+这里和 `for` 的区别是：`for.continue` 跳到 `for.latch` 是为了执行内部迭代下标自增；
+`while.continue` 跳到 `while.latch` 则是为了保持 CFG 形状一致，并为后续 latch hook
+保留稳定插入点。
+
+### 4. lowering 伪代码
+
+```cpp
+void IRLowerer::lower_while_stmt(const std::shared_ptr<if_flow>& while_node) {
+    BasicBlock* header = unit->create_block("while.header", source_span_from(while_node));
+    BasicBlock* body = unit->create_block("while.body", source_span_from(while_node->tl()));
+    BasicBlock* latch = unit->create_block("while.latch", source_span_from(while_node));
+    BasicBlock* end = unit->create_block("while.end", source_span_from(while_node));
+
+    append_goto_from_current_block_to(header);
+
+    builder_.set_insert_point(header);
+    ValueId condition = lower_expr(while_node->cond());
+    append_branch(condition, body, end);
+
+    builder_.set_insert_point(body);
+    const ScopedLoopContext loop_context(*this, {end, latch});
+    lower_stmt(while_node->tl());
+    append_goto_to_latch_if_current_block_is_open();
+
+    builder_.set_insert_point(latch);
+    append_goto(latch, header);
+
+    builder_.set_insert_point(end);
+}
+```
+
+### 5. 测试覆盖
+
+`test/m/test3/test3.m` 是简单 while 样例：
+
+```matlab
+i = 0;
+s = 0;
+while i < 10
+    i = i + 1;
+    s = s + i;
+end
+```
+
+对应 smoke test：
+
+- `test/smoke_test/syntax/test3_smoke.cpp`
+- `test/m/test3/test3_1.m` 和 `test/smoke_test/syntax/test3_1_smoke.cpp` 进一步覆盖
+  `while` 循环体内 `continue / break` 的目标选择
+- `test/m/test3/test3_2.m` 和 `test/smoke_test/syntax/test3_2_smoke.cpp` 覆盖
+  `for` 与 `while` 的相互嵌套
+- `test/m/test3/test3_3.m` 和 `test/smoke_test/syntax/test3_3_smoke.cpp` 覆盖
+  `for / while` 相互嵌套中的 `break / continue` 目标选择
+
+测试重点：
+
+- 生成 `entry + while.header / while.body / while.latch / while.end`
+- 条件表达式在 `while.header` 中求值
+- `while.body` 普通 fallthrough 跳到 `while.latch`
+- `while.latch` 回跳 `while.header`
+- `while.end` 接后续 continuation 或隐式 `ret`
+- `continue` 生成用户级跳转到 `while.latch`
+- `break` 生成用户级跳转到 `while.end`
+- `for` 内嵌 `while` 时，内层 `while.end` 回到外层 `for.latch`
+- `while` 内嵌 `for` 时，内层 `for.end` 回到外层 `while.latch`
+- 混合嵌套中 `break / continue` 始终选择最近一层循环的目标块

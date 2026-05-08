@@ -447,6 +447,9 @@ void IRLowerer::lower_stmt(const ast_ptr& node) {
         case node_for:
             lower_for_stmt(std::static_pointer_cast<flow>(node));
             return;
+        case node_flow_while:
+            lower_while_stmt(std::static_pointer_cast<if_flow>(node));
+            return;
         case node_break:
             lower_break_stmt(node);
             return;
@@ -888,6 +891,87 @@ void IRLowerer::lower_for_stmt(const std::shared_ptr<flow>& for_node) {
     builder_.append_instruction(std::move(latch_go));
 
     // 后续语句从 for.end 继续 lower；break 也会跳到这个出口块。
+    builder_.set_insert_point(exit_block);
+}
+
+void IRLowerer::lower_while_stmt(const std::shared_ptr<if_flow>& while_node) {
+    if (while_node == nullptr ||
+        while_node->cond() == nullptr ||
+        while_node->tl() == nullptr) {
+        builder_.report(
+            IRBuildDiagnostic::Error,
+            "while 语句缺少条件或循环体",
+            source_span_from(while_node));
+        return;
+    }
+
+    CodeUnit* unit = builder_.current_unit();
+    if (unit == nullptr) {
+        builder_.report(
+            IRBuildDiagnostic::Error,
+            "没有活动代码单元，无法 lower while 语句",
+            source_span_from(while_node));
+        return;
+    }
+
+    // while 使用四块 CFG：header 每轮重新求值条件，body 执行用户循环体，
+    // latch 作为普通 fallthrough 和 continue 的汇合点，end 接后续语句。
+    BasicBlock* header_block =
+        unit->create_block("while.header", source_span_from(while_node));
+    BasicBlock* body_block =
+        unit->create_block("while.body", source_span_from(while_node->tl()));
+    BasicBlock* latch_block =
+        unit->create_block("while.latch", source_span_from(while_node));
+    BasicBlock* exit_block =
+        unit->create_block("while.end", source_span_from(while_node));
+
+    if (header_block == nullptr ||
+        body_block == nullptr ||
+        latch_block == nullptr ||
+        exit_block == nullptr) {
+        return;
+    }
+
+    if (builder_.current_block() != nullptr &&
+        !builder_.current_block()->has_terminator()) {
+        std::unique_ptr<GotoInst> go = std::make_unique<GotoInst>();
+        go->target = header_block;
+        go->source_span = source_span_from(while_node);
+        builder_.append_instruction(std::move(go));
+    }
+
+    builder_.set_insert_point(header_block);
+    const ValueId condition = lower_expr(while_node->cond());
+    if (!condition.is_valid()) {
+        return;
+    }
+
+    std::unique_ptr<BranchInst> branch = std::make_unique<BranchInst>();
+    branch->condition = condition;
+    branch->true_target = body_block;
+    branch->false_target = exit_block;
+    branch->source_span = source_span_from(while_node->cond());
+    builder_.append_instruction(std::move(branch));
+
+    builder_.set_insert_point(body_block);
+    const ScopedLoopContext loop_context(*this, {exit_block, latch_block});
+    lower_stmt(while_node->tl());
+    if (builder_.current_block() != nullptr &&
+        !builder_.current_block()->has_terminator()) {
+        std::unique_ptr<GotoInst> body_go = std::make_unique<GotoInst>();
+        body_go->target = latch_block;
+        body_go->source_span = source_span_from(while_node->tl());
+        body_go->attrs.is_synthetic = 1;
+        builder_.append_instruction(std::move(body_go));
+    }
+
+    builder_.set_insert_point(latch_block);
+    std::unique_ptr<GotoInst> latch_go = std::make_unique<GotoInst>();
+    latch_go->target = header_block;
+    latch_go->source_span = source_span_from(while_node);
+    latch_go->attrs.is_synthetic = 1;
+    builder_.append_instruction(std::move(latch_go));
+
     builder_.set_insert_point(exit_block);
 }
 

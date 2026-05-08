@@ -1,13 +1,21 @@
-% TEST2_3 覆盖嵌套 for 循环。
+% TEST2_3 覆盖嵌套 for 中内层 continue 和外层 break 的目标选择。
 %
-% 这个用例验证两层 for lowering 可以同时存在：
-% 1. 外层和内层循环各自生成一套 for.preheader/header/body/latch/end CFG
-% 2. 两层循环各自拥有独立的 internal iter_index slot
-% 3. 内层循环结束后应回到外层 latch，继续推进外层循环
+% 这个用例验证 loop context 栈在嵌套循环中按最近一层循环生效：
+% 1. 内层 `continue` 应跳到内层 for.latch
+% 2. 外层 `break` 应跳到外层 for.end
+% 3. 内层循环正常结束后仍应回到外层 for.latch
 
 s = 0;
-for i = 1:3
-    for j = 1:2
+for i = 1:4
+    if i == 4
+        break;
+    end
+
+    for j = 1:3
+        if j == 2
+            continue;
+        end
+
         s = s + i * j;
     end
 end

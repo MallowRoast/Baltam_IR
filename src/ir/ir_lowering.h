@@ -56,6 +56,7 @@ private:
     void lower_call_stmt(const std::shared_ptr<multipleFuncCall>& call);
     void lower_if_stmt(const std::shared_ptr<if_flow>& if_node);
     void lower_for_stmt(const std::shared_ptr<flow>& for_node);
+    void lower_while_stmt(const std::shared_ptr<if_flow>& while_node);
     void lower_break_stmt(const ast_ptr& node);
     void lower_continue_stmt(const ast_ptr& node);
     [[nodiscard]] ValueId lower_expr(const ast_ptr& node);

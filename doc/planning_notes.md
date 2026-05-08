@@ -246,7 +246,8 @@
 
 初版内联 pass 不追求“一上来就支持所有 `M` 函数”，而是先把最容易证明正确的一小类场景收进来。更合适的前提大致是：
 
-- `callee` 可以静态分派，最好已经收敛成 `call_local`，至少也应是名字绑定稳定的直接 `call`
+- `callee` 可以静态分派，最好已经是 `dispatch_type = MFunction` 的 `call mfunc`，
+  至少也应是名字绑定稳定的直接 `call`
 - `caller` 和 `callee` 都是 `FunctionUnit`，暂不考虑 `script`
 - `callee` 没有复杂控制流，初版先限制为单一线性 block，不含 `branch`、循环和多出口 `return`
 - `callee` 不包含 `eval`、`assignin`、`clear`、`addpath`、`cd` 等会破坏环境稳定性的操作
@@ -328,7 +329,8 @@
 
 这条 pass 更适合先用于函数文件。
 
-原因是当前函数文件中的 local 调用已经会显式 lower 成 `call_local`，可达性边比较清楚。
+原因是当前函数文件中的 local 调用已经会显式 lower 成
+`dispatch_type = MFunction` 的 `CallInst`，可达性边比较清楚。
 
 脚本文件中的 local 函数原则上也可以删除，因为文件外部无法直接访问它们；但脚本场景要额外排除几类情况：
 
@@ -499,10 +501,10 @@ br label %then
 2. 基于稳定结果把部分 `LoadWorkspaceInst` 收敛成 `LoadSlotInst`
 3. 再基于同一份稳定信息，把部分 `apply` 收敛成 `call`
 4. 跑一轮基础 cleanup：复制消除、常量折叠、死分支消除、CFG simplify、DCE
-5. 再对满足前提的静态 `call` / `call_local` 做函数内联
+5. 再对满足前提的静态 `call` / `call mfunc` 做函数内联
 6. 内联后重复基础 cleanup，吃掉内联暴露出来的 copy、常量、死分支和死代码
 7. 再对 function 内的纯局部 slot 做寄存器化 / SSA 提升，先从单 block 或稳定 region 开始
-8. 最后做基于 `call_local` 可达性的 local function DCE；若内联后出现新的死 local 函数，可以再重复一轮
+8. 最后做基于 `MFunction` 调用可达性的 local function DCE；若内联后出现新的死 local 函数，可以再重复一轮
 9. 每个会改 CFG 的 pass 之后，都可以再跑一轮 CFG simplify 作为 cleanup
 
 原因很简单：第二个 pass 依赖的前提，和第一个 pass 证明的其实是同一类事实；函数内联又依赖调用目标已经先收敛成足够稳定的静态 `call`；而寄存器化 / SSA 提升则最适合放在内联之后，去吃掉内联额外暴露出来的局部 slot 数据流机会。

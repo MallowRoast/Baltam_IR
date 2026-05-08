@@ -10,6 +10,9 @@
 - 从 parser 产出的 `pcdata[]` 直接 lower
 - 生成可验证、可打印、带源码注释的 `IR`
 - 文件内 `local` 函数的最小支持
+- `if / else`
+- `for / while` 循环和循环内 `break / continue`
+- 嵌套循环中的最近一层 loop context 选择
 
 ## 公开接口
 
@@ -72,7 +75,7 @@ std::vector<std::shared_ptr<pcdata>>
 - 在 lowering 前先识别入口单元和文件内 local `FunctionUnit`
 - 为函数从 `mFileFunc` AST 预声明参数 slot 和返回值 slot
 - 为每个 unit 创建 `entry` 基本块
-- lower `test0 / test0_1 / test1 / test1_1 / test2` 所需的最小语句/表达式子集：
+- lower 当前 `test0 / test1 / test2 / test3` 语法样例所需的语句/表达式子集：
   - 简单赋值
   - 数值字面量
   - 名字读取
@@ -83,7 +86,9 @@ std::vector<std::shared_ptr<pcdata>>
   - 文件内 `local` 函数的最小分派
   - `if / else`
   - `for` 循环，当前采用 `for.preheader / for.header / for.body / for.latch / for.end`
-    五块 CFG 形状，详见 [for_loop_lowering_design.md](./for_loop_lowering_design.md)
+    五块 CFG 形状，详见 [loop_lowering_design.md](./loop_lowering_design.md)
+  - `while` 循环，当前采用 `while.header / while.body / while.latch / while.end`
+    四块 CFG 形状
   - 显式 `return`
   - 隐式 `return`
 
@@ -142,17 +147,25 @@ block 的创建与 `entry` 指定现在由 `CodeUnit` 自身完成，builder 只
 
 当前端到端闭环测试是：
 
-- `test/smoke_test/test0_smoke.cpp`
-- `test/smoke_test/test0_1_smoke.cpp`
-- `test/smoke_test/test1_smoke.cpp`
-- `test/smoke_test/test1_1_smoke.cpp`
-- `test/smoke_test/test2_smoke.cpp`
+- `test/smoke_test/syntax/test0_smoke.cpp`
+- `test/smoke_test/syntax/test0_1_smoke.cpp`
+- `test/smoke_test/syntax/test1_smoke.cpp`
+- `test/smoke_test/syntax/test1_1_smoke.cpp`
+- `test/smoke_test/syntax/test2_smoke.cpp`
+- `test/smoke_test/syntax/test2_1_smoke.cpp`
+- `test/smoke_test/syntax/test2_2_smoke.cpp`
+- `test/smoke_test/syntax/test2_3_smoke.cpp`
+- `test/smoke_test/syntax/test3_smoke.cpp`
+- `test/smoke_test/syntax/test3_1_smoke.cpp`
+- `test/smoke_test/syntax/test3_2_smoke.cpp`
+- `test/smoke_test/syntax/test3_3_smoke.cpp`
 
 它会：
 
 - parse `test/m/test0/test0.m` / `test/m/test0/test0_1.m` / `test/m/test1/test1.m` /
   `test/m/test1/test1_1.m` / `test/m/test2/test2.m` / `test/m/test2/test2_1.m` /
-  `test/m/test2/test2_3.m` / `test/m/test2/test2_4.m`
+  `test/m/test2/test2_2.m` / `test/m/test2/test2_3.m` / `test/m/test3/test3.m` /
+  `test/m/test3/test3_1.m` / `test/m/test3/test3_2.m` / `test/m/test3/test3_3.m`
 - build 成 `IR` 并检查结构完整、没有 `Error` 诊断
 - 校验各自的核心侧重点是否 lower 正确：
   - `test1`：脚本里即使定义了 local `sin`，主体中的 `sin(a)` 仍保留为 `apply`
@@ -162,9 +175,14 @@ block 的创建与 `entry` 指定现在由 `CodeUnit` 自身完成，builder 只
     internal 的普通 `call`，`foreach_init` 和 `foreach_iterate` lower 为
     可静态确定的 `internal.foreach_init` / `internal.foreach_iterate` 调用
   - `test2_1`：循环体内 `continue` 跳到 `for.latch`，`break` 跳到 `for.end`
-  - `test2_3`：嵌套 `for` 生成两套独立 loop CFG 和 internal 迭代状态
-  - `test2_4`：嵌套 `for` 中内层 `continue` 和外层 `break` 分别命中最近一层
+  - `test2_2`：嵌套 `for` 生成两套独立 loop CFG 和 internal 迭代状态
+  - `test2_3`：嵌套 `for` 中内层 `continue` 和外层 `break` 分别命中最近一层
     loop context 的正确目标
+  - `test3`：简单 `while` 生成四块 loop CFG
+  - `test3_1`：`while` 循环体内的 `continue / break` 分别跳到
+    `while.latch / while.end`
+  - `test3_2`：`for / while` 混合嵌套后，各自的 end/latch 回到外层循环的正确延续块
+  - `test3_3`：混合嵌套中的 `break / continue` 始终选择最近一层循环目标
 - 调用 `ir_print` 打印文本 IR
 - 校验关键打印结果与源码行号注释
 
@@ -172,7 +190,6 @@ block 的创建与 `entry` 指定现在由 `CodeUnit` 自身完成，builder 只
 
 当前 lowering 仍未覆盖完整 Matlab 语义，典型缺口包括：
 
-- `while`
 - `switch`
 - `try / catch`
 - 嵌套函数、匿名函数、闭包
