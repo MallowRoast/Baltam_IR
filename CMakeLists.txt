@@ -49,6 +49,19 @@ target_link_libraries(ir_cfg_dot
         BALTAM_IR
 )
 
+add_executable(ir_print
+    tools/ir_print_main.cpp
+)
+
+set_target_properties(ir_print PROPERTIES
+    BUILD_RPATH "/opt/Baltamatica/lib"
+)
+
+target_link_libraries(ir_print
+    PRIVATE
+        BALTAM_IR
+)
+
 # 这里统一指向 `/opt/Baltamatica/lib`，保证主库与后续 builtin/plugin 使用同一套 runtime。
 set(CMAKE_BUILD_RPATH
     "/opt/Baltamatica/lib")

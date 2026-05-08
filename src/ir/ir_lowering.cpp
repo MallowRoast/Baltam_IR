@@ -12,6 +12,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <utility>
 #include <vector>
@@ -205,6 +206,23 @@ bool try_parse_number_constant(const numval& number_node, Constant& out_constant
     }
 
     return false;
+}
+
+void collect_cell_elements(const ast_ptr& node, std::vector<ast_ptr>& elements) {
+    if (node == nullptr) {
+        return;
+    }
+
+    if (node->nodetype == node_cell ||
+        node->nodetype == node_list ||
+        node->nodetype == node_horz_list) {
+        for (const ast_ptr& branch : node->branch) {
+            collect_cell_elements(branch, elements);
+        }
+        return;
+    }
+
+    elements.push_back(node);
 }
 
 } // namespace
@@ -444,6 +462,9 @@ void IRLowerer::lower_stmt(const ast_ptr& node) {
         case node_flow_if:
             lower_if_stmt(std::static_pointer_cast<if_flow>(node));
             return;
+        case node_flow_switch:
+            lower_switch_stmt(std::static_pointer_cast<switch_flow>(node));
+            return;
         case node_for:
             lower_for_stmt(std::static_pointer_cast<flow>(node));
             return;
@@ -645,6 +666,138 @@ void IRLowerer::lower_if_stmt(const std::shared_ptr<if_flow>& if_node) {
             go->source_span = source_span_from(if_node->el());
             builder_.append_instruction(std::move(go));
         }
+    }
+
+    builder_.set_insert_point(exit_block);
+}
+
+void IRLowerer::lower_switch_stmt(const std::shared_ptr<switch_flow>& switch_node) {
+    if (switch_node == nullptr ||
+        switch_node->expr() == nullptr ||
+        switch_node->cases() == nullptr) {
+        builder_.report(
+            IRBuildDiagnostic::Error,
+            "switch 语句缺少表达式或 case 列表",
+            source_span_from(switch_node));
+        return;
+    }
+
+    CodeUnit* unit = builder_.current_unit();
+    if (unit == nullptr) {
+        builder_.report(
+            IRBuildDiagnostic::Error,
+            "没有活动代码单元，无法 lower switch 语句",
+            source_span_from(switch_node));
+        return;
+    }
+
+    BasicBlock* dispatch_block =
+        unit->create_block("switch.dispatch", source_span_from(switch_node->expr()));
+    BasicBlock* exit_block =
+        unit->create_block("switch.end", source_span_from(switch_node));
+    if (dispatch_block == nullptr || exit_block == nullptr) {
+        return;
+    }
+
+    if (builder_.current_block() != nullptr &&
+        !builder_.current_block()->has_terminator()) {
+        std::unique_ptr<GotoInst> go = std::make_unique<GotoInst>();
+        go->target = dispatch_block;
+        go->source_span = source_span_from(switch_node);
+        builder_.append_instruction(std::move(go));
+    }
+
+    builder_.set_insert_point(dispatch_block);
+    const ValueId switch_value = lower_expr(switch_node->expr());
+    if (!switch_value.is_valid()) {
+        return;
+    }
+
+    BasicBlock* current_check_block = dispatch_block;
+    ast_ptr otherwise_node;
+
+    for (const ast_ptr& case_node : switch_node->cases()->branch) {
+        if (case_node == nullptr) {
+            continue;
+        }
+        if (case_node->nodetype == node_otherwise) {
+            otherwise_node = case_node;
+            continue;
+        }
+        if (case_node->nodetype != node_case || case_node->branch.size() < 2U) {
+            builder_.report(
+                IRBuildDiagnostic::Error,
+                "当前 lowering 暂不支持该 switch 分支节点",
+                source_span_from(case_node));
+            return;
+        }
+
+        BasicBlock* body_block =
+            unit->create_block("switch.case", source_span_from(case_node->branch[1]));
+        BasicBlock* next_block =
+            unit->create_block("switch.next", source_span_from(case_node));
+        if (body_block == nullptr || next_block == nullptr) {
+            return;
+        }
+
+        builder_.set_insert_point(current_check_block);
+        const ValueId condition =
+            build_switch_match_condition(switch_value, case_node->branch[0]);
+        if (!condition.is_valid()) {
+            return;
+        }
+
+        std::unique_ptr<BranchInst> branch = std::make_unique<BranchInst>();
+        branch->condition = condition;
+        branch->true_target = body_block;
+        branch->false_target = next_block;
+        branch->source_span = source_span_from(case_node->branch[0]);
+        builder_.append_instruction(std::move(branch));
+
+        builder_.set_insert_point(body_block);
+        lower_stmt(case_node->branch[1]);
+        if (builder_.current_block() != nullptr &&
+            !builder_.current_block()->has_terminator()) {
+            std::unique_ptr<GotoInst> go = std::make_unique<GotoInst>();
+            go->target = exit_block;
+            go->source_span = source_span_from(case_node->branch[1]);
+            go->attrs.is_synthetic = 1;
+            builder_.append_instruction(std::move(go));
+        }
+
+        current_check_block = next_block;
+    }
+
+    builder_.set_insert_point(current_check_block);
+    if (otherwise_node != nullptr && !otherwise_node->branch.empty()) {
+        BasicBlock* otherwise_block =
+            unit->create_block("switch.otherwise", source_span_from(otherwise_node));
+        if (otherwise_block == nullptr) {
+            return;
+        }
+
+        std::unique_ptr<GotoInst> go = std::make_unique<GotoInst>();
+        go->target = otherwise_block;
+        go->source_span = source_span_from(otherwise_node);
+        go->attrs.is_synthetic = 1;
+        builder_.append_instruction(std::move(go));
+
+        builder_.set_insert_point(otherwise_block);
+        lower_stmt(otherwise_node->branch.back());
+        if (builder_.current_block() != nullptr &&
+            !builder_.current_block()->has_terminator()) {
+            std::unique_ptr<GotoInst> otherwise_go = std::make_unique<GotoInst>();
+            otherwise_go->target = exit_block;
+            otherwise_go->source_span = source_span_from(otherwise_node);
+            otherwise_go->attrs.is_synthetic = 1;
+            builder_.append_instruction(std::move(otherwise_go));
+        }
+    } else {
+        std::unique_ptr<GotoInst> go = std::make_unique<GotoInst>();
+        go->target = exit_block;
+        go->source_span = source_span_from(switch_node);
+        go->attrs.is_synthetic = 1;
+        builder_.append_instruction(std::move(go));
     }
 
     builder_.set_insert_point(exit_block);
@@ -1067,6 +1220,69 @@ bool IRLowerer::collect_call_result_names(
     }
 
     return append_name(out_args);
+}
+
+ValueId IRLowerer::build_switch_match_condition(
+    ValueId switch_value,
+    const ast_ptr& case_value) {
+    std::vector<ast_ptr> case_values;
+    if (case_value != nullptr && case_value->nodetype == node_cell) {
+        collect_cell_elements(case_value, case_values);
+    } else if (case_value != nullptr) {
+        case_values.push_back(case_value);
+    }
+
+    if (case_values.empty()) {
+        builder_.report(
+            IRBuildDiagnostic::Error,
+            "switch case 缺少匹配值",
+            source_span_from(case_value));
+        return InvalidValueId;
+    }
+
+    ValueId combined = InvalidValueId;
+    for (const ast_ptr& value_node : case_values) {
+        const ValueId rhs = lower_expr(value_node);
+        if (!rhs.is_valid()) {
+            return InvalidValueId;
+        }
+
+        std::unique_ptr<CallInst> match = std::make_unique<CallInst>();
+        match->callee_kind = CallInst::Direct;
+        match->dispatch_type = Internal;
+        match->callee = InternedString("switch_match");
+        match->results.push_back(builder_.create_value());
+        match->arguments.push_back(switch_value);
+        match->arguments.push_back(rhs);
+        match->source_span = source_span_from(value_node);
+        match->attrs.is_synthetic = 1;
+        const ValueId match_value = match->results.front();
+        if (!match_value.is_valid()) {
+            return InvalidValueId;
+        }
+        builder_.append_instruction(std::move(match));
+
+        if (!combined.is_valid()) {
+            combined = match_value;
+            continue;
+        }
+
+        std::unique_ptr<BinaryInst> merged = std::make_unique<BinaryInst>();
+        merged->result = builder_.create_value();
+        merged->op = Or;
+        merged->dispatch_type = Internal;
+        merged->lhs = combined;
+        merged->rhs = match_value;
+        merged->source_span = source_span_from(value_node);
+        merged->attrs.is_synthetic = 1;
+        combined = merged->result;
+        if (!combined.is_valid()) {
+            return InvalidValueId;
+        }
+        builder_.append_instruction(std::move(merged));
+    }
+
+    return combined;
 }
 
 bool IRLowerer::lower_named_invoke(

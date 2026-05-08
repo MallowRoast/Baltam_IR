@@ -139,6 +139,38 @@ add_ir_smoke_test(
 )
 set_smoke_labels(test3_3_smoke smoke syntax)
 
+add_ir_smoke_test(
+    test4_smoke
+    syntax/test4_smoke.cpp
+    TEST4_MFILE_PATH
+    test/m/test4/test4.m
+)
+set_smoke_labels(test4_smoke smoke syntax)
+
+add_ir_smoke_test(
+    test4_1_smoke
+    syntax/test4_1_smoke.cpp
+    TEST4_1_MFILE_PATH
+    test/m/test4/test4_1.m
+)
+set_smoke_labels(test4_1_smoke smoke syntax)
+
+add_ir_smoke_test(
+    test4_2_smoke
+    syntax/test4_2_smoke.cpp
+    TEST4_2_MFILE_PATH
+    test/m/test4/test4_2.m
+)
+set_smoke_labels(test4_2_smoke smoke syntax)
+
+add_ir_smoke_test(
+    test4_3_smoke
+    syntax/test4_3_smoke.cpp
+    TEST4_3_MFILE_PATH
+    test/m/test4/test4_3.m
+)
+set_smoke_labels(test4_3_smoke smoke syntax)
+
 add_executable(ir_type_smoke
     feature/ir_type_smoke.cpp
 )
@@ -200,6 +232,26 @@ set_tests_properties(ir_cfg_dot_cli_smoke PROPERTIES
     LABELS "smoke;feature"
 )
 
+set(IR_PRINT_CLI_SMOKE_IR "${CMAKE_BINARY_DIR}/test/ir_print_cli/test4.ir")
+
+add_test(
+    NAME ir_print_cli_smoke
+    COMMAND
+        ${CMAKE_COMMAND} -E env
+            HOME=/tmp
+            XDG_CACHE_HOME=/tmp/.cache
+            BALTAM_FRONTEND=console
+            LD_LIBRARY_PATH=/opt/Baltamatica/lib
+            $<TARGET_FILE:ir_print>
+            "${CMAKE_SOURCE_DIR}/test/m/test4/test4.m"
+            -o
+            "${IR_PRINT_CLI_SMOKE_IR}"
+            --no-line-numbers
+)
+set_tests_properties(ir_print_cli_smoke PROPERTIES
+    LABELS "smoke;feature"
+)
+
 set(CFG_DOT_CASES
     test0/test0
     test0/test0_1
@@ -213,6 +265,10 @@ set(CFG_DOT_CASES
     test3/test3_1
     test3/test3_2
     test3/test3_3
+    test4/test4
+    test4/test4_1
+    test4/test4_2
+    test4/test4_3
 )
 
 set(CFG_DOT_OUTPUTS)

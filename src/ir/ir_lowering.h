@@ -16,6 +16,7 @@ struct if_flow;
 struct flow;
 struct multipleFuncCall;
 struct symasgn;
+struct switch_flow;
 class pcdata;
 
 /**
@@ -55,11 +56,15 @@ private:
     void lower_assign_stmt(const std::shared_ptr<symasgn>& assign);
     void lower_call_stmt(const std::shared_ptr<multipleFuncCall>& call);
     void lower_if_stmt(const std::shared_ptr<if_flow>& if_node);
+    void lower_switch_stmt(const std::shared_ptr<switch_flow>& switch_node);
     void lower_for_stmt(const std::shared_ptr<flow>& for_node);
     void lower_while_stmt(const std::shared_ptr<if_flow>& while_node);
     void lower_break_stmt(const ast_ptr& node);
     void lower_continue_stmt(const ast_ptr& node);
     [[nodiscard]] ValueId lower_expr(const ast_ptr& node);
+    [[nodiscard]] ValueId build_switch_match_condition(
+        ValueId switch_value,
+        const ast_ptr& case_value);
     /**
      * @brief 统一 lower 调用实参列表。
      *

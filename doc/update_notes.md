@@ -63,8 +63,19 @@
 - 可选 `--svg` / `--png` 通过 Graphviz `dot` 渲染图片
 - `generate_cfg_dot` 构建目标会为 `test/m` 下当前语法用例生成 DOT 到 `build/test/cfg_dot`
 
+8. 增加 `switch / case / otherwise` lowering，见 [switch_lowering_design.md](/home/zj/Desktop/Baltam_IR/doc/switch_lowering_design.md)。
+
+当前支持：
+
+- `switch` 表达式只 lower 一次
+- 支持普通 `case` 和 cell 形式 `case {a, b}`
+- 支持 `otherwise`
+- 支持没有 `otherwise` 的 `switch`
+- 支持 `switch` 嵌套
+- 支持 `for / while` 循环中嵌套 `switch`，以及 `switch case` 包裹 `for / while`
+- 支持 `ir_print <input.m> -o <output.ir>` 打印文本 IR 文件
+
 TODO：
 
 - 增加 `parent_get` 节点
-- 支持 `switch` 及更多控制流嵌套情况
 - 补齐 `for` 的更完整迭代协议

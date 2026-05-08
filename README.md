@@ -44,6 +44,7 @@
 - `IRPrinter`
 - `IRVerifier`
 - `ValueId` 类型事实表示
+- `ir_print` 文本 IR 打印工具
 - `ir_cfg_dot` 控制流图导出工具
 
 目前已经支持的范围包括：
@@ -61,6 +62,7 @@
 - `for` / `while` 循环
 - 循环内 `break / continue`
 - 嵌套 `for`、嵌套 `while`、以及 `for / while` 混合嵌套
+- `switch / case / otherwise`
 - 显式 `return` 与隐式 `return`
 
 在现有实现里：
@@ -86,8 +88,32 @@
   [test2_3.m](/home/zj/Desktop/Baltam_IR/test/m/test2/test2_3.m)
 - [test3.m](/home/zj/Desktop/Baltam_IR/test/m/test3/test3.m) 到
   [test3_3.m](/home/zj/Desktop/Baltam_IR/test/m/test3/test3_3.m)
+- [test4.m](/home/zj/Desktop/Baltam_IR/test/m/test4/test4.m) 到
+  [test4_3.m](/home/zj/Desktop/Baltam_IR/test/m/test4/test4_3.m)
 - 语法闭环测试位于 [test/smoke_test/syntax](/home/zj/Desktop/Baltam_IR/test/smoke_test/syntax)
 - 功能 smoke test 位于 [test/smoke_test/feature](/home/zj/Desktop/Baltam_IR/test/smoke_test/feature)
+
+## 常用工具
+
+构建后可以直接把 `.m` 文件打印为文本 IR：
+
+```bash
+./build/ir_print test/m/test4/test4.m -o /tmp/test4.ir
+```
+
+也可以生成 CFG DOT 或图片：
+
+```bash
+./build/ir_cfg_dot test/m/test4/test4.m -o /tmp/test4.dot --svg /tmp/test4.svg
+```
+
+如果本机 runtime / builtin 动态库加载失败，按 smoke test 使用的环境补充：
+
+```bash
+env HOME=/tmp XDG_CACHE_HOME=/tmp/.cache BALTAM_FRONTEND=console \
+  LD_LIBRARY_PATH=/opt/Baltamatica/lib \
+  ./build/ir_print test/m/test4/test4.m -o /tmp/test4.ir
+```
 
 ## 后续要做的
 
@@ -111,6 +137,7 @@
 - [IR Builder Design](./doc/ir_builder_design.md)
 - [IR Lowering Design](./doc/ir_lowering_design.md)
 - [循环 Lowering 设计](./doc/loop_lowering_design.md)
+- [Switch Lowering 设计](./doc/switch_lowering_design.md)
 - [CFG DOT 输出设计](./doc/cfg_dot_design.md)
 - [Local 函数支持方案](./doc/local_function_support_design.md)
 - [ValueId 类型事实与函数分派设计](./doc/value_type_dispatch_design.md)

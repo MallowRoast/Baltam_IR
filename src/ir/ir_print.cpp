@@ -190,6 +190,8 @@ const char* internal_binary_mnemonic(BinaryOp op) noexcept {
             return "internal.add";
         case Gt:
             return "internal.cmp_gt";
+        case Or:
+            return "internal.or";
         case Sub:
         case Mul:
         case Rdiv:
@@ -200,7 +202,6 @@ const char* internal_binary_mnemonic(BinaryOp op) noexcept {
         case ElemLdiv:
         case ElemPow:
         case And:
-        case Or:
         case Lt:
         case Le:
         case Ge:

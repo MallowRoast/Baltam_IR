@@ -11,6 +11,7 @@
 - 生成可验证、可打印、带源码注释的 `IR`
 - 文件内 `local` 函数的最小支持
 - `if / else`
+- `switch / case / otherwise`
 - `for / while` 循环和循环内 `break / continue`
 - 嵌套循环中的最近一层 loop context 选择
 
@@ -75,7 +76,7 @@ std::vector<std::shared_ptr<pcdata>>
 - 在 lowering 前先识别入口单元和文件内 local `FunctionUnit`
 - 为函数从 `mFileFunc` AST 预声明参数 slot 和返回值 slot
 - 为每个 unit 创建 `entry` 基本块
-- lower 当前 `test0 / test1 / test2 / test3` 语法样例所需的语句/表达式子集：
+- lower 当前 `test0 / test1 / test2 / test3 / test4` 语法样例所需的语句/表达式子集：
   - 简单赋值
   - 数值字面量
   - 名字读取
@@ -85,6 +86,9 @@ std::vector<std::shared_ptr<pcdata>>
   - 带输出参数的圆括号应用语句
   - 文件内 `local` 函数的最小分派
   - `if / else`
+  - `switch / case / otherwise`，当前采用 `switch.dispatch / switch.case /
+    switch.next / switch.otherwise / switch.end` CFG 形状，详见
+    [switch_lowering_design.md](./switch_lowering_design.md)
   - `for` 循环，当前采用 `for.preheader / for.header / for.body / for.latch / for.end`
     五块 CFG 形状，详见 [loop_lowering_design.md](./loop_lowering_design.md)
   - `while` 循环，当前采用 `while.header / while.body / while.latch / while.end`
@@ -159,13 +163,19 @@ block 的创建与 `entry` 指定现在由 `CodeUnit` 自身完成，builder 只
 - `test/smoke_test/syntax/test3_1_smoke.cpp`
 - `test/smoke_test/syntax/test3_2_smoke.cpp`
 - `test/smoke_test/syntax/test3_3_smoke.cpp`
+- `test/smoke_test/syntax/test4_smoke.cpp`
+- `test/smoke_test/syntax/test4_1_smoke.cpp`
+- `test/smoke_test/syntax/test4_2_smoke.cpp`
+- `test/smoke_test/syntax/test4_3_smoke.cpp`
 
 它会：
 
 - parse `test/m/test0/test0.m` / `test/m/test0/test0_1.m` / `test/m/test1/test1.m` /
   `test/m/test1/test1_1.m` / `test/m/test2/test2.m` / `test/m/test2/test2_1.m` /
   `test/m/test2/test2_2.m` / `test/m/test2/test2_3.m` / `test/m/test3/test3.m` /
-  `test/m/test3/test3_1.m` / `test/m/test3/test3_2.m` / `test/m/test3/test3_3.m`
+  `test/m/test3/test3_1.m` / `test/m/test3/test3_2.m` / `test/m/test3/test3_3.m` /
+  `test/m/test4/test4.m` / `test/m/test4/test4_1.m` / `test/m/test4/test4_2.m` /
+  `test/m/test4/test4_3.m`
 - build 成 `IR` 并检查结构完整、没有 `Error` 诊断
 - 校验各自的核心侧重点是否 lower 正确：
   - `test1`：脚本里即使定义了 local `sin`，主体中的 `sin(a)` 仍保留为 `apply`
@@ -183,6 +193,12 @@ block 的创建与 `entry` 指定现在由 `CodeUnit` 自身完成，builder 只
     `while.latch / while.end`
   - `test3_2`：`for / while` 混合嵌套后，各自的 end/latch 回到外层循环的正确延续块
   - `test3_3`：混合嵌套中的 `break / continue` 始终选择最近一层循环目标
+  - `test4`：简单 `switch / case / otherwise` 和无 `otherwise` 的 `switch`
+  - `test4_1`：`switch` 内嵌 `switch` 时，内层 `switch.end` 回到外层 case 后续语句
+  - `test4_2`：`for / while` 内嵌 `switch` 时，`switch.end` 回到外层
+    `for.latch / while.latch`
+  - `test4_3`：`switch case` 包裹 `for / while` 时，循环内 `break / continue` 命中
+    最近循环，循环正常结束后回到 `switch.end`
 - 调用 `ir_print` 打印文本 IR
 - 校验关键打印结果与源码行号注释
 
@@ -190,7 +206,7 @@ block 的创建与 `entry` 指定现在由 `CodeUnit` 自身完成，builder 只
 
 当前 lowering 仍未覆盖完整 Matlab 语义，典型缺口包括：
 
-- `switch`
+- `switch` 的字符串、对象、枚举等完整匹配语义
 - `try / catch`
 - 嵌套函数、匿名函数、闭包
 - `global / persistent`
