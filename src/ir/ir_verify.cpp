@@ -823,7 +823,11 @@ private:
                 error("create_anon_func 不能重复捕获同名变量", inst.source_span);
             }
 
-            if (capture.source_slot.is_valid() && !has_slot(unit, capture.source_slot)) {
+            if (!capture.source_slot.is_valid()) {
+                error("create_anon_func 的 source_slot 不能为空", inst.source_span);
+            } else if (unit.is_script()) {
+                verify_workspace_handle(capture.source_slot, inst.source_span);
+            } else if (!has_slot(unit, capture.source_slot)) {
                 error("create_anon_func 的 source_slot 必须属于当前代码单元",
                       inst.source_span);
             }

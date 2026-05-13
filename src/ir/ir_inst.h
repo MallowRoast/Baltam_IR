@@ -385,6 +385,16 @@ class CreateAnonymousFunctionHandleInst final : public Instruction {
 public:
     struct CaptureValue {
         InternedString name;
+        /**
+         * @brief 捕获来源槽位。
+         *
+         * 在函数 / 匿名函数体中，`source_slot` 是被捕获变量自己的静态 slot，
+         * lowering 通过 `load_slot source_slot` 得到 `captured_value`。
+         *
+         * 在脚本中，变量来自动态 workspace，没有变量专属 slot。此时
+         * `source_slot` 是脚本的 WorkspaceHandle hidden slot，lowering 通过
+         * `load_workspace source_slot, name` 得到 `captured_value`。
+         */
         SlotId source_slot = InvalidSlotId;
         ValueId captured_value = InvalidValueId;
     };

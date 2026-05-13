@@ -1732,20 +1732,40 @@ ValueId IRLowerer::lower_anonymous_function_handle(const ast_ptr& node) {
     std::vector<CreateAnonymousFunctionHandleInst::CaptureValue> captures;
     captures.reserve(free_names.size());
     for (const std::string& name : free_names) {
-        const SlotId source_slot = lookup_slot_binding(name, source_span_from(body_node));
-        if (!source_slot.is_valid()) {
-            return InvalidValueId;
-        }
+        SlotId source_slot = InvalidSlotId;
+        ValueId captured_value = InvalidValueId;
+        if (outer_unit->is_script()) {
+            source_slot = ensure_workspace_handle_slot(source_span_from(body_node));
+            if (!source_slot.is_valid()) {
+                return InvalidValueId;
+            }
 
-        std::unique_ptr<LoadSlotInst> load = std::make_unique<LoadSlotInst>();
-        load->result = builder_.create_value();
-        if (!load->result.is_valid()) {
-            return InvalidValueId;
+            std::unique_ptr<LoadWorkspaceInst> load = std::make_unique<LoadWorkspaceInst>();
+            load->result = builder_.create_value();
+            if (!load->result.is_valid()) {
+                return InvalidValueId;
+            }
+            load->workspace_handle_slot = source_slot;
+            load->symbol = InternedString(name);
+            load->source_span = source_span_from(node);
+            captured_value = load->result;
+            builder_.append_instruction(std::move(load));
+        } else {
+            source_slot = lookup_slot_binding(name, source_span_from(body_node));
+            if (!source_slot.is_valid()) {
+                return InvalidValueId;
+            }
+
+            std::unique_ptr<LoadSlotInst> load = std::make_unique<LoadSlotInst>();
+            load->result = builder_.create_value();
+            if (!load->result.is_valid()) {
+                return InvalidValueId;
+            }
+            load->slot_id = source_slot;
+            load->source_span = source_span_from(node);
+            captured_value = load->result;
+            builder_.append_instruction(std::move(load));
         }
-        load->slot_id = source_slot;
-        load->source_span = source_span_from(node);
-        const ValueId captured_value = load->result;
-        builder_.append_instruction(std::move(load));
 
         captures.push_back({
             InternedString(name),

@@ -1009,7 +1009,9 @@ private:
             }
 
             const auto& capture = inst.captures[i];
-            if (capture.source_slot.is_valid()) {
+            if (unit.is_script()) {
+                text += format_symbol(capture.name);
+            } else if (capture.source_slot.is_valid()) {
                 text += format_slot_ref(capture.source_slot);
             } else {
                 text += format_symbol(capture.name);

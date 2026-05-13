@@ -130,7 +130,7 @@ z = f(2);
 store_slot %slot_y, %0
 
 %1 = load_slot %slot_y
-%2 = create_anon_func #anon0 captures { @y from %slot_y = %1 }
+%2 = create_anon_func #anon0 captures { %slot_y }
 store_slot %slot_f, %2
 
 %3 = load_slot %slot_f
@@ -159,7 +159,7 @@ entry:
 
 ```ir
 %1 = load_slot %slot_y
-%2 = create_anon_func #anon0 captures { @y from %slot_y = %1 }
+%2 = create_anon_func #anon0 captures { %slot_y }
 ```
 
 这里 `%1` 是外层 `CodeUnit` 中的 `ValueId`。运行到 `create_anon_func` 时，runtime 把 `%1`
@@ -209,6 +209,36 @@ frame.slot1 = closure.captures[y]
 因此，`create_anon_func` 的 capture 记录里应保存外层构造点的 `ValueId`；匿名函数体的 slot
 表里应保存对应的 capture slot。二者通过 `AnonymousFunctionId` 和 capture 顺序 / 名字建立
 映射，但不是同一个实体。
+
+### 函数和脚本中的捕获来源
+
+函数 / 匿名函数体内的变量已经静态绑定到 slot，因此捕获来源是变量自己的 `SlotId`：
+
+```ir
+%1 = load_slot %slot_y
+%2 = create_anon_func #anon0 captures { %slot_y }
+```
+
+脚本中的变量来自当前 workspace，而不是函数 frame 里的 local slot。因此脚本里捕获自由变
+量时，lowering 应根据当前 outer unit 是 `ScriptUnit` 生成 `load_workspace`：
+
+```ir
+%1 = load_env %slot_env, @y
+%2 = create_anon_func #anon0 captures { @y }
+```
+
+这里 `@y` 只表示捕获来源是脚本 workspace 中名为 `y` 的变量；真正被 closure 捕获的仍然
+是 `%1` 对应的运行时值快照，后续脚本中 `y` 再赋值不影响已创建的匿名函数句柄。
+
+`CreateAnonymousFunctionHandleInst::CaptureValue` 中可以共用一个 `source_slot` 字段：
+
+- outer unit 是函数 / 匿名函数体时，`source_slot` 是被捕获变量自己的静态 slot，
+  `captured_value` 由 `load_slot source_slot` 产生
+- outer unit 是脚本时，`source_slot` 是脚本的 WorkspaceHandle hidden slot，
+  `captured_value` 由 `load_workspace source_slot, name` 产生
+
+因此 `name` 不需要再复制一份 `workspace_symbol`。在脚本捕获中，`name` 同时就是
+`load_workspace` 使用的 workspace symbol，也是匿名函数体 capture slot 的名字。
 
 ## Capture load 开销与后续优化
 
@@ -266,14 +296,14 @@ slot canonicalization 先做两个局部 pass：
    ```ir
    store_slot %slot_y, %0
    %1 = load_slot %slot_y
-   %2 = create_anon_func #anon0 captures { @y from %slot_y = %1 }
+   %2 = create_anon_func #anon0 captures { %slot_y }
    ```
 
    规约为：
 
    ```ir
    store_slot %slot_y, %0
-   %2 = create_anon_func #anon0 captures { @y from %slot_y = %0 }
+   %2 = create_anon_func #anon0 captures { %slot_y }
    ```
 
    这样 `create_anon_func` 捕获的仍是构造点值，只是不再通过一次立即读回的
@@ -298,7 +328,7 @@ slot canonicalization 先做两个局部 pass：
    ```ir
    %0 = const 1
    store_slot %slot_y, %0
-   %2 = create_anon_func #anon0 captures { @y from %slot_y = %0 }
+   %2 = create_anon_func #anon0 captures { %slot_y }
    %3 = const 10
    store_slot %slot_y, %3
    ```
@@ -307,7 +337,7 @@ slot canonicalization 先做两个局部 pass：
 
    ```ir
    %0 = const 1
-   %2 = create_anon_func #anon0 captures { @y from %slot_y = %0 }
+   %2 = create_anon_func #anon0 captures { %slot_y }
    %3 = const 10
    store_slot %slot_y, %3
    ```
@@ -451,6 +481,8 @@ public:
 
     struct CaptureValue {
         InternedString name;
+        // 函数 / 匿名函数体中是被捕获变量自己的 slot；
+        // 脚本中是 WorkspaceHandle hidden slot，name 作为 workspace symbol。
         SlotId source_slot = InvalidSlotId;
         ValueId captured_value = InvalidValueId;
     };
