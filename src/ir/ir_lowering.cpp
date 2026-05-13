@@ -13,7 +13,9 @@
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
+#include <set>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -223,6 +225,70 @@ void collect_cell_elements(const ast_ptr& node, std::vector<ast_ptr>& elements) 
     }
 
     elements.push_back(node);
+}
+
+ast_ptr single_assignment_lhs(const ast_ptr& lhs) {
+    if (lhs != nullptr &&
+        (lhs->nodetype == node_list || lhs->nodetype == node_horz_list) &&
+        lhs->branch.size() == 1U) {
+        return lhs->branch.front();
+    }
+    return lhs;
+}
+
+void collect_name_nodes(const ast_ptr& node, std::vector<std::string>& names) {
+    if (node == nullptr) {
+        return;
+    }
+
+    if (node->nodetype == node_name) {
+        names.push_back(std::static_pointer_cast<symref>(node)->name());
+        return;
+    }
+
+    for (const ast_ptr& branch : node->branch) {
+        collect_name_nodes(branch, names);
+    }
+}
+
+std::vector<std::string> collect_anonymous_param_names(const ast_ptr& param_node) {
+    std::vector<std::string> names;
+    if (param_node == nullptr ||
+        param_node->nodetype == node_nop ||
+        param_node->nodetype == node_empty) {
+        return names;
+    }
+
+    if (param_node->nodetype == node_list || param_node->nodetype == node_horz_list) {
+        for (const ast_ptr& branch : param_node->branch) {
+            if (branch != nullptr && branch->nodetype == node_name) {
+                names.push_back(std::static_pointer_cast<symref>(branch)->name());
+            }
+        }
+        return names;
+    }
+
+    if (param_node->nodetype == node_name) {
+        names.push_back(std::static_pointer_cast<symref>(param_node)->name());
+    }
+    return names;
+}
+
+std::vector<std::string> collect_anonymous_free_names(
+    const ast_ptr& body_node,
+    const std::vector<std::string>& param_names) {
+    std::unordered_set<std::string> params(param_names.begin(), param_names.end());
+    std::set<std::string> free_names;
+    std::vector<std::string> used_names;
+    collect_name_nodes(body_node, used_names);
+
+    for (const std::string& name : used_names) {
+        if (params.find(name) == params.end()) {
+            free_names.insert(name);
+        }
+    }
+
+    return std::vector<std::string>(free_names.begin(), free_names.end());
 }
 
 } // namespace
@@ -457,6 +523,7 @@ void IRLowerer::lower_stmt(const ast_ptr& node) {
             lower_stmt_list(node);
             return;
         case node_asgn:
+        case node_asgn_element:
             lower_assign_stmt(std::static_pointer_cast<symasgn>(node));
             return;
         case node_flow_if:
@@ -534,15 +601,26 @@ void IRLowerer::lower_assign_stmt(const std::shared_ptr<symasgn>& assign) {
         return;
     }
 
-    if (assign->s()->nodetype != node_name) {
-        builder_.report(
-            IRBuildDiagnostic::Error,
-            "当前 lowering 只支持名字形式的赋值左值",
-            source_span_from(assign->s()));
+    const ast_ptr lhs = single_assignment_lhs(assign->s());
+    if (lhs != assign->s()) {
+        assign->s() = lhs;
+    }
+
+    if (lhs != nullptr &&
+        (lhs->nodetype == node_name_element || lhs->nodetype == node_multiple_func)) {
+        (void)lower_indexed_assign_stmt(assign);
         return;
     }
 
-    const std::string& name = std::static_pointer_cast<symref>(assign->s())->name();
+    if (lhs == nullptr || lhs->nodetype != node_name) {
+        builder_.report(
+            IRBuildDiagnostic::Error,
+            "当前 lowering 只支持名字或圆括号索引形式的赋值左值",
+            source_span_from(lhs));
+        return;
+    }
+
+    const std::string& name = std::static_pointer_cast<symref>(lhs)->name();
     const ValueId value = lower_expr(assign->v());
     if (!value.is_valid()) {
         return;
@@ -575,6 +653,81 @@ void IRLowerer::lower_assign_stmt(const std::shared_ptr<symasgn>& assign) {
     inst->value = value;
     inst->source_span = source_span;
     builder_.append_instruction(std::move(inst));
+}
+
+bool IRLowerer::lower_indexed_assign_stmt(const std::shared_ptr<symasgn>& assign) {
+    if (assign == nullptr || assign->s() == nullptr || assign->v() == nullptr) {
+        builder_.report(
+            IRBuildDiagnostic::Error,
+            "索引赋值语句缺少左值或右值",
+            source_span_from(assign));
+        return false;
+    }
+
+    const ast_ptr lhs = single_assignment_lhs(assign->s());
+    if (lhs == nullptr ||
+        (lhs->nodetype != node_name_element && lhs->nodetype != node_multiple_func)) {
+        builder_.report(
+            IRBuildDiagnostic::Error,
+            "当前 lowering 只支持名字圆括号形式的索引赋值",
+            source_span_from(lhs));
+        return false;
+    }
+
+    std::string name;
+    ast_ptr name_node;
+    ast_ptr index_args;
+    if (lhs->nodetype == node_name_element) {
+        const auto element = std::static_pointer_cast<symrefElement>(lhs);
+        name = element->name();
+        name_node = element->s_ref();
+        index_args = element->index();
+    } else {
+        const auto call = std::static_pointer_cast<multipleFuncCall>(lhs);
+        if (call == nullptr || call->s() == nullptr || call->s()->nodetype != node_name) {
+            builder_.report(
+                IRBuildDiagnostic::Error,
+                "当前 lowering 只支持名字圆括号形式的索引赋值",
+                source_span_from(lhs));
+            return false;
+        }
+        name = std::static_pointer_cast<symref>(call->s())->name();
+        name_node = call->s();
+        index_args = call->in_args();
+    }
+
+    const SourceSpan source_span = source_span_from(assign);
+    const ValueId base = lower_named_value(name, source_span_from(name_node));
+    if (!base.is_valid()) {
+        return false;
+    }
+
+    std::unique_ptr<CallInst> inst = std::make_unique<CallInst>();
+    inst->callee_kind = CallInst::Direct;
+    inst->dispatch_type = Internal;
+    inst->callee = InternedString("paren_assign");
+    inst->results.push_back(builder_.create_value());
+    inst->arguments.push_back(base);
+    inst->source_span = source_span;
+    inst->attrs.is_synthetic = 1;
+
+    if (!inst->results.front().is_valid()) {
+        return false;
+    }
+
+    if (!append_call_arguments(inst->arguments, index_args)) {
+        return false;
+    }
+
+    const ValueId rhs = lower_expr(assign->v());
+    if (!rhs.is_valid()) {
+        return false;
+    }
+    inst->arguments.push_back(rhs);
+
+    const ValueId updated_base = inst->results.front();
+    builder_.append_instruction(std::move(inst));
+    return store_named_result(name, updated_base, source_span);
 }
 
 void IRLowerer::lower_call_stmt(const std::shared_ptr<multipleFuncCall>& call) {
@@ -1293,15 +1446,16 @@ bool IRLowerer::lower_named_invoke(
     results.clear();
     results.reserve(result_count);
 
-    const bool name_is_bound_variable = builder_.find_name(call->name()) != nullptr;
+    const StaticVarLookupResult variable_lookup = lookup_var(call->name());
 
-    if (!name_is_bound_variable) {
-        if (const FunctionUnit* local_target = lookup_local_function(call->name())) {
+    if (!variable_lookup.found()) {
+        const StaticMethodLookupResult method_lookup = lookup_method(call->name());
+        if (method_lookup.found()) {
             std::unique_ptr<CallInst> inst = std::make_unique<CallInst>();
             inst->callee_kind = CallInst::Direct;
-            inst->dispatch_type = MFunction;
+            inst->dispatch_type = method_lookup.dispatch_type;
             inst->callee = InternedString(call->name());
-            inst->m_function_target = const_cast<FunctionUnit*>(local_target);
+            inst->m_function_target = const_cast<FunctionUnit*>(method_lookup.m_function_target);
             inst->source_span = source_span;
 
             for (std::size_t i = 0; i < result_count; ++i) {
@@ -1347,19 +1501,49 @@ bool IRLowerer::lower_named_invoke(
         return true;
     }
 
-    std::unique_ptr<ApplyInst> inst = std::make_unique<ApplyInst>();
-    inst->source_span = source_span;
-
-    if (builder_.current_unit() != nullptr && builder_.current_unit()->is_function()) {
+    if (builder_.current_unit() != nullptr &&
+        (builder_.current_unit()->is_function() ||
+         builder_.current_unit()->is_anonymous_function())) {
         const SlotId callee_slot = lookup_slot_binding(call->name(), source_span);
         if (!callee_slot.is_valid()) {
             return false;
         }
 
-        inst->callee_or_base = callee_slot;
-    } else {
-        inst->callee_or_base = InternedString(call->name());
+        std::unique_ptr<LoadSlotInst> load = std::make_unique<LoadSlotInst>();
+        load->result = builder_.create_value();
+        if (!load->result.is_valid()) {
+            return false;
+        }
+        load->slot_id = callee_slot;
+        load->source_span = source_span;
+        const ValueId base = load->result;
+        builder_.append_instruction(std::move(load));
+
+        std::unique_ptr<ValueApplyInst> inst = std::make_unique<ValueApplyInst>();
+        inst->base = base;
+        inst->source_span = source_span;
+
+        for (std::size_t i = 0; i < result_count; ++i) {
+            const ValueId result = builder_.create_value();
+            if (!result.is_valid()) {
+                return false;
+            }
+
+            inst->results.push_back(result);
+            results.push_back(result);
+        }
+
+        if (!append_call_arguments(inst->arguments, call->in_args())) {
+            return false;
+        }
+
+        builder_.append_instruction(std::move(inst));
+        return true;
     }
+
+    std::unique_ptr<ApplyInst> inst = std::make_unique<ApplyInst>();
+    inst->source_span = source_span;
+    inst->callee_or_base = InternedString(call->name());
 
     for (std::size_t i = 0; i < result_count; ++i) {
         const ValueId result = builder_.create_value();
@@ -1379,23 +1563,43 @@ bool IRLowerer::lower_named_invoke(
     return true;
 }
 
-const FunctionUnit* IRLowerer::lookup_local_function(std::string_view name) const noexcept {
+IRLowerer::StaticVarLookupResult IRLowerer::lookup_var(std::string_view name) const noexcept {
+    StaticVarLookupResult result;
+    if (const SlotId* slot_id = builder_.find_name(name)) {
+        result.slot_id = *slot_id;
+    }
+    return result;
+}
+
+IRLowerer::StaticMethodLookupResult IRLowerer::lookup_method(
+    std::string_view name) const noexcept {
+    StaticMethodLookupResult result;
+
+    // TODO: include imported functions from `import A.a` once the AST/import
+    // table exposes that information to lowering.
+    // TODO: include nested functions once nested-function AST nodes are
+    // represented by bt_ast_interface.
     const CodeUnit* unit = builder_.current_unit();
     if (unit == nullptr || !unit->is_function() || unit->parent == nullptr) {
-        return nullptr;
+        return result;
     }
 
-    return unit->parent->find_local_function(name);
+    if (const FunctionUnit* local_target = unit->parent->find_local_function(name)) {
+        result.dispatch_type = MFunction;
+        result.m_function_target = local_target;
+    }
+    return result;
 }
 
 bool IRLowerer::should_lower_direct_call(std::string_view name) const noexcept {
     const CodeUnit* unit = builder_.current_unit();
-    if (unit == nullptr || !unit->is_function()) {
+    if (unit == nullptr ||
+        (!unit->is_function() && !unit->is_anonymous_function())) {
         return false;
     }
 
-    return builder_.find_name(name) == nullptr &&
-        lookup_local_function(name) == nullptr;
+    return !lookup_var(name).found() &&
+        !lookup_method(name).found();
 }
 
 bool IRLowerer::store_named_result(
@@ -1431,6 +1635,275 @@ bool IRLowerer::store_named_result(
     return true;
 }
 
+ValueId IRLowerer::lower_named_value(std::string_view name, SourceSpan source_span) {
+    if (builder_.current_unit() != nullptr &&
+        builder_.current_unit()->is_script()) {
+        const SlotId workspace_handle_slot = ensure_workspace_handle_slot(source_span);
+        if (!workspace_handle_slot.is_valid()) {
+            return InvalidValueId;
+        }
+
+        std::unique_ptr<LoadWorkspaceInst> inst = std::make_unique<LoadWorkspaceInst>();
+        inst->result = builder_.create_value();
+        inst->workspace_handle_slot = workspace_handle_slot;
+        inst->symbol = InternedString(name);
+        inst->source_span = source_span;
+        const ValueId result = inst->result;
+        builder_.append_instruction(std::move(inst));
+        return result;
+    }
+
+    const SlotId slot_id = lookup_slot_binding(name, source_span);
+    if (!slot_id.is_valid()) {
+        return InvalidValueId;
+    }
+
+    std::unique_ptr<LoadSlotInst> inst = std::make_unique<LoadSlotInst>();
+    inst->result = builder_.create_value();
+    inst->slot_id = slot_id;
+    inst->source_span = source_span;
+    const ValueId result = inst->result;
+    builder_.append_instruction(std::move(inst));
+    return result;
+}
+
+ValueId IRLowerer::lower_named_function_handle(const ast_ptr& node) {
+    if (node == nullptr || node->branch.empty() ||
+        node->branch.front() == nullptr ||
+        node->branch.front()->nodetype != node_name) {
+        builder_.report(
+            IRBuildDiagnostic::Error,
+            "当前 lowering 只支持具名函数句柄 @name",
+            source_span_from(node));
+        return InvalidValueId;
+    }
+
+    const std::string& name =
+        std::static_pointer_cast<symref>(node->branch.front())->name();
+
+    std::unique_ptr<CreateNamedFunctionHandleInst> inst =
+        std::make_unique<CreateNamedFunctionHandleInst>();
+    inst->result = builder_.create_value();
+    if (!inst->result.is_valid()) {
+        return InvalidValueId;
+    }
+    inst->name = InternedString(name);
+    inst->source_span = source_span_from(node);
+
+    const StaticMethodLookupResult method_lookup = lookup_method(name);
+    if (method_lookup.found()) {
+        inst->resolution_mode = CreateNamedFunctionHandleInst::Prebound;
+        inst->bound_dispatch_type = method_lookup.dispatch_type;
+        inst->m_function_target = const_cast<FunctionUnit*>(method_lookup.m_function_target);
+    }
+
+    const ValueId result = inst->result;
+    builder_.append_instruction(std::move(inst));
+    return result;
+}
+
+ValueId IRLowerer::lower_anonymous_function_handle(const ast_ptr& node) {
+    if (node == nullptr ||
+        node->nodetype != node_anonymous_func ||
+        node->branch.size() < 2U) {
+        builder_.report(
+            IRBuildDiagnostic::Error,
+            "当前 lowering 只支持标准匿名函数句柄 @(args) expr",
+            source_span_from(node));
+        return InvalidValueId;
+    }
+
+    CodeUnit* outer_unit = builder_.current_unit();
+    BasicBlock* outer_block = builder_.current_block();
+    if (outer_unit == nullptr || outer_block == nullptr) {
+        builder_.report(
+            IRBuildDiagnostic::Error,
+            "创建匿名函数句柄时缺少外层插入点",
+            source_span_from(node));
+        return InvalidValueId;
+    }
+
+    const ast_ptr& param_node = node->branch[0];
+    const ast_ptr& body_node = node->branch[1];
+    const std::vector<std::string> param_names = collect_anonymous_param_names(param_node);
+    const std::vector<std::string> free_names =
+        collect_anonymous_free_names(body_node, param_names);
+
+    std::vector<CreateAnonymousFunctionHandleInst::CaptureValue> captures;
+    captures.reserve(free_names.size());
+    for (const std::string& name : free_names) {
+        const SlotId source_slot = lookup_slot_binding(name, source_span_from(body_node));
+        if (!source_slot.is_valid()) {
+            return InvalidValueId;
+        }
+
+        std::unique_ptr<LoadSlotInst> load = std::make_unique<LoadSlotInst>();
+        load->result = builder_.create_value();
+        if (!load->result.is_valid()) {
+            return InvalidValueId;
+        }
+        load->slot_id = source_slot;
+        load->source_span = source_span_from(node);
+        const ValueId captured_value = load->result;
+        builder_.append_instruction(std::move(load));
+
+        captures.push_back({
+            InternedString(name),
+            source_slot,
+            captured_value,
+        });
+    }
+
+    AnonymousFunctionUnit& anonymous_unit =
+        builder_.begin_anonymous_function_unit(source_span_from(node));
+    BasicBlock* entry_block = anonymous_unit.create_block("entry", source_span_from(node));
+    if (!anonymous_unit.set_entry_block(entry_block)) {
+        return InvalidValueId;
+    }
+
+    builder_.set_current_unit(&anonymous_unit);
+    builder_.set_insert_point(entry_block);
+
+    SlotAttrs attrs;
+    attrs.is_mutable = 1;
+    for (const std::string& name : param_names) {
+        const SlotId slot_id = builder_.create_slot(
+            Slot::Arg,
+            name,
+            source_span_from(param_node),
+            attrs);
+        if (!slot_id.is_valid()) {
+            builder_.set_current_unit(outer_unit);
+            builder_.set_insert_point(outer_block);
+            return InvalidValueId;
+        }
+        builder_.bind_name(name, slot_id);
+    }
+
+    SlotAttrs capture_attrs;
+    capture_attrs.is_mutable = 0;
+    for (const auto& capture : captures) {
+        const SlotId slot_id = builder_.create_slot(
+            Slot::Capture,
+            capture.name,
+            source_span_from(body_node),
+            capture_attrs);
+        if (!slot_id.is_valid()) {
+            builder_.set_current_unit(outer_unit);
+            builder_.set_insert_point(outer_block);
+            return InvalidValueId;
+        }
+        builder_.bind_name(capture.name, slot_id);
+    }
+
+    const ValueId body_value = lower_expr(body_node);
+    if (!body_value.is_valid()) {
+        builder_.set_current_unit(outer_unit);
+        builder_.set_insert_point(outer_block);
+        return InvalidValueId;
+    }
+
+    std::unique_ptr<ReturnInst> ret = std::make_unique<ReturnInst>();
+    ret->values.push_back(body_value);
+    ret->source_span = source_span_from(body_node);
+    builder_.append_instruction(std::move(ret));
+
+    const AnonymousFunctionId function_id = anonymous_unit.id;
+    builder_.set_current_unit(outer_unit);
+    builder_.set_insert_point(outer_block);
+
+    std::unique_ptr<CreateAnonymousFunctionHandleInst> inst =
+        std::make_unique<CreateAnonymousFunctionHandleInst>();
+    inst->result = builder_.create_value();
+    if (!inst->result.is_valid()) {
+        return InvalidValueId;
+    }
+    inst->function_id = function_id;
+    inst->captures = std::move(captures);
+    inst->source_span = source_span_from(node);
+
+    const ValueId result = inst->result;
+    builder_.append_instruction(std::move(inst));
+    return result;
+}
+
+ValueId IRLowerer::lower_concat_expr(const ast_ptr& node) {
+    if (node == nullptr ||
+        (node->nodetype != node_horz_list && node->nodetype != node_vert_list)) {
+        builder_.report(
+            IRBuildDiagnostic::Error,
+            "当前 lowering 只支持横向或纵向矩阵拼接表达式",
+            source_span_from(node));
+        return InvalidValueId;
+    }
+
+    if (node->nodetype == node_vert_list && node->branch.empty()) {
+        std::unique_ptr<ConstInst> inst = std::make_unique<ConstInst>();
+        inst->result = builder_.create_value();
+        inst->value = EmptyDoubleMatrixConstant{};
+        inst->source_span = source_span_from(node);
+        const ValueId result = inst->result;
+        builder_.append_instruction(std::move(inst));
+        return result;
+    }
+
+    std::unique_ptr<CallInst> inst = std::make_unique<CallInst>();
+    inst->callee_kind = CallInst::Direct;
+    inst->callee = InternedString(
+        node->nodetype == node_horz_list ? "horzcat" : "vertcat");
+    inst->results.push_back(builder_.create_value());
+    inst->source_span = source_span_from(node);
+
+    if (!inst->results.front().is_valid()) {
+        return InvalidValueId;
+    }
+
+    for (const ast_ptr& branch : node->branch) {
+        const ValueId argument = lower_expr(branch);
+        if (!argument.is_valid()) {
+            return InvalidValueId;
+        }
+        inst->arguments.push_back(argument);
+    }
+
+    const ValueId result = inst->results.front();
+    builder_.append_instruction(std::move(inst));
+    return result;
+}
+
+ValueId IRLowerer::lower_index_expr(const ast_ptr& node) {
+    if (node == nullptr || node->nodetype != node_name_element) {
+        builder_.report(
+            IRBuildDiagnostic::Error,
+            "当前 lowering 只支持名字圆括号形式的索引表达式",
+            source_span_from(node));
+        return InvalidValueId;
+    }
+
+    const auto element = std::static_pointer_cast<symrefElement>(node);
+    const ValueId base = lower_named_value(element->name(), source_span_from(element->s_ref()));
+    if (!base.is_valid()) {
+        return InvalidValueId;
+    }
+
+    std::unique_ptr<ValueApplyInst> inst = std::make_unique<ValueApplyInst>();
+    inst->base = base;
+    inst->results.push_back(builder_.create_value());
+    inst->source_span = source_span_from(node);
+
+    if (!inst->results.front().is_valid()) {
+        return InvalidValueId;
+    }
+
+    if (!append_call_arguments(inst->arguments, element->index())) {
+        return InvalidValueId;
+    }
+
+    const ValueId result = inst->results.front();
+    builder_.append_instruction(std::move(inst));
+    return result;
+}
+
 ValueId IRLowerer::lower_expr(const ast_ptr& node) {
     if (node == nullptr) {
         builder_.report(
@@ -1443,38 +1916,17 @@ ValueId IRLowerer::lower_expr(const ast_ptr& node) {
     switch (node->nodetype) {
         case node_name: {
             const std::string& name = std::static_pointer_cast<symref>(node)->name();
-            const SourceSpan source_span = source_span_from(node);
-
-            if (builder_.current_unit() != nullptr &&
-                builder_.current_unit()->is_script()) {
-                const SlotId workspace_handle_slot = ensure_workspace_handle_slot(source_span);
-                if (!workspace_handle_slot.is_valid()) {
-                    return InvalidValueId;
-                }
-
-                std::unique_ptr<LoadWorkspaceInst> inst = std::make_unique<LoadWorkspaceInst>();
-                inst->result = builder_.create_value();
-                inst->workspace_handle_slot = workspace_handle_slot;
-                inst->symbol = InternedString(name);
-                inst->source_span = source_span;
-                const ValueId result = inst->result;
-                builder_.append_instruction(std::move(inst));
-                return result;
-            }
-
-            const SlotId slot_id = lookup_slot_binding(name, source_span);
-            if (!slot_id.is_valid()) {
-                return InvalidValueId;
-            }
-
-            std::unique_ptr<LoadSlotInst> inst = std::make_unique<LoadSlotInst>();
-            inst->result = builder_.create_value();
-            inst->slot_id = slot_id;
-            inst->source_span = source_span;
-            const ValueId result = inst->result;
-            builder_.append_instruction(std::move(inst));
-            return result;
+            return lower_named_value(name, source_span_from(node));
         }
+        case node_handle_func:
+            return lower_named_function_handle(node);
+        case node_anonymous_func:
+            return lower_anonymous_function_handle(node);
+        case node_horz_list:
+        case node_vert_list:
+            return lower_concat_expr(node);
+        case node_name_element:
+            return lower_index_expr(node);
         case node_uplus:
         case node_negative:
         case node_logic_not:
@@ -1487,13 +1939,15 @@ ValueId IRLowerer::lower_expr(const ast_ptr& node) {
 
             const SourceSpan source_span = source_span_from(node);
             if (const char* function_name = unary_operator_function_name(node->nodetype)) {
-                if (const FunctionUnit* local_target = lookup_local_function(function_name)) {
-                    if (builder_.find_name(function_name) == nullptr) {
+                if (!lookup_var(function_name).found()) {
+                    const StaticMethodLookupResult method_lookup = lookup_method(function_name);
+                    if (method_lookup.found()) {
                         std::unique_ptr<CallInst> inst = std::make_unique<CallInst>();
                         inst->callee_kind = CallInst::Direct;
-                        inst->dispatch_type = MFunction;
+                        inst->dispatch_type = method_lookup.dispatch_type;
                         inst->callee = InternedString(function_name);
-                        inst->m_function_target = const_cast<FunctionUnit*>(local_target);
+                        inst->m_function_target =
+                            const_cast<FunctionUnit*>(method_lookup.m_function_target);
                         inst->source_span = source_span;
 
                         const ValueId result = builder_.create_value();
@@ -1584,13 +2038,15 @@ ValueId IRLowerer::lower_expr(const ast_ptr& node) {
             }
 
             if (const char* function_name = binary_operator_function_name(node->nodetype)) {
-                if (const FunctionUnit* local_target = lookup_local_function(function_name)) {
-                    if (builder_.find_name(function_name) == nullptr) {
+                if (!lookup_var(function_name).found()) {
+                    const StaticMethodLookupResult method_lookup = lookup_method(function_name);
+                    if (method_lookup.found()) {
                         std::unique_ptr<CallInst> inst = std::make_unique<CallInst>();
                         inst->callee_kind = CallInst::Direct;
-                        inst->dispatch_type = MFunction;
+                        inst->dispatch_type = method_lookup.dispatch_type;
                         inst->callee = InternedString(function_name);
-                        inst->m_function_target = const_cast<FunctionUnit*>(local_target);
+                        inst->m_function_target =
+                            const_cast<FunctionUnit*>(method_lookup.m_function_target);
                         inst->source_span = source_span;
 
                         const ValueId result = builder_.create_value();
@@ -1749,8 +2205,9 @@ void IRLowerer::predeclare_function_signature(const pcdata& parsed_unit) {
 }
 
 SlotId IRLowerer::ensure_slot_binding(std::string_view name, SourceSpan source_span) {
-    if (SlotId* slot_id = builder_.find_name(name)) {
-        return *slot_id;
+    const StaticVarLookupResult variable_lookup = lookup_var(name);
+    if (variable_lookup.found()) {
+        return variable_lookup.slot_id;
     }
 
     SlotAttrs attrs;
@@ -1770,8 +2227,8 @@ SlotId IRLowerer::ensure_slot_binding(std::string_view name, SourceSpan source_s
 }
 
 SlotId IRLowerer::lookup_slot_binding(std::string_view name, SourceSpan source_span) {
-    const SlotId* slot_id = builder_.find_name(name);
-    if (slot_id == nullptr) {
+    const StaticVarLookupResult variable_lookup = lookup_var(name);
+    if (!variable_lookup.found()) {
         builder_.report(
             IRBuildDiagnostic::Error,
             std::string("读取了尚未绑定到槽位的名字: ") + std::string(name),
@@ -1779,7 +2236,7 @@ SlotId IRLowerer::lookup_slot_binding(std::string_view name, SourceSpan source_s
         return InvalidSlotId;
     }
 
-    return *slot_id;
+    return variable_lookup.slot_id;
 }
 
 SlotId IRLowerer::ensure_workspace_handle_slot(SourceSpan source_span) {

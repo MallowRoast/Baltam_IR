@@ -81,8 +81,11 @@ void verify_core_focus(const IRBuildResult& result) {
         smoke_test::count_instructions(*entry, Instruction::Call) == 2,
         "主函数中应有两条静态 M 函数 call 指令");
     smoke_test::require(
-        smoke_test::count_instructions(*entry, Instruction::Apply) == 1,
-        "主函数中应有一条 apply 指令用于 cos(a)");
+        smoke_test::count_instructions(*entry, Instruction::Apply) == 0,
+        "主函数中不应再用 apply 表达已绑定变量 cos(a)");
+    smoke_test::require(
+        smoke_test::count_instructions(*entry, Instruction::ValueApply) == 1,
+        "主函数中应有一条 value_apply 指令用于已绑定变量 cos(a)");
     smoke_test::require(
         count_local_calls_to(*entry, "plus") == 0,
         "plus 被局部变量遮蔽后，a = 1 + 2 不应命中 local plus");
@@ -110,6 +113,12 @@ void verify_printed_ir(const std::string& printed_ir) {
     smoke_test::require(
         printed_ir.find("call mfunc @cos(") == std::string::npos,
         "cos(a) 不应打印成静态 M 函数 call");
+    smoke_test::require(
+        printed_ir.find("value_apply ") != std::string::npos,
+        "cos(a) 应打印成 value_apply");
+    smoke_test::require(
+        printed_ir.find("apply @cos") == std::string::npos,
+        "cos(a) 不应打印成名字 apply");
     smoke_test::require(
         printed_ir.find("local @cos") != std::string::npos,
         "主函数中应存在名为 cos 的局部变量槽位");

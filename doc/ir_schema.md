@@ -307,15 +307,17 @@ ValueTable
   复制输入 `ValueId` 当前已有的 `TypeFact`。
 - `CallInst(dispatch_type = internal)`
   只有已知 internal helper 有构建期摘要。当前 `internal.foreach_init` 的第 0 个
-  结果为 `extern scalar`，第 1 个结果为 `int64 scalar`；其他 internal call 结果
-  保持 `unknown`。
+  结果为 `extern scalar`，第 1 个结果为 `int64 scalar`；`internal.switch_match`
+  的第 0 个结果为 `logical scalar`；其他 internal call 结果保持 `unknown`。
+- `CreateNamedFunctionHandleInst`
+  结果固定为 `function_handle scalar`。
 - `BinaryInst(dispatch_type = internal)`
   `internal.cmp_gt` 结果为 `logical scalar`；`internal.add` 只有在左右操作数都已有
   类型事实、且 `TypeSet` 与 scalar 属性完全一致时，结果才继承该类型，否则保持
   `unknown`。
 
-动态分派的 `UnaryInst / BinaryInst / CallInst`、`ApplyInst` 和 `LoadWorkspaceInst` 在
-构建期默认保持 `unknown`，等待后续类型分析或调用解析 pass 收窄。
+动态分派的 `UnaryInst / BinaryInst / CallInst`、`ApplyInst` 和 `LoadWorkspaceInst`
+在构建期默认保持 `unknown`，等待后续类型分析或调用解析 pass 收窄。
 
 ## 6. BasicBlock
 
@@ -493,11 +495,37 @@ Instruction
   - `symbol   : InternedString`
   - `value    : Operand`
   - 在当前 printer 中显示为 `store_env`
+- `CreateNamedFunctionHandleInst`
+  - `result              : ValueId`
+  - `name                : InternedString`
+  - `resolution_mode     : lookup | prebound`
+  - `bound_dispatch_type : dynamic | builtin | internal | mfunction`
+  - `m_function_target   : FunctionUnit*`
+  - 表示源码层 `@name` 构造具名函数句柄。
+  - 这条 IR 只表达“是否已静态预绑定”，不直接保存 `lookup` 的运行时结果。
+  - `lookup`：运行到本指令时查询一次。运行时查到则返回已绑定句柄；查不到则返回
+    unresolved 具名句柄，后续调用该句柄时继续按名字查询。
+  - `prebound`：IR 构建或前置分析已经确定目标，运行时直接创建已绑定句柄，不查询。
+  - verifier 约束：
+    - `lookup`：`bound_dispatch_type = dynamic`，`m_function_target = nullptr`
+    - `prebound builtin`：`m_function_target = nullptr`
+    - `prebound mfunction`：`m_function_target` 必须指向同一 `MFileUnit` 内的函数
+    - `prebound` 暂不允许 `dynamic` 或 `internal`
+  - 打印格式：
+    - `[%0, function_handle] = create_named_func_handle @sin lookup`
+    - `[%0, function_handle] = create_named_func_handle @sin prebound builtin`
+    - `[%0, function_handle] = create_named_func_handle @sin prebound mfunc @file::sin`
 - `ApplyInst`
   - `results        : ValueId[]`
   - `callee_or_base : Operand`
   - `arguments      : Operand[]`
-  - 表示尚未消歧的源码层 `A(...)`
+  - 表示尚未完成名字消歧的源码层 `A(...)`
+- `ValueApplyInst`
+  - `results   : ValueId[]`
+  - `base      : ValueId`
+  - `arguments : Operand[]`
+  - 表示 base 已经明确是运行时值，但圆括号应用尚未分派为函数句柄调用或圆括号取值
+  - 打印格式：`[%1, unknown] = value_apply %0(%idx)`
 - `CallInst`
   - `results           : ValueId[]`
   - `callee_kind       : direct | indirect`

@@ -171,6 +171,14 @@ add_ir_smoke_test(
 )
 set_smoke_labels(test4_3_smoke smoke syntax)
 
+add_ir_smoke_test(
+    test5_1_smoke
+    syntax/test5_1_smoke.cpp
+    TEST5_1_MFILE_PATH
+    test/m/test5/test5_1.m
+)
+set_smoke_labels(test5_1_smoke smoke syntax)
+
 add_executable(ir_type_smoke
     feature/ir_type_smoke.cpp
 )

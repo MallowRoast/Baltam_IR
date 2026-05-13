@@ -176,6 +176,16 @@ struct ValueIdTag;
 using ValueId = EntityId<ValueIdTag>;
 
 /**
+ * @brief `AnonymousFunctionId` 的标签类型。
+ */
+struct AnonymousFunctionIdTag;
+
+/**
+ * @brief 匿名函数体的强类型 ID。
+ */
+using AnonymousFunctionId = EntityId<AnonymousFunctionIdTag>;
+
+/**
  * @brief 第一版字符串名字承载类型。
  *
  * 当前阶段直接使用 `std::string` 保存名字文本，后续如果字符串池成为热点或需要稳定句柄，
@@ -192,6 +202,11 @@ inline constexpr SlotId InvalidSlotId = SlotId::invalid();
  * @brief 无效的 `ValueId` 常量。
  */
 inline constexpr ValueId InvalidValueId = ValueId::invalid();
+
+/**
+ * @brief 无效的 `AnonymousFunctionId` 常量。
+ */
+inline constexpr AnonymousFunctionId InvalidAnonymousFunctionId = AnonymousFunctionId::invalid();
 
 /**
  * @brief 归一化路径类型。

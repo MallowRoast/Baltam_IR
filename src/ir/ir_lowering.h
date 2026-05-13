@@ -54,6 +54,7 @@ private:
     void lower_stmt(const ast_ptr& node);
     void lower_stmt_list(const ast_ptr& node);
     void lower_assign_stmt(const std::shared_ptr<symasgn>& assign);
+    [[nodiscard]] bool lower_indexed_assign_stmt(const std::shared_ptr<symasgn>& assign);
     void lower_call_stmt(const std::shared_ptr<multipleFuncCall>& call);
     void lower_if_stmt(const std::shared_ptr<if_flow>& if_node);
     void lower_switch_stmt(const std::shared_ptr<switch_flow>& switch_node);
@@ -62,6 +63,11 @@ private:
     void lower_break_stmt(const ast_ptr& node);
     void lower_continue_stmt(const ast_ptr& node);
     [[nodiscard]] ValueId lower_expr(const ast_ptr& node);
+    [[nodiscard]] ValueId lower_named_value(std::string_view name, SourceSpan source_span);
+    [[nodiscard]] ValueId lower_named_function_handle(const ast_ptr& node);
+    [[nodiscard]] ValueId lower_anonymous_function_handle(const ast_ptr& node);
+    [[nodiscard]] ValueId lower_concat_expr(const ast_ptr& node);
+    [[nodiscard]] ValueId lower_index_expr(const ast_ptr& node);
     [[nodiscard]] ValueId build_switch_match_condition(
         ValueId switch_value,
         const ast_ptr& case_value);
@@ -86,18 +92,49 @@ private:
         std::vector<std::string>& result_names,
         SourceSpan source_span);
     /**
-     * @brief 将名字形式的 `A(...)` lower 成 `call` 或 `apply`。
+     * @brief 将名字形式的 `A(...)` lower 成 `call`、`apply` 或 `value_apply`。
      *
-     * 这两类指令在结果分配、参数 lowering 和指令追加上大部分流程相同，只在 callee
-     * 形状和分派规则上不同。抽成 helper 可以保证 statement / expression 两条路径
-     * 使用完全一致的 lowering 规则。
+     * 这几类指令在结果分配、参数 lowering 和指令追加上大部分流程相同，只在 callee/base
+     * 形状和分派规则上不同。抽成 helper 可以保证 statement / expression 两条路径使用
+     * 完全一致的 lowering 规则。
      */
     [[nodiscard]] bool lower_named_invoke(
         const std::shared_ptr<multipleFuncCall>& call,
         std::size_t result_count,
         SourceSpan source_span,
         std::vector<ValueId>& results);
-    [[nodiscard]] const FunctionUnit* lookup_local_function(std::string_view name) const noexcept;
+
+    struct StaticVarLookupResult {
+        SlotId slot_id = InvalidSlotId;
+
+        [[nodiscard]] bool found() const noexcept {
+            return slot_id.is_valid();
+        }
+    };
+
+    struct StaticMethodLookupResult {
+        DispatchType dispatch_type = Dynamic;
+        const FunctionUnit* m_function_target = nullptr;
+
+        [[nodiscard]] bool found() const noexcept {
+            return dispatch_type != Dynamic;
+        }
+    };
+
+    /**
+     * @brief 查询 lowering 阶段静态已知的变量表。
+     */
+    [[nodiscard]] StaticVarLookupResult lookup_var(std::string_view name) const noexcept;
+
+    /**
+     * @brief 查询 lowering 阶段静态已知的函数表。
+     *
+     * 目前只包含当前文件 local 函数。后续这里继续接入：
+     * - import A.a 的静态导入函数表
+     * - 嵌套函数表
+     */
+    [[nodiscard]] StaticMethodLookupResult lookup_method(std::string_view name) const noexcept;
+
     /**
      * @brief 判断当前函数中的名字调用是否可直接收敛为 `call`。
      *

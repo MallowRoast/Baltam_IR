@@ -9,6 +9,7 @@
 namespace baltam {
 
 struct BasicBlock;
+struct AnonymousFunctionUnit;
 struct FunctionUnit;
 
 /**
@@ -194,7 +195,10 @@ public:
         StoreSlot,
         LoadWorkspace,
         StoreWorkspace,
+        CreateNamedFunctionHandle,
+        CreateAnonymousFunctionHandle,
         Apply,
+        ValueApply,
         Call,
         Copy,
         Unary,
@@ -340,10 +344,69 @@ public:
 };
 
 /**
+ * @brief 构造具名函数句柄指令。
+ *
+ * 该指令表达源码层 `@name`。它必须区分两类语义：
+ * - `RuntimeLookup`：运行到这条指令时按当前函数搜索环境查询一次。若查到目标，
+ *   runtime 句柄会冻结该目标；若查不到，runtime 句柄保留名字，后续每次调用再查询。
+ * - `Prebound`：IR 构建或前置分析已经确定目标。运行时直接构造已绑定句柄，不再查询。
+ */
+class CreateNamedFunctionHandleInst final : public Instruction {
+public:
+    enum ResolutionMode : std::uint8_t {
+        RuntimeLookup,
+        Prebound,
+    };
+
+    /**
+     * @brief 构造具名函数句柄指令。
+     */
+    CreateNamedFunctionHandleInst() noexcept
+        : Instruction(Instruction::CreateNamedFunctionHandle) {
+        effect = Env;
+    }
+
+    ValueId result = InvalidValueId;
+    InternedString name;
+    ResolutionMode resolution_mode = RuntimeLookup;
+    DispatchType bound_dispatch_type = Dynamic;
+    FunctionUnit* m_function_target = nullptr;
+};
+
+/**
+ * @brief 构造匿名函数句柄指令。
+ *
+ * 该指令表达源码层 `@(args) expr` 的 closure 构造点。匿名函数体由
+ * `function_id` 间接引用，捕获值使用当前外层 `CodeUnit` 中已经定义好的 `ValueId`
+ * 表示。运行到该指令时，runtime 会把这些 `ValueId` 当前对应的运行时值保存进新建
+ * closure 的 capture environment。
+ */
+class CreateAnonymousFunctionHandleInst final : public Instruction {
+public:
+    struct CaptureValue {
+        InternedString name;
+        SlotId source_slot = InvalidSlotId;
+        ValueId captured_value = InvalidValueId;
+    };
+
+    /**
+     * @brief 构造匿名函数句柄指令。
+     */
+    CreateAnonymousFunctionHandleInst() noexcept
+        : Instruction(Instruction::CreateAnonymousFunctionHandle) {
+        effect = Heap;
+    }
+
+    ValueId result = InvalidValueId;
+    AnonymousFunctionId function_id = InvalidAnonymousFunctionId;
+    std::vector<CaptureValue> captures;
+};
+
+/**
  * @brief 通用圆括号应用指令。
  *
- * `apply` 保留源码层 `A(...)` 的歧义：这里暂时只知道发生了一次圆括号应用，但尚未收敛
- * 成“函数调用”还是“圆括号取值”。
+ * `apply` 保留源码层 `A(...)` 的名字歧义：这里暂时只知道发生了一次对名字的圆括号应用，
+ * 但尚未收敛成“函数调用”还是“读取同名变量后继续分派”。
  */
 class ApplyInst final : public Instruction {
 public:
@@ -356,6 +419,27 @@ public:
 
     std::vector<ValueId> results;
     Operand callee_or_base;
+    std::vector<Operand> arguments;
+};
+
+/**
+ * @brief 值圆括号应用指令。
+ *
+ * `value_apply` 表示 base 已经明确是运行时值，但该值上的圆括号应用还没有继续分派为
+ * 函数句柄调用或圆括号取值。base 必须是 `ValueId`，从而让后续类型事实、SSA 提升和
+ * 分派收敛都能沿普通数据流追踪。
+ */
+class ValueApplyInst final : public Instruction {
+public:
+    /**
+     * @brief 构造 `value_apply` 指令。
+     */
+    ValueApplyInst() noexcept : Instruction(Instruction::ValueApply) {
+        effect = Opaque;
+    }
+
+    std::vector<ValueId> results;
+    ValueId base = InvalidValueId;
     std::vector<Operand> arguments;
 };
 

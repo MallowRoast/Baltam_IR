@@ -75,7 +75,30 @@
 - 支持 `for / while` 循环中嵌套 `switch`，以及 `switch case` 包裹 `for / while`
 - 支持 `ir_print <input.m> -o <output.ir>` 打印文本 IR 文件
 
+9. Stage 保存：增加具名函数句柄和 `ValueApply` 相关 IR 支持。
+
+当前支持：
+
+- 新增 `CreateNamedFunctionHandleInst`，用于表达源码层 `@name` 的具名函数句柄构造
+- 具名函数句柄构造区分运行时 lookup 和静态 prebound，结果类型固定为 `function_handle`
+- 新增 `ValueApplyInst`，将已知 base 为运行时值的圆括号应用统一表达为 `value_apply`
+- 函数中已绑定变量的 `f(...)` 会 lower 为 `load_slot f` + `value_apply`
+- 矩阵变量下标读取 `A(...)` 同样 lower 为 `load_slot A` + `value_apply`
+- `ApplyInst` 继续保留脚本名字应用等尚未消歧的 `A(...)`
+- 新增 `test5` 覆盖具名函数句柄创建/调用、矩阵创建、下标读取和下标写入
+- 增加匿名函数句柄设计问题记录，见 [anonymous_function_handle_design.md](/home/zj/Desktop/Baltam_IR/doc/anonymous_function_handle_design.md)
+
 TODO：
 
 - 增加 `parent_get` 节点
 - 补齐 `for` 的更完整迭代协议
+- 第一阶段：补齐完整下标语法，包括 `A(:, 2)`、`A(end, :)`、`A{1}`、`S.field`
+  和 `A(1).x{2}` 等链式访问
+- 第一阶段：补齐更多字面量，包括 `[]`、`"abc"`、`'abc'`、`true / false`、
+  cell literal 和 struct 相关构造
+- 第一阶段：落地匿名函数句柄 lowering，包括 `@(x) x + y`、捕获值和
+  `create_anon_func` 设计
+- 第一阶段：补齐多返回值与左值列表，包括 `[a, b] = f(x)`、`[~, b] = f()`
+  和 placeholder 处理
+- 第二阶段：支持 `global` / `persistent`，并接入变量 lookup 与 slot/env 语义
+- 第二阶段：支持短路逻辑 `&&` / `||`，使用 CFG 表达条件求值

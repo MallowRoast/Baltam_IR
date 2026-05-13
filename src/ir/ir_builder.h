@@ -123,6 +123,11 @@ public:
     FunctionUnit& begin_function_unit(std::string_view name, SourceSpan source_span);
 
     /**
+     * @brief 在当前文件下开始一个匿名函数体单元。
+     */
+    AnonymousFunctionUnit& begin_anonymous_function_unit(SourceSpan source_span);
+
+    /**
      * @brief 切换当前活动代码单元。
      */
     void set_current_unit(CodeUnit* unit);
@@ -175,6 +180,11 @@ public:
     [[nodiscard]] ValueId create_value();
 
     /**
+     * @brief 为当前文件分配一个匿名函数 ID。
+     */
+    [[nodiscard]] AnonymousFunctionId create_anonymous_function_id();
+
+    /**
      * @brief 绑定一个名字到当前 unit 的名字表。
      */
     void bind_name(std::string_view name, SlotId slot_id);
@@ -224,6 +234,7 @@ private:
     std::unique_ptr<MFileUnit> owned_file_;
     std::unordered_map<CodeUnit*, std::unique_ptr<IRUnitBuildState>> unit_states_;
     IRUnitBuildState* current_unit_state_ = nullptr;
+    AnonymousFunctionId::underlying_type next_anonymous_function_ = 0;
     std::vector<IRBuildDiagnostic> diagnostics_;
 };
 

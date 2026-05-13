@@ -2,6 +2,7 @@
 #include "smoke_test_common.h"
 
 #include <iostream>
+#include <sstream>
 
 namespace baltam {
 namespace {
@@ -69,6 +70,68 @@ void verify_append_instruction_binds_definition() {
     smoke_test::require(call_info0->type_fact.is_unknown, "apply 结果在类型推导前应保持 unknown");
     smoke_test::require(!call_info0->type_fact.is_scalar, "apply 结果不应断言为标量");
     smoke_test::require(call_info1->type_fact.is_unknown, "apply 的全部结果在类型推导前都应保持 unknown");
+}
+
+void verify_value_apply_binds_definition_and_verifies_base_value() {
+    IRBuilder builder;
+    MFileUnit& mfile = builder.begin_file("value_table_smoke.m");
+
+    ScriptUnit& unit = builder.begin_script_unit("value_table_smoke", SourceSpan::invalid());
+    mfile.entry_unit = &unit;
+    BasicBlock* entry = unit.create_block("entry", SourceSpan::invalid());
+    smoke_test::require(unit.set_entry_block(entry), "应成功设置入口块");
+    builder.set_current_unit(&unit);
+    builder.set_insert_point(entry);
+
+    const ValueId base = builder.create_value();
+    auto base_inst = std::make_unique<ConstInst>();
+    base_inst->result = base;
+    base_inst->value = Int64Constant{7};
+    builder.append_instruction(std::move(base_inst));
+
+    const ValueId argument = builder.create_value();
+    auto argument_inst = std::make_unique<ConstInst>();
+    argument_inst->result = argument;
+    argument_inst->value = Int64Constant{1};
+    builder.append_instruction(std::move(argument_inst));
+
+    const ValueId result0 = builder.create_value();
+    const ValueId result1 = builder.create_value();
+    auto value_apply = std::make_unique<ValueApplyInst>();
+    value_apply->base = base;
+    value_apply->results = {result0, result1};
+    value_apply->arguments.push_back(argument);
+    builder.append_instruction(std::move(value_apply));
+
+    auto ret = std::make_unique<ReturnInst>();
+    builder.append_instruction(std::move(ret));
+
+    const ValueInfo* result_info0 = unit.value_table.find(result0);
+    const ValueInfo* result_info1 = unit.value_table.find(result1);
+    smoke_test::require(result_info0 != nullptr && result_info1 != nullptr,
+                        "value_apply 多结果应存在于 value_table");
+    smoke_test::require(result_info0->def == result_info1->def,
+                        "同一 value_apply 的多个结果应指向同一个 def");
+    smoke_test::require(result_info0->def != nullptr &&
+                            result_info0->def->type() == Instruction::ValueApply,
+                        "多结果 def 应指向 value_apply 指令");
+    smoke_test::require(result_info0->result_index == 0,
+                        "value_apply 第一个结果应记录 result_index 0");
+    smoke_test::require(result_info1->result_index == 1,
+                        "value_apply 第二个结果应记录 result_index 1");
+    smoke_test::require(result_info0->type_fact.is_unknown &&
+                            result_info1->type_fact.is_unknown,
+                        "value_apply 结果在类型推导前应保持 unknown");
+
+    const IRVerifyResult verify_result = verify_ir(mfile);
+    if (!verify_result.ok()) {
+        std::ostringstream message;
+        message << "value_apply IR 应通过 verifier";
+        for (const IRVerifyDiagnostic& diagnostic : verify_result.diagnostics) {
+            message << "\n  - " << diagnostic.message;
+        }
+        smoke_test::fail(message.str());
+    }
 }
 
 void verify_append_instruction_records_simple_type_facts() {
@@ -231,6 +294,91 @@ void verify_internal_add_uses_matching_operand_type() {
                         "不同类型 internal add 结果应保持 unknown");
 }
 
+void verify_internal_switch_match_returns_logical() {
+    IRBuilder builder;
+    MFileUnit& mfile = builder.begin_file("value_table_smoke.m");
+    (void)mfile;
+
+    ScriptUnit& unit = builder.begin_script_unit("value_table_smoke", SourceSpan::invalid());
+    BasicBlock* entry = unit.create_block("entry", SourceSpan::invalid());
+    smoke_test::require(unit.set_entry_block(entry), "应成功设置入口块");
+    builder.set_current_unit(&unit);
+    builder.set_insert_point(entry);
+
+    const ValueId lhs = builder.create_value();
+    auto lhs_inst = std::make_unique<ConstInst>();
+    lhs_inst->result = lhs;
+    lhs_inst->value = Float64Constant{1.0};
+    builder.append_instruction(std::move(lhs_inst));
+
+    const ValueId rhs = builder.create_value();
+    auto rhs_inst = std::make_unique<ConstInst>();
+    rhs_inst->result = rhs;
+    rhs_inst->value = Float64Constant{1.0};
+    builder.append_instruction(std::move(rhs_inst));
+
+    const ValueId match = builder.create_value();
+    auto match_inst = std::make_unique<CallInst>();
+    match_inst->callee_kind = CallInst::Direct;
+    match_inst->dispatch_type = Internal;
+    match_inst->callee = InternedString("switch_match");
+    match_inst->results.push_back(match);
+    match_inst->arguments.push_back(lhs);
+    match_inst->arguments.push_back(rhs);
+    builder.append_instruction(std::move(match_inst));
+
+    const ValueInfo* match_info = unit.value_table.find(match);
+    smoke_test::require(match_info != nullptr, "internal switch_match 结果应存在于 value_table");
+    smoke_test::require(!match_info->type_fact.is_unknown,
+                        "internal switch_match 结果不应是 unknown");
+    smoke_test::require(match_info->type_fact.types == TypeSet::logical(),
+                        "internal switch_match 结果应为 logical");
+    smoke_test::require(match_info->type_fact.is_scalar,
+                        "internal switch_match 结果应为 scalar");
+}
+
+void verify_create_named_function_handle_type_fact() {
+    IRBuilder builder;
+    MFileUnit& mfile = builder.begin_file("value_table_smoke.m");
+
+    ScriptUnit& unit = builder.begin_script_unit("value_table_smoke", SourceSpan::invalid());
+    mfile.entry_unit = &unit;
+    BasicBlock* entry = unit.create_block("entry", SourceSpan::invalid());
+    smoke_test::require(unit.set_entry_block(entry), "应成功设置入口块");
+    builder.set_current_unit(&unit);
+    builder.set_insert_point(entry);
+
+    const ValueId handle = builder.create_value();
+    auto handle_inst = std::make_unique<CreateNamedFunctionHandleInst>();
+    handle_inst->result = handle;
+    handle_inst->name = "sin";
+    handle_inst->resolution_mode = CreateNamedFunctionHandleInst::RuntimeLookup;
+    builder.append_instruction(std::move(handle_inst));
+
+    auto ret = std::make_unique<ReturnInst>();
+    builder.append_instruction(std::move(ret));
+
+    const ValueInfo* handle_info = unit.value_table.find(handle);
+    smoke_test::require(handle_info != nullptr,
+                        "create_named_func_handle 结果应存在于 value_table");
+    smoke_test::require(!handle_info->type_fact.is_unknown,
+                        "create_named_func_handle 结果不应是 unknown");
+    smoke_test::require(handle_info->type_fact.types == TypeSet::function_handle(),
+                        "create_named_func_handle 结果应为 function_handle");
+    smoke_test::require(handle_info->type_fact.is_scalar,
+                        "create_named_func_handle 结果应为 scalar");
+
+    const IRVerifyResult verify_result = verify_ir(mfile);
+    if (!verify_result.ok()) {
+        std::ostringstream message;
+        message << "lookup function handle IR 应通过 verifier";
+        for (const IRVerifyDiagnostic& diagnostic : verify_result.diagnostics) {
+            message << "\n  - " << diagnostic.message;
+        }
+        smoke_test::fail(message.str());
+    }
+}
+
 } // namespace
 } // namespace baltam
 
@@ -238,9 +386,12 @@ int main() {
     try {
         baltam::verify_create_value_registers_placeholder();
         baltam::verify_append_instruction_binds_definition();
+        baltam::verify_value_apply_binds_definition_and_verifies_base_value();
         baltam::verify_append_instruction_records_simple_type_facts();
         baltam::verify_load_slot_uses_fixed_slot_type();
         baltam::verify_internal_add_uses_matching_operand_type();
+        baltam::verify_internal_switch_match_returns_logical();
+        baltam::verify_create_named_function_handle_type_fact();
         std::cout << "value_table_smoke passed\n";
     } catch (const std::exception& ex) {
         std::cerr << "value_table_smoke 失败: " << ex.what() << '\n';

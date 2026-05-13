@@ -40,12 +40,18 @@ private:
 
     [[nodiscard]] bool contains_unit(const MFileUnit& mfile, const CodeUnit* unit) const {
         return unit != nullptr &&
-            std::any_of(
+            (std::any_of(
                 mfile.code_units.begin(),
                 mfile.code_units.end(),
                 [unit](const std::unique_ptr<CodeUnit>& candidate) {
                     return candidate.get() == unit;
-                });
+                }) ||
+             std::any_of(
+                mfile.anonymous_functions.functions.begin(),
+                mfile.anonymous_functions.functions.end(),
+                [unit](const std::unique_ptr<AnonymousFunctionUnit>& candidate) {
+                    return candidate.get() == unit;
+                }));
     }
 
     [[nodiscard]] bool contains_block(const CodeUnit& unit, const BasicBlock* block) const {
@@ -78,6 +84,12 @@ private:
         return value_id.is_valid() && defined_values_.find(value_id) != defined_values_.end();
     }
 
+    [[nodiscard]] bool has_anonymous_function(
+        const MFileUnit& mfile,
+        AnonymousFunctionId function_id) const {
+        return mfile.anonymous_functions.find(function_id) != nullptr;
+    }
+
     void verify_mfile(const MFileUnit& mfile) {
         if (mfile.entry_unit == nullptr) {
             error("文件入口代码单元不能为空");
@@ -93,6 +105,23 @@ private:
 
             if (unit_ptr->parent != &mfile) {
                 error("代码单元 parent 必须指回所属文件", unit_ptr->source_span);
+            }
+        }
+
+        std::unordered_set<AnonymousFunctionId> seen_anonymous_functions;
+        for (const auto& function_ptr : mfile.anonymous_functions.functions) {
+            if (function_ptr == nullptr) {
+                error("匿名函数表不能包含空函数体");
+                continue;
+            }
+
+            if (function_ptr->parent != &mfile) {
+                error("匿名函数体 parent 必须指回所属文件", function_ptr->source_span);
+            }
+            if (!function_ptr->id.is_valid()) {
+                error("匿名函数体 ID 不能为空", function_ptr->source_span);
+            } else if (!seen_anonymous_functions.insert(function_ptr->id).second) {
+                error("匿名函数体 ID 不能重复", function_ptr->source_span);
             }
         }
 
@@ -114,6 +143,12 @@ private:
                 verify_code_unit(*unit_ptr, mfile);
             }
         }
+
+        for (const auto& function_ptr : mfile.anonymous_functions.functions) {
+            if (function_ptr != nullptr) {
+                verify_code_unit(*function_ptr, mfile);
+            }
+        }
     }
 
     void verify_code_unit(const CodeUnit& unit, const MFileUnit& mfile) {
@@ -127,6 +162,11 @@ private:
         } else if (unit.type() == CodeUnit::Function) {
             if (dynamic_cast<const FunctionUnit*>(&unit) == nullptr) {
                 error("type() 为 Function 的代码单元必须是 FunctionUnit", unit.source_span);
+            }
+        } else if (unit.type() == CodeUnit::AnonymousFunction) {
+            if (dynamic_cast<const AnonymousFunctionUnit*>(&unit) == nullptr) {
+                error("type() 为 AnonymousFunction 的代码单元必须是 AnonymousFunctionUnit",
+                      unit.source_span);
             }
         } else {
             error("代码单元 type() 返回了未知类型", unit.source_span);
@@ -152,6 +192,8 @@ private:
         verify_value_table(unit);
         if (unit.is_function()) {
             verify_function_unit(static_cast<const FunctionUnit&>(unit));
+        } else if (unit.is_anonymous_function()) {
+            verify_anonymous_function_unit(static_cast<const AnonymousFunctionUnit&>(unit));
         }
 
         for (const auto& block_ptr : unit.basic_blocks) {
@@ -209,6 +251,10 @@ private:
                 error("函数调用约定 hidden slot 只能出现在函数代码单元中", slot.source_span);
             }
 
+            if (slot.is_capture() && !unit.is_anonymous_function()) {
+                error("Capture slot 只能出现在匿名函数体单元中", slot.source_span);
+            }
+
             if (slot.attrs.fixed_type != SlotAttrs::Unknown &&
                 slot.attrs.fixed_type != SlotAttrs::Int64Scalar) {
                 error("slot fixed_type 不合法", slot.source_span);
@@ -249,6 +295,10 @@ private:
                 return static_cast<const LoadSlotInst&>(instruction).result == value_id && result_index == 0;
             case Instruction::LoadWorkspace:
                 return static_cast<const LoadWorkspaceInst&>(instruction).result == value_id && result_index == 0;
+            case Instruction::CreateNamedFunctionHandle:
+                return static_cast<const CreateNamedFunctionHandleInst&>(instruction).result == value_id && result_index == 0;
+            case Instruction::CreateAnonymousFunctionHandle:
+                return static_cast<const CreateAnonymousFunctionHandleInst&>(instruction).result == value_id && result_index == 0;
             case Instruction::Copy:
                 return static_cast<const CopyInst&>(instruction).result == value_id && result_index == 0;
             case Instruction::Unary:
@@ -257,6 +307,10 @@ private:
                 return static_cast<const BinaryInst&>(instruction).result == value_id && result_index == 0;
             case Instruction::Apply: {
                 const auto& inst = static_cast<const ApplyInst&>(instruction);
+                return result_index < inst.results.size() && inst.results[result_index] == value_id;
+            }
+            case Instruction::ValueApply: {
+                const auto& inst = static_cast<const ValueApplyInst&>(instruction);
                 return result_index < inst.results.size() && inst.results[result_index] == value_id;
             }
             case Instruction::Call: {
@@ -301,6 +355,42 @@ private:
             }
             if (!seen_returns.insert(slot_id).second) {
                 error("函数返回值列表不能重复引用同一个 slot", slot->source_span);
+            }
+        }
+    }
+
+    void verify_anonymous_function_unit(const AnonymousFunctionUnit& function) {
+        if (!function.id.is_valid()) {
+            error("匿名函数体 ID 不能为空", function.source_span);
+        }
+
+        std::unordered_set<SlotId> seen_params;
+        for (SlotId slot_id : function.param_slots) {
+            const Slot* slot = function.slot_table.find_slot(slot_id);
+            if (slot == nullptr) {
+                error("匿名函数参数列表引用了不存在的 slot", function.source_span);
+                continue;
+            }
+            if (!slot->is_arg()) {
+                error("匿名函数参数列表只能引用 Arg slot", slot->source_span);
+            }
+            if (!seen_params.insert(slot_id).second) {
+                error("匿名函数参数列表不能重复引用同一个 slot", slot->source_span);
+            }
+        }
+
+        std::unordered_set<SlotId> seen_captures;
+        for (SlotId slot_id : function.capture_slots) {
+            const Slot* slot = function.slot_table.find_slot(slot_id);
+            if (slot == nullptr) {
+                error("匿名函数捕获列表引用了不存在的 slot", function.source_span);
+                continue;
+            }
+            if (!slot->is_capture()) {
+                error("匿名函数捕获列表只能引用 Capture slot", slot->source_span);
+            }
+            if (!seen_captures.insert(slot_id).second) {
+                error("匿名函数捕获列表不能重复引用同一个 slot", slot->source_span);
             }
         }
     }
@@ -422,6 +512,12 @@ private:
             case Instruction::StoreSlot: {
                 const auto& inst = static_cast<const StoreSlotInst&>(instruction);
                 verify_slot_ref(inst.slot_id, "store_slot 引用了不存在的 slot", inst.source_span);
+                if (current_unit_ != nullptr) {
+                    const Slot* slot = current_unit_->slot_table.find_slot(inst.slot_id);
+                    if (slot != nullptr && slot->is_capture()) {
+                        error("匿名函数 capture slot 是只读的，不能 store_slot", inst.source_span);
+                    }
+                }
                 verify_operand(inst.value, "store_slot value", inst.source_span);
                 break;
             }
@@ -443,11 +539,31 @@ private:
                 verify_operand(inst.value, "store_workspace value", inst.source_span);
                 break;
             }
+            case Instruction::CreateNamedFunctionHandle: {
+                const auto& inst = static_cast<const CreateNamedFunctionHandleInst&>(instruction);
+                define_value(inst.result, inst.source_span);
+                verify_create_named_function_handle(inst, mfile);
+                break;
+            }
+            case Instruction::CreateAnonymousFunctionHandle: {
+                const auto& inst =
+                    static_cast<const CreateAnonymousFunctionHandleInst&>(instruction);
+                define_value(inst.result, inst.source_span);
+                verify_create_anonymous_function_handle(inst, unit, mfile);
+                break;
+            }
             case Instruction::Apply: {
                 const auto& inst = static_cast<const ApplyInst&>(instruction);
                 define_values(inst.results, "apply results", inst.source_span);
                 verify_operand(inst.callee_or_base, "apply callee_or_base", inst.source_span);
                 verify_operands(inst.arguments, "apply argument", inst.source_span);
+                break;
+            }
+            case Instruction::ValueApply: {
+                const auto& inst = static_cast<const ValueApplyInst&>(instruction);
+                define_values(inst.results, "value_apply results", inst.source_span);
+                verify_value_ref(inst.base, "value_apply base", inst.source_span);
+                verify_operands(inst.arguments, "value_apply argument", inst.source_span);
                 break;
             }
             case Instruction::Call: {
@@ -544,6 +660,15 @@ private:
         }
     }
 
+    void verify_value_ref(
+        ValueId value_id,
+        const char* label,
+        SourceSpan source_span) {
+        if (!has_value(value_id)) {
+            error(std::string(label) + " 引用了未定义的 ValueId", source_span);
+        }
+    }
+
     void verify_operand(
         const Operand& operand,
         const char* label,
@@ -635,6 +760,78 @@ private:
         }
 
         (void)unit;
+    }
+
+    void verify_create_named_function_handle(
+        const CreateNamedFunctionHandleInst& inst,
+        const MFileUnit& mfile) {
+        if (inst.name.empty()) {
+            error("CreateNamedFunctionHandleInst 的 name 不能为空", inst.source_span);
+        }
+
+        switch (inst.resolution_mode) {
+            case CreateNamedFunctionHandleInst::RuntimeLookup:
+                if (inst.bound_dispatch_type != Dynamic) {
+                    error("lookup function handle 不能携带静态 dispatch type", inst.source_span);
+                }
+                if (inst.m_function_target != nullptr) {
+                    error("lookup function handle 的 m_function_target 必须为空", inst.source_span);
+                }
+                break;
+            case CreateNamedFunctionHandleInst::Prebound:
+                if (inst.bound_dispatch_type == Builtin) {
+                    if (inst.m_function_target != nullptr) {
+                        error("prebound builtin function handle 的 m_function_target 必须为空",
+                              inst.source_span);
+                    }
+                } else if (inst.bound_dispatch_type == MFunction) {
+                    if (inst.m_function_target == nullptr) {
+                        error("prebound mfunc function handle 必须记录 m_function_target",
+                              inst.source_span);
+                    } else if (!contains_unit(mfile, inst.m_function_target)) {
+                        error("prebound mfunc function handle 的 target 必须属于同一个文件",
+                              inst.source_span);
+                    }
+                } else {
+                    error("prebound function handle 只能绑定到 Builtin 或 MFunction",
+                          inst.source_span);
+                }
+                break;
+            default:
+                error("CreateNamedFunctionHandleInst 使用了未知的 resolution_mode",
+                      inst.source_span);
+                break;
+        }
+    }
+
+    void verify_create_anonymous_function_handle(
+        const CreateAnonymousFunctionHandleInst& inst,
+        const CodeUnit& unit,
+        const MFileUnit& mfile) {
+        if (!inst.function_id.is_valid()) {
+            error("create_anon_func 的 function_id 不能为空", inst.source_span);
+        } else if (!has_anonymous_function(mfile, inst.function_id)) {
+            error("create_anon_func 的 function_id 必须能在匿名函数表中解析",
+                  inst.source_span);
+        }
+
+        std::unordered_set<InternedString> seen_names;
+        for (const auto& capture : inst.captures) {
+            if (capture.name.empty()) {
+                error("create_anon_func 的 capture name 不能为空", inst.source_span);
+            } else if (!seen_names.insert(capture.name).second) {
+                error("create_anon_func 不能重复捕获同名变量", inst.source_span);
+            }
+
+            if (capture.source_slot.is_valid() && !has_slot(unit, capture.source_slot)) {
+                error("create_anon_func 的 source_slot 必须属于当前代码单元",
+                      inst.source_span);
+            }
+            verify_value_ref(
+                capture.captured_value,
+                "create_anon_func capture value",
+                inst.source_span);
+        }
     }
 
     IRVerifyOptions options_;

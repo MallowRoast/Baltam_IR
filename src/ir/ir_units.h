@@ -10,6 +10,7 @@
 namespace baltam {
 
 struct MFileUnit;
+struct AnonymousFunctionUnit;
 struct CodeUnit;
 struct FunctionUnit;
 
@@ -27,6 +28,7 @@ struct CodeUnit {
     enum Type : std::uint8_t {
         Script,
         Function,
+        AnonymousFunction,
     };
 
     /**
@@ -72,6 +74,15 @@ struct CodeUnit {
      */
     [[nodiscard]] bool is_function() const noexcept {
         return type() == Function;
+    }
+
+    /**
+     * @brief 判断当前单元是否为匿名函数体单元。
+     *
+     * @return `type() == AnonymousFunction` 时返回 true。
+     */
+    [[nodiscard]] bool is_anonymous_function() const noexcept {
+        return type() == AnonymousFunction;
     }
 
     /**
@@ -190,6 +201,64 @@ struct FunctionUnit : CodeUnit {
 };
 
 /**
+ * @brief 匿名函数体代码单元。
+ *
+ * 匿名函数没有 Matlab 名字空间里的函数名，也没有显式返回参数。其参数 slot 按源码
+ * `@(args)` 顺序记录，捕获 slot 按 closure capture layout 顺序记录，body 直接通过
+ * `ReturnInst` 返回表达式 lowering 后的 `ValueId`。
+ */
+struct AnonymousFunctionUnit : CodeUnit {
+    /**
+     * @brief 构造一个匿名函数体单元。
+     */
+    AnonymousFunctionUnit() noexcept = default;
+
+    /**
+     * @brief 获取当前匿名函数体单元的类型。
+     *
+     * @return 固定返回 `CodeUnit::AnonymousFunction`。
+     */
+    [[nodiscard]] Type type() const noexcept override {
+        return CodeUnit::AnonymousFunction;
+    }
+
+    AnonymousFunctionId id = InvalidAnonymousFunctionId;
+    std::vector<SlotId> param_slots;
+    std::vector<SlotId> capture_slots;
+};
+
+/**
+ * @brief 匿名函数体全局表。
+ *
+ * 第一阶段把“全局”限定在单个 IR 文件单元 / build session 中，由该表拥有所有匿名函数
+ * 体。普通 IR 指令通过 `AnonymousFunctionId` 间接引用表内单元。
+ */
+struct AnonymousFunctionTable {
+    std::vector<std::unique_ptr<AnonymousFunctionUnit>> functions;
+
+    [[nodiscard]] bool empty() const noexcept {
+        return functions.empty();
+    }
+
+    [[nodiscard]] AnonymousFunctionUnit* find(AnonymousFunctionId id) noexcept {
+        return const_cast<AnonymousFunctionUnit*>(std::as_const(*this).find(id));
+    }
+
+    [[nodiscard]] const AnonymousFunctionUnit* find(AnonymousFunctionId id) const noexcept {
+        if (!id.is_valid()) {
+            return nullptr;
+        }
+
+        for (const auto& function : functions) {
+            if (function != nullptr && function->id == id) {
+                return function.get();
+            }
+        }
+        return nullptr;
+    }
+};
+
+/**
  * @brief 文件级 IR 单元。
  *
  * `MFileUnit` 对应一个 `.m` 文件，直接拥有该文件中的全部 `CodeUnit`，并通过
@@ -201,6 +270,7 @@ struct MFileUnit {
     std::vector<std::unique_ptr<CodeUnit>> code_units;
     CodeUnit* entry_unit = nullptr;
     std::unordered_map<InternedString, FunctionUnit*> local_function_map;
+    AnonymousFunctionTable anonymous_functions;
 
     /**
      * @brief 获取文件去掉扩展名后的 stem。

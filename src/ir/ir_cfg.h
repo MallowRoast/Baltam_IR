@@ -83,6 +83,7 @@ struct Slot {
         Arg,            ///< 函数输入参数 slot。
         Local,          ///< 用户源码中的普通局部变量 slot。
         InternalLocal,  ///< lowering/runtime 创建的普通内部局部状态 slot。
+        Capture,        ///< 匿名函数捕获值 slot。
         Ret,            ///< 函数返回值 slot。
         Hidden,         ///< 带 `HiddenRole` 的特殊 ABI/runtime slot。
     };
@@ -118,6 +119,15 @@ struct Slot {
      */
     [[nodiscard]] bool is_internal_local() const noexcept {
         return type == InternalLocal;
+    }
+
+    /**
+     * @brief 判断当前 slot 是否为匿名函数捕获 slot。
+     *
+     * @return `type == Capture` 时返回 true。
+     */
+    [[nodiscard]] bool is_capture() const noexcept {
+        return type == Capture;
     }
 
     /**

@@ -95,6 +95,34 @@ inline void require_ir_is_complete(const IRBuildResult& result) {
         }
     }
 
+    for (const auto& unit_ptr : result.mfile->anonymous_functions.functions) {
+        require(unit_ptr != nullptr, "匿名函数体不能为空");
+
+        const AnonymousFunctionUnit* unit = unit_ptr.get();
+        require(unit->entry_block != nullptr, "匿名函数体必须有入口基本块");
+        require(!unit->basic_blocks.empty(), "匿名函数体至少应有一个基本块");
+
+        bool entry_block_found = false;
+        for (const auto& block_ptr : unit->basic_blocks) {
+            require(block_ptr != nullptr, "匿名函数体基本块不能为空");
+
+            const BasicBlock* block = block_ptr.get();
+            require(block->parent == unit, "匿名函数体基本块 parent 应指向所属代码单元");
+            require(block->has_terminator(), "匿名函数体每个基本块都应以终结指令结束");
+
+            if (block == unit->entry_block) {
+                entry_block_found = true;
+            }
+
+            for (const auto& inst_ptr : block->instructions) {
+                require(inst_ptr != nullptr, "匿名函数体指令不能为空");
+                require(inst_ptr->parent == block, "匿名函数体指令 parent 应指向所属基本块");
+            }
+        }
+
+        require(entry_block_found, "匿名函数体入口基本块必须属于当前代码单元");
+    }
+
     require(entry_unit_found, "文件入口代码单元必须属于 code_units");
 }
 

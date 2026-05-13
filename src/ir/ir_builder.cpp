@@ -1,6 +1,7 @@
 #include "ir/ir_builder.h"
 
 #include <algorithm>
+#include <string>
 #include <utility>
 #include <variant>
 
@@ -74,6 +75,12 @@ TypeFact internal_call_result_type_fact(const CallInst& inst, std::size_t result
     }
 
     const InternedString& callee = std::get<InternedString>(inst.callee);
+    if (callee == "switch_match") {
+        if (result_index == 0U) {
+            return scalar_type_fact(TypeSet::logical());
+        }
+    }
+
     if (callee == "foreach_init") {
         if (result_index == 0U) {
             return scalar_type_fact(TypeSet::external_object());
@@ -179,8 +186,12 @@ TypeFact instruction_result_type_fact(
         }
         case Instruction::LoadWorkspace:
         case Instruction::Apply:
+        case Instruction::ValueApply:
         case Instruction::Call:
             return unknown_type_fact();
+        case Instruction::CreateNamedFunctionHandle:
+        case Instruction::CreateAnonymousFunctionHandle:
+            return scalar_type_fact(TypeSet::function_handle());
         case Instruction::Copy:
             return operand_type_fact(
                 value_table,
@@ -249,8 +260,26 @@ void bind_instruction_results(CodeUnit* unit, Instruction* instruction) {
             bind_value_def(value_table, inst->result, 0, instruction, result_type_fact);
             break;
         }
+        case Instruction::CreateNamedFunctionHandle: {
+            const auto* inst = static_cast<const CreateNamedFunctionHandleInst*>(instruction);
+            bind_value_def(value_table, inst->result, 0, instruction, result_type_fact);
+            break;
+        }
+        case Instruction::CreateAnonymousFunctionHandle: {
+            const auto* inst =
+                static_cast<const CreateAnonymousFunctionHandleInst*>(instruction);
+            bind_value_def(value_table, inst->result, 0, instruction, result_type_fact);
+            break;
+        }
         case Instruction::Apply: {
             const auto* inst = static_cast<const ApplyInst*>(instruction);
+            for (std::size_t i = 0; i < inst->results.size(); ++i) {
+                bind_value_def(value_table, inst->results[i], i, instruction, result_type_fact);
+            }
+            break;
+        }
+        case Instruction::ValueApply: {
+            const auto* inst = static_cast<const ValueApplyInst*>(instruction);
             for (std::size_t i = 0; i < inst->results.size(); ++i) {
                 bind_value_def(value_table, inst->results[i], i, instruction, result_type_fact);
             }
@@ -296,6 +325,7 @@ void IRBuilder::reset() noexcept {
     owned_file_.reset();
     unit_states_.clear();
     current_unit_state_ = nullptr;
+    next_anonymous_function_ = 0;
     diagnostics_.clear();
 }
 
@@ -355,6 +385,32 @@ FunctionUnit& IRBuilder::begin_function_unit(std::string_view name, SourceSpan s
         name,
         source_span,
         "创建函数代码单元前必须先创建文件");
+}
+
+AnonymousFunctionUnit& IRBuilder::begin_anonymous_function_unit(SourceSpan source_span) {
+    if (owned_file_ == nullptr) {
+        report(
+            IRBuildDiagnostic::Error,
+            "创建匿名函数体单元前必须先创建文件",
+            source_span);
+        owned_file_ = std::make_unique<MFileUnit>();
+    }
+
+    auto unit = std::make_unique<AnonymousFunctionUnit>();
+    unit->parent = owned_file_.get();
+    unit->id = create_anonymous_function_id();
+    unit->name = "__anon" + std::to_string(unit->id.value());
+    unit->source_span = source_span;
+
+    AnonymousFunctionUnit* unit_ptr = unit.get();
+    owned_file_->anonymous_functions.functions.push_back(std::move(unit));
+
+    auto state = std::make_unique<IRUnitBuildState>();
+    state->unit = unit_ptr;
+    current_unit_state_ = state.get();
+    unit_states_[unit_ptr] = std::move(state);
+
+    return *unit_ptr;
 }
 
 void IRBuilder::set_current_unit(CodeUnit* unit) {
@@ -445,6 +501,13 @@ SlotId IRBuilder::create_slot(
         } else if (type == Slot::Ret) {
             function->return_slots.push_back(slot.slot_id);
         }
+    } else if (current_unit_state_->unit->is_anonymous_function()) {
+        auto* function = static_cast<AnonymousFunctionUnit*>(current_unit_state_->unit);
+        if (type == Slot::Arg) {
+            function->param_slots.push_back(slot.slot_id);
+        } else if (type == Slot::Capture) {
+            function->capture_slots.push_back(slot.slot_id);
+        }
     }
 
     return slot.slot_id;
@@ -515,6 +578,18 @@ ValueId IRBuilder::create_value() {
     current_unit_state_->unit->value_table.values.push_back(value_info);
 
     return value_id;
+}
+
+AnonymousFunctionId IRBuilder::create_anonymous_function_id() {
+    if (owned_file_ == nullptr) {
+        report(
+            IRBuildDiagnostic::Error,
+            "没有活动文件，无法创建匿名函数 ID",
+            SourceSpan::invalid());
+        return InvalidAnonymousFunctionId;
+    }
+
+    return AnonymousFunctionId(next_anonymous_function_++);
 }
 
 void IRBuilder::bind_name(std::string_view name, SlotId slot_id) {

@@ -108,13 +108,27 @@ std::vector<std::shared_ptr<pcdata>>
   并在 IR 中保存对应 `FunctionUnit*` 作为静态函数实例目标；
   若 `A` 尚未绑定为变量，且未命中文件内 `local` 函数，则直接 lower 成
   `CallInst(callee_kind = Direct, dispatch_type = Dynamic)`；
-  若 `A` 已绑定为 slot 名字，则保留为 `ApplyInst`
+  若 `A` 已绑定为 slot 名字，则先 `LoadSlotInst` 读取当前变量值，再 lower 成
+  `ValueApplyInst`。`ValueApplyInst` 表示 base 已经是 `ValueId`，但尚未分派为函数句柄
+  调用或圆括号取值。
 - `MFileUnit` 当前会记录入口单元之外的 local `FunctionUnit`，供 function lowering
   使用；script 主体当前仍不会因为 local 函数存在而把 `apply` 收敛成 `call`
 - `function` 中的一元 / 二元运算也会尝试按 Matlab 同名规则命中文件内 local 函数：
   例如 `+` 对应 `plus`，一元 `-` 对应 `uminus`。若这些名字未被局部变量遮蔽，
   则表达式会直接 lower 成 `CallInst(dispatch_type = MFunction)`；若已经被局部变量
   遮蔽，则回退为普通 `UnaryInst` / `BinaryInst`
+- lowering 阶段的静态名字查询统一走两个入口：
+  - `lookup_var(name)` 查询当前 lowering 已知的变量表，当前底层来自 slot 名字绑定表。
+  - `lookup_method(name)` 查询当前 lowering 已知的函数表，当前只包含文件内 local 函数；
+    后续预留接入 `import A.a` 和嵌套函数。
+- `@name` 应 lower 成 `CreateNamedFunctionHandleInst`。该节点表达的是“构造具名函数句柄”，
+  而不是普通字符串常量：
+  - `resolution_mode = lookup`：IR 构建期没有静态绑定目标。运行到 `f = @name` 时查询一次，
+    查询结果进入运行时句柄对象：查到则句柄绑定目标，查不到则句柄保持 unresolved，
+    后续调用该句柄时再按名字查询。
+  - `resolution_mode = prebound`：IR 构建期或前置分析已经确定目标，运行时直接构造已绑定
+    句柄，不再查询。当前允许的静态目标类别是 `builtin` 和 `mfunction`。
+  - 该指令结果类型固定为 `function_handle scalar`。
 - `WorkspaceHandle` hidden slot 只出现在 `ScriptUnit`，并在第一次脚本名字读写时按需创建；
   当前脚本环境槽位名字采用 `<script_name>_env`
 

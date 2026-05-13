@@ -97,6 +97,13 @@ std::string format_slot_id(SlotId slot_id) {
     return "%slot" + std::to_string(slot_id.value());
 }
 
+std::string format_anonymous_function_id(AnonymousFunctionId function_id) {
+    if (!function_id.is_valid()) {
+        return "#anon<invalid>";
+    }
+    return "#anon" + std::to_string(function_id.value());
+}
+
 std::string format_constant(const Constant& constant) {
     return std::visit(
         [](const auto& value) -> std::string {
@@ -226,6 +233,20 @@ const char* call_mnemonic(const CallInst& inst) noexcept {
     return "call";
 }
 
+const char* function_handle_dispatch_name(DispatchType dispatch_type) noexcept {
+    switch (dispatch_type) {
+        case Dynamic:
+            return "dynamic";
+        case Builtin:
+            return "builtin";
+        case Internal:
+            return "internal";
+        case MFunction:
+            return "mfunc";
+    }
+    return "dynamic";
+}
+
 const char* slot_type_name(Slot::Type type) noexcept {
     switch (type) {
         case Slot::Arg:
@@ -234,6 +255,8 @@ const char* slot_type_name(Slot::Type type) noexcept {
             return "local";
         case Slot::InternalLocal:
             return "internal_local";
+        case Slot::Capture:
+            return "capture";
         case Slot::Ret:
             return "ret";
         case Slot::Hidden:
@@ -350,6 +373,23 @@ public:
                 lines_.push_back({});
             }
         }
+
+        if (!mfile.anonymous_functions.empty()) {
+            if (!mfile.code_units.empty()) {
+                lines_.push_back({});
+            }
+
+            for (std::size_t i = 0; i < mfile.anonymous_functions.functions.size(); ++i) {
+                const AnonymousFunctionUnit* unit = mfile.anonymous_functions.functions[i].get();
+                if (unit != nullptr) {
+                    render_unit(*unit);
+                }
+
+                if (i + 1U < mfile.anonymous_functions.functions.size()) {
+                    lines_.push_back({});
+                }
+            }
+        }
     }
 
     [[nodiscard]] std::string str() const {
@@ -395,6 +435,20 @@ private:
             if (!function.return_slots.empty()) {
                 header += " -> (";
                 header += join_signature_slots(function.slot_table, function.return_slots);
+                header += ')';
+            }
+            header += " {";
+            emit_raw(std::move(header));
+        } else if (unit.is_anonymous_function()) {
+            const auto& function = static_cast<const AnonymousFunctionUnit&>(unit);
+            std::string header = "anon ";
+            header += format_anonymous_function_id(function.id);
+            header += '(';
+            header += join_signature_slots(function.slot_table, function.param_slots);
+            header += ')';
+            if (!function.capture_slots.empty()) {
+                header += " captures (";
+                header += join_signature_slots(function.slot_table, function.capture_slots);
                 header += ')';
             }
             header += " {";
@@ -622,6 +676,10 @@ private:
                 return instruction.source_span.is_valid();
             case Instruction::Apply: {
                 const auto& inst = static_cast<const ApplyInst&>(instruction);
+                return inst.results.empty();
+            }
+            case Instruction::ValueApply: {
+                const auto& inst = static_cast<const ValueApplyInst&>(instruction);
                 return inst.results.empty();
             }
             case Instruction::Call: {
@@ -910,6 +968,57 @@ private:
             std::string(function->name);
     }
 
+    [[nodiscard]] std::string format_create_named_function_handle(
+        const CodeUnit& unit,
+        const CreateNamedFunctionHandleInst& inst) const {
+        std::string text = format_value_result(unit, inst.result);
+        text += " = create_named_func_handle ";
+        text += format_symbol(inst.name);
+
+        switch (inst.resolution_mode) {
+            case CreateNamedFunctionHandleInst::RuntimeLookup:
+                text += " lookup";
+                break;
+            case CreateNamedFunctionHandleInst::Prebound:
+                text += " prebound ";
+                text += function_handle_dispatch_name(inst.bound_dispatch_type);
+                if (inst.bound_dispatch_type == MFunction) {
+                    text += " ";
+                    text += format_local_function_symbol(inst.m_function_target);
+                }
+                break;
+        }
+
+        return text;
+    }
+
+    [[nodiscard]] std::string format_create_anonymous_function_handle(
+        const CodeUnit& unit,
+        const CreateAnonymousFunctionHandleInst& inst) const {
+        std::string text = format_value_result(unit, inst.result);
+        text += " = create_anon_func ";
+        text += format_anonymous_function_id(inst.function_id);
+        if (inst.captures.empty()) {
+            return text;
+        }
+
+        text += " captures { ";
+        for (std::size_t i = 0; i < inst.captures.size(); ++i) {
+            if (i != 0) {
+                text += ", ";
+            }
+
+            const auto& capture = inst.captures[i];
+            if (capture.source_slot.is_valid()) {
+                text += format_slot_ref(capture.source_slot);
+            } else {
+                text += format_symbol(capture.name);
+            }
+        }
+        text += " }";
+        return text;
+    }
+
     [[nodiscard]] std::string format_slot_decl(const Slot& slot) const {
         std::string text = format_slot_ref(slot.slot_id);
         text += " = ";
@@ -966,6 +1075,15 @@ private:
                     ", " + format_symbol(inst.symbol) +
                     ", " + format_operand(inst.value);
             }
+            case Instruction::CreateNamedFunctionHandle: {
+                const auto& inst = static_cast<const CreateNamedFunctionHandleInst&>(instruction);
+                return format_create_named_function_handle(unit, inst);
+            }
+            case Instruction::CreateAnonymousFunctionHandle: {
+                const auto& inst =
+                    static_cast<const CreateAnonymousFunctionHandleInst&>(instruction);
+                return format_create_anonymous_function_handle(unit, inst);
+            }
             case Instruction::Apply: {
                 const auto& inst = static_cast<const ApplyInst&>(instruction);
                 return format_call_like(
@@ -975,6 +1093,16 @@ private:
                     inst.callee_or_base,
                     inst.arguments,
                     std::holds_alternative<InternedString>(inst.callee_or_base));
+            }
+            case Instruction::ValueApply: {
+                const auto& inst = static_cast<const ValueApplyInst&>(instruction);
+                return format_call_like(
+                    unit,
+                    "value_apply",
+                    inst.results,
+                    inst.base,
+                    inst.arguments,
+                    false);
             }
             case Instruction::Call: {
                 const auto& inst = static_cast<const CallInst&>(instruction);
