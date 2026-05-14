@@ -33,7 +33,8 @@ struct IRBuildDiagnostic {
  * @brief IRBuilder 的最终返回结果。
  */
 struct IRBuildResult {
-    std::unique_ptr<MFileUnit> mfile;
+    std::unique_ptr<IRModule> module;
+    MFileUnit* mfile = nullptr;
     std::vector<IRBuildDiagnostic> diagnostics;
 };
 
@@ -76,14 +77,6 @@ struct IRUnitBuildState {
     CodeUnit* unit = nullptr;
     BasicBlock* current_block = nullptr;
     IRIdAllocator ids;
-    /**
-     * @brief lowering 期名字到 slot 的绑定表。
-     *
-     * 该表不属于最终 IR，只记录当前 unit 在 lowering 过程中已经确定为变量语义的名字。
-     * 函数 lowering 会根据它判断源码中的 `A(...)` 应保留为 `apply`，还是收敛为直接
-     * `call`。
-     */
-    std::unordered_map<InternedString, SlotId> name_bindings;
 };
 
 /**
@@ -123,7 +116,7 @@ public:
     FunctionUnit& begin_function_unit(std::string_view name, SourceSpan source_span);
 
     /**
-     * @brief 在当前文件下开始一个匿名函数体单元。
+     * @brief 在当前 module 下开始一个匿名函数体单元。
      */
     AnonymousFunctionUnit& begin_anonymous_function_unit(SourceSpan source_span);
 
@@ -180,24 +173,9 @@ public:
     [[nodiscard]] ValueId create_value();
 
     /**
-     * @brief 为当前文件分配一个匿名函数 ID。
+     * @brief 为当前 module 分配一个匿名函数 ID。
      */
     [[nodiscard]] AnonymousFunctionId create_anonymous_function_id();
-
-    /**
-     * @brief 绑定一个名字到当前 unit 的名字表。
-     */
-    void bind_name(std::string_view name, SlotId slot_id);
-
-    /**
-     * @brief 在当前 unit 中查找名字绑定。
-     */
-    [[nodiscard]] SlotId* find_name(std::string_view name) noexcept;
-
-    /**
-     * @brief 在当前 unit 中查找名字绑定。
-     */
-    [[nodiscard]] const SlotId* find_name(std::string_view name) const noexcept;
 
     /**
      * @brief 向当前 block 追加一条指令。
@@ -231,7 +209,8 @@ private:
         SourceSpan source_span,
         std::string_view missing_file_message);
 
-    std::unique_ptr<MFileUnit> owned_file_;
+    std::unique_ptr<IRModule> owned_module_;
+    MFileUnit* current_file_ = nullptr;
     std::unordered_map<CodeUnit*, std::unique_ptr<IRUnitBuildState>> unit_states_;
     IRUnitBuildState* current_unit_state_ = nullptr;
     AnonymousFunctionId::underlying_type next_anonymous_function_ = 0;

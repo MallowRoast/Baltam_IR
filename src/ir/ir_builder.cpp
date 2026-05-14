@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <variant>
 
@@ -274,6 +275,9 @@ void bind_instruction_results(CodeUnit* unit, Instruction* instruction) {
         case Instruction::Apply: {
             const auto* inst = static_cast<const ApplyInst*>(instruction);
             for (std::size_t i = 0; i < inst->results.size(); ++i) {
+                if (!inst->results[i].is_valid()) {
+                    continue;
+                }
                 bind_value_def(value_table, inst->results[i], i, instruction, result_type_fact);
             }
             break;
@@ -281,6 +285,9 @@ void bind_instruction_results(CodeUnit* unit, Instruction* instruction) {
         case Instruction::ValueApply: {
             const auto* inst = static_cast<const ValueApplyInst*>(instruction);
             for (std::size_t i = 0; i < inst->results.size(); ++i) {
+                if (!inst->results[i].is_valid()) {
+                    continue;
+                }
                 bind_value_def(value_table, inst->results[i], i, instruction, result_type_fact);
             }
             break;
@@ -288,6 +295,9 @@ void bind_instruction_results(CodeUnit* unit, Instruction* instruction) {
         case Instruction::Call: {
             const auto* inst = static_cast<const CallInst*>(instruction);
             for (std::size_t i = 0; i < inst->results.size(); ++i) {
+                if (!inst->results[i].is_valid()) {
+                    continue;
+                }
                 const TypeFact call_result_type_fact = inst->dispatch_type == Internal
                     ? internal_call_result_type_fact(*inst, i)
                     : result_type_fact;
@@ -322,7 +332,8 @@ void bind_instruction_results(CodeUnit* unit, Instruction* instruction) {
 } // namespace
 
 void IRBuilder::reset() noexcept {
-    owned_file_.reset();
+    owned_module_.reset();
+    current_file_ = nullptr;
     unit_states_.clear();
     current_unit_state_ = nullptr;
     next_anonymous_function_ = 0;
@@ -332,10 +343,15 @@ void IRBuilder::reset() noexcept {
 MFileUnit& IRBuilder::begin_file(NormalizedPath path) {
     reset();
 
-    owned_file_ = std::make_unique<MFileUnit>();
-    owned_file_->path = std::move(path);
+    owned_module_ = std::make_unique<IRModule>();
+    auto file = std::make_unique<MFileUnit>();
+    file->module = owned_module_.get();
+    file->path = std::move(path);
 
-    return *owned_file_;
+    current_file_ = file.get();
+    owned_module_->files.push_back(std::move(file));
+
+    return *current_file_;
 }
 
 template <typename UnitT>
@@ -343,27 +359,36 @@ UnitT& IRBuilder::begin_unit(
     std::string_view name,
     SourceSpan source_span,
     std::string_view missing_file_message) {
-    if (owned_file_ == nullptr) {
+    if (current_file_ == nullptr) {
         report(
             IRBuildDiagnostic::Error,
             missing_file_message,
             source_span);
-        owned_file_ = std::make_unique<MFileUnit>();
+        if (owned_module_ == nullptr) {
+            owned_module_ = std::make_unique<IRModule>();
+        }
+        auto file = std::make_unique<MFileUnit>();
+        file->module = owned_module_.get();
+        current_file_ = file.get();
+        owned_module_->files.push_back(std::move(file));
     }
 
     auto unit = std::make_unique<UnitT>();
-    unit->parent = owned_file_.get();
+    if constexpr (std::is_same_v<UnitT, ScriptUnit> ||
+                  std::is_same_v<UnitT, FunctionUnit>) {
+        unit->file = current_file_;
+    }
     if (!name.empty()) {
         unit->name.assign(name.data(), name.size());
-    } else if (owned_file_ != nullptr) {
-        unit->name = owned_file_->file_stem().string();
+    } else if (current_file_ != nullptr) {
+        unit->name = current_file_->file_stem().string();
     } else {
         unit->name.clear();
     }
     unit->source_span = source_span;
 
     UnitT* unit_ptr = unit.get();
-    owned_file_->code_units.push_back(std::move(unit));
+    current_file_->code_units.push_back(std::move(unit));
 
     auto state = std::make_unique<IRUnitBuildState>();
     state->unit = unit_ptr;
@@ -388,22 +413,30 @@ FunctionUnit& IRBuilder::begin_function_unit(std::string_view name, SourceSpan s
 }
 
 AnonymousFunctionUnit& IRBuilder::begin_anonymous_function_unit(SourceSpan source_span) {
-    if (owned_file_ == nullptr) {
+    if (owned_module_ == nullptr) {
         report(
             IRBuildDiagnostic::Error,
-            "创建匿名函数体单元前必须先创建文件",
+            "创建匿名函数体单元前必须先创建 module",
             source_span);
-        owned_file_ = std::make_unique<MFileUnit>();
+        owned_module_ = std::make_unique<IRModule>();
+    }
+
+    CodeUnit* lexical_parent = current_unit();
+    if (lexical_parent == nullptr) {
+        report(
+            IRBuildDiagnostic::Error,
+            "创建匿名函数体单元前必须先有词法父级代码单元",
+            source_span);
     }
 
     auto unit = std::make_unique<AnonymousFunctionUnit>();
-    unit->parent = owned_file_.get();
+    unit->lexical_parent = lexical_parent;
     unit->id = create_anonymous_function_id();
     unit->name = "__anon" + std::to_string(unit->id.value());
     unit->source_span = source_span;
 
     AnonymousFunctionUnit* unit_ptr = unit.get();
-    owned_file_->anonymous_functions.functions.push_back(std::move(unit));
+    owned_module_->anonymous_functions.functions.push_back(std::move(unit));
 
     auto state = std::make_unique<IRUnitBuildState>();
     state->unit = unit_ptr;
@@ -581,48 +614,15 @@ ValueId IRBuilder::create_value() {
 }
 
 AnonymousFunctionId IRBuilder::create_anonymous_function_id() {
-    if (owned_file_ == nullptr) {
+    if (owned_module_ == nullptr) {
         report(
             IRBuildDiagnostic::Error,
-            "没有活动文件，无法创建匿名函数 ID",
+            "没有活动 module，无法创建匿名函数 ID",
             SourceSpan::invalid());
         return InvalidAnonymousFunctionId;
     }
 
     return AnonymousFunctionId(next_anonymous_function_++);
-}
-
-void IRBuilder::bind_name(std::string_view name, SlotId slot_id) {
-    if (current_unit_state_ == nullptr || current_unit_state_->unit == nullptr) {
-        report(
-            IRBuildDiagnostic::Error,
-            "没有活动代码单元，无法绑定名字",
-            SourceSpan::invalid());
-        return;
-    }
-
-    if (!slot_id.is_valid()) {
-        report(
-            IRBuildDiagnostic::Error,
-            "当前名字绑定缺少有效槽位",
-            SourceSpan::invalid());
-        return;
-    }
-
-    current_unit_state_->name_bindings[InternedString(name)] = slot_id;
-}
-
-SlotId* IRBuilder::find_name(std::string_view name) noexcept {
-    return const_cast<SlotId*>(std::as_const(*this).find_name(name));
-}
-
-const SlotId* IRBuilder::find_name(std::string_view name) const noexcept {
-    if (current_unit_state_ == nullptr) {
-        return nullptr;
-    }
-
-    const auto it = current_unit_state_->name_bindings.find(InternedString(name));
-    return it != current_unit_state_->name_bindings.end() ? &it->second : nullptr;
 }
 
 void IRBuilder::append_instruction(std::unique_ptr<Instruction> instruction) {
@@ -737,11 +737,13 @@ void IRBuilder::append_instruction(std::unique_ptr<Instruction> instruction) {
 
 IRBuildResult IRBuilder::finish() {
     IRBuildResult result;
-    result.mfile = std::move(owned_file_);
+    result.mfile = current_file_;
+    result.module = std::move(owned_module_);
     result.diagnostics = std::move(diagnostics_);
 
     unit_states_.clear();
     current_unit_state_ = nullptr;
+    current_file_ = nullptr;
     diagnostics_.clear();
 
     return result;

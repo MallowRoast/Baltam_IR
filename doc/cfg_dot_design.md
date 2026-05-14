@@ -14,15 +14,14 @@ DOT 输出主要用于查看基本块连接关系，例如：
 - 嵌套循环中重复 block label 是否能区分
 
 当前实现更接近 LLVM 的 `dot-cfg-only`：节点只显示 block 名和摘要信息，不展开完整
-IR 指令。后续如果需要对齐 LLVM 的 `dot-cfg`，可以在 `CFGDotOptions` 中增加节点详细
-程度选项，把 block 内指令也渲染进节点；这个扩展点目前保留为源码中的 TODO。
+IR 指令。
 
 ## 代码位置
 
-- 头文件：[cfg_dot.h](/home/zj/Desktop/Baltam_IR/tools/cfg_dot.h)
-- 实现文件：[cfg_dot.cpp](/home/zj/Desktop/Baltam_IR/tools/cfg_dot.cpp)
-- 命令行工具：[cfg_dot_main.cpp](/home/zj/Desktop/Baltam_IR/tools/cfg_dot_main.cpp)
-- smoke test：[cfg_dot_smoke.cpp](/home/zj/Desktop/Baltam_IR/test/smoke_test/feature/cfg_dot_smoke.cpp)
+- 头文件：[cfg_dot.h](../tools/cfg_dot.h)
+- 实现文件：[cfg_dot.cpp](../tools/cfg_dot.cpp)
+- 命令行工具：[cfg_dot_main.cpp](../tools/cfg_dot_main.cpp)
+- smoke test：[cfg_dot_smoke.cpp](../test/smoke_test/feature/cfg_dot_smoke.cpp)
 
 公开接口：
 

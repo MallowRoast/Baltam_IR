@@ -355,7 +355,30 @@ public:
         build_source_line_offsets();
     }
 
+    void render_module(const IRModule& module) {
+        for (std::size_t i = 0; i < module.files.size(); ++i) {
+            const MFileUnit* file = module.files[i].get();
+            if (file != nullptr) {
+                render_file(*file, nullptr);
+            }
+
+            if (i + 1U < module.files.size()) {
+                lines_.push_back({});
+            }
+        }
+
+        render_anonymous_functions(module.anonymous_functions);
+    }
+
     void render_file(const MFileUnit& mfile) {
+        render_file(
+            mfile,
+            mfile.module != nullptr ? &mfile.module->anonymous_functions : nullptr);
+    }
+
+    void render_file(
+        const MFileUnit& mfile,
+        const AnonymousFunctionTable* anonymous_functions) {
         if (options_.print_file_header) {
             lines_.push_back({"; mfile \"" + escape_text(mfile.path.string()) + '"', {}});
             if (!mfile.code_units.empty()) {
@@ -374,21 +397,8 @@ public:
             }
         }
 
-        if (!mfile.anonymous_functions.empty()) {
-            if (!mfile.code_units.empty()) {
-                lines_.push_back({});
-            }
-
-            for (std::size_t i = 0; i < mfile.anonymous_functions.functions.size(); ++i) {
-                const AnonymousFunctionUnit* unit = mfile.anonymous_functions.functions[i].get();
-                if (unit != nullptr) {
-                    render_unit(*unit);
-                }
-
-                if (i + 1U < mfile.anonymous_functions.functions.size()) {
-                    lines_.push_back({});
-                }
-            }
+        if (anonymous_functions != nullptr) {
+            render_anonymous_functions(*anonymous_functions);
         }
     }
 
@@ -424,6 +434,27 @@ public:
     }
 
 private:
+    void render_anonymous_functions(const AnonymousFunctionTable& anonymous_functions) {
+        if (anonymous_functions.empty()) {
+            return;
+        }
+
+        if (!lines_.empty() && !lines_.back().text.empty()) {
+            lines_.push_back({});
+        }
+
+        for (std::size_t i = 0; i < anonymous_functions.functions.size(); ++i) {
+            const AnonymousFunctionUnit* unit = anonymous_functions.functions[i].get();
+            if (unit != nullptr) {
+                render_unit(*unit);
+            }
+
+            if (i + 1U < anonymous_functions.functions.size()) {
+                lines_.push_back({});
+            }
+        }
+    }
+
     void render_unit(const CodeUnit& unit) {
         assign_slot_refs(unit.slot_table);
 
@@ -869,6 +900,9 @@ private:
             return {};
         }
         if (results.size() == 1U) {
+            if (!results.front().is_valid()) {
+                return "[] = ";
+            }
             return format_value_result(unit, results.front()) + " = ";
         }
 
@@ -876,6 +910,10 @@ private:
         for (std::size_t i = 0; i < results.size(); ++i) {
             if (i != 0) {
                 text += ", ";
+            }
+            if (!results[i].is_valid()) {
+                text += "[]";
+                continue;
             }
             text += format_value_result(unit, results[i]);
         }
@@ -960,11 +998,11 @@ private:
     }
 
     [[nodiscard]] std::string format_local_function_symbol(const FunctionUnit* function) const {
-        if (function == nullptr || function->parent == nullptr) {
+        if (function == nullptr || function->file == nullptr) {
             return "@<local>";
         }
 
-        return "@" + function->parent->file_stem().string() + "::" +
+        return "@" + function->file->file_stem().string() + "::" +
             std::string(function->name);
     }
 
@@ -1182,11 +1220,59 @@ private:
 } // namespace
 
 std::string format_ir(
+    const IRModule& module,
+    const IRPrintOptions& options) {
+    const MFileUnit* owner = nullptr;
+    for (const auto& file : module.files) {
+        if (file != nullptr) {
+            owner = file.get();
+            break;
+        }
+    }
+
+    if (owner == nullptr) {
+        MFileUnit empty_owner;
+        IRPrinter printer(options, empty_owner);
+        printer.render_module(module);
+        return printer.str();
+    }
+
+    IRPrinter printer(options, *owner);
+    printer.render_module(module);
+    return printer.str();
+}
+
+std::string format_ir(
     const MFileUnit& mfile,
     const IRPrintOptions& options) {
     IRPrinter printer(options, mfile);
     printer.render_file(mfile);
     return printer.str();
+}
+
+void print_ir(
+    std::ostream& os,
+    const IRModule& module,
+    const IRPrintOptions& options) {
+    const MFileUnit* owner = nullptr;
+    for (const auto& file : module.files) {
+        if (file != nullptr) {
+            owner = file.get();
+            break;
+        }
+    }
+
+    if (owner == nullptr) {
+        MFileUnit empty_owner;
+        IRPrinter printer(options, empty_owner);
+        printer.render_module(module);
+        printer.print(os);
+        return;
+    }
+
+    IRPrinter printer(options, *owner);
+    printer.render_module(module);
+    printer.print(os);
 }
 
 void print_ir(

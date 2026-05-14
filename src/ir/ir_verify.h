@@ -7,6 +7,8 @@
 
 namespace baltam {
 
+struct IRModule;
+
 /**
  * @brief IR verifier 诊断信息。
  */
@@ -53,6 +55,13 @@ struct IRVerifyResult {
      */
     [[nodiscard]] bool ok() const noexcept;
 };
+
+/**
+ * @brief 验证整个 IR module。
+ */
+[[nodiscard]] IRVerifyResult verify_ir(
+    const IRModule& module,
+    const IRVerifyOptions& options = {});
 
 /**
  * @brief 验证整个文件级 IR 单元。

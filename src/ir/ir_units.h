@@ -9,9 +9,11 @@
 
 namespace baltam {
 
+struct IRModule;
 struct MFileUnit;
 struct AnonymousFunctionUnit;
 struct CodeUnit;
+struct CommandUnit;
 struct FunctionUnit;
 
 /**
@@ -29,6 +31,7 @@ struct CodeUnit {
         Script,
         Function,
         AnonymousFunction,
+        Command,
     };
 
     /**
@@ -36,12 +39,6 @@ struct CodeUnit {
      */
     virtual ~CodeUnit() = default;
 
-    /**
-     * @brief 当前代码单元所属的父文件单元。
-     *
-     * 该字段是非拥有指针，由外层 builder 或 lowering 过程负责维护。
-     */
-    MFileUnit* parent = nullptr;
     InternedString name;
     SlotTable slot_table;
     ValueTable value_table;
@@ -143,8 +140,7 @@ struct CodeUnit {
 /**
  * @brief `CodeUnit(type=script)` 的薄特化。
  *
- * 第一版 `ScriptUnit` 不新增独立字段，只在 `CodeUnit` 之上显式固定脚本语义约束：
- * `type()` 固定返回 `Script`。
+ * 脚本单元来源于 `.m` 文件，因此显式记录所属 `MFileUnit`。
  */
 struct ScriptUnit : CodeUnit {
     /**
@@ -160,6 +156,8 @@ struct ScriptUnit : CodeUnit {
     [[nodiscard]] Type type() const noexcept override {
         return CodeUnit::Script;
     }
+
+    MFileUnit* file = nullptr;
 };
 
 /**
@@ -185,6 +183,8 @@ struct FunctionUnit : CodeUnit {
         return CodeUnit::Function;
     }
 
+    MFileUnit* file = nullptr;
+
     /**
      * @brief 按声明顺序保存函数参数对应的 slot。
      *
@@ -198,6 +198,29 @@ struct FunctionUnit : CodeUnit {
      * 返回值名字、源码位置等信息统一由对应 `Slot` 提供，不再重复保存一份描述结构。
      */
     std::vector<SlotId> return_slots;
+};
+
+/**
+ * @brief 命令行 / REPL 输入对应的代码单元占位。
+ *
+ * 当前仅保留类型定义和 `CodeUnit::Command` 类型标记，不接入 lowering、builder、
+ * printer、verifier，也不由 `IRModule` 拥有。后续真正接入 REPL 时再定义 owner、
+ * session workspace 和匿名函数句柄生命周期。
+ */
+struct CommandUnit : CodeUnit {
+    /**
+     * @brief 构造一个命令代码单元。
+     */
+    CommandUnit() noexcept = default;
+
+    /**
+     * @brief 获取当前命令单元的类型。
+     *
+     * @return 固定返回 `CodeUnit::Command`。
+     */
+    [[nodiscard]] Type type() const noexcept override {
+        return CodeUnit::Command;
+    }
 };
 
 /**
@@ -223,6 +246,7 @@ struct AnonymousFunctionUnit : CodeUnit {
     }
 
     AnonymousFunctionId id = InvalidAnonymousFunctionId;
+    CodeUnit* lexical_parent = nullptr;
     std::vector<SlotId> param_slots;
     std::vector<SlotId> capture_slots;
 };
@@ -230,8 +254,8 @@ struct AnonymousFunctionUnit : CodeUnit {
 /**
  * @brief 匿名函数体全局表。
  *
- * 第一阶段把“全局”限定在单个 IR 文件单元 / build session 中，由该表拥有所有匿名函数
- * 体。普通 IR 指令通过 `AnonymousFunctionId` 间接引用表内单元。
+ * 第一阶段把“全局”限定在 IR module / build session 中，由该表拥有所有匿名函数体。
+ * 普通 IR 指令通过 `AnonymousFunctionId` 间接引用表内单元。
  */
 struct AnonymousFunctionTable {
     std::vector<std::unique_ptr<AnonymousFunctionUnit>> functions;
@@ -261,16 +285,20 @@ struct AnonymousFunctionTable {
 /**
  * @brief 文件级 IR 单元。
  *
- * `MFileUnit` 对应一个 `.m` 文件，直接拥有该文件中的全部 `CodeUnit`，并通过
- * `entry_unit` 指向入口代码单元。文件是脚本文件还是函数文件，不再额外缓存一份
- * `file_type` 状态，而是从入口代码单元的实际类型推导。
+ * `MFileUnit` 对应一个 `.m` 文件，直接拥有该文件中的脚本 / 具名函数 `CodeUnit`，并通过
+ * `entry_unit` 指向入口代码单元。匿名函数体不由 `MFileUnit` 拥有，而是放在更大的
+ * `IRModule::anonymous_functions` 表中，并通过 `AnonymousFunctionUnit::lexical_parent`
+ * 记录定义位置。
+ *
+ * 文件是脚本文件还是函数文件，不再额外缓存一份 `file_type` 状态，而是从入口代码单元的
+ * 实际类型推导。
  */
 struct MFileUnit {
+    IRModule* module = nullptr;
     NormalizedPath path;
     std::vector<std::unique_ptr<CodeUnit>> code_units;
     CodeUnit* entry_unit = nullptr;
     std::unordered_map<InternedString, FunctionUnit*> local_function_map;
-    AnonymousFunctionTable anonymous_functions;
 
     /**
      * @brief 获取文件去掉扩展名后的 stem。
@@ -307,6 +335,21 @@ struct MFileUnit {
     [[nodiscard]] const FunctionUnit* find_local_function(std::string_view name) const noexcept {
         const auto it = local_function_map.find(InternedString(name));
         return it != local_function_map.end() ? it->second : nullptr;
+    }
+};
+
+/**
+ * @brief IR module 单元。
+ *
+ * `IRModule` 是比单个 `.m` 文件更大的组织边界，负责拥有一组文件单元以及 module 级的
+ * 匿名函数表。匿名函数 ID 在该 module 内全局唯一。
+ */
+struct IRModule {
+    std::vector<std::unique_ptr<MFileUnit>> files;
+    AnonymousFunctionTable anonymous_functions;
+
+    [[nodiscard]] bool empty() const noexcept {
+        return files.empty();
     }
 };
 

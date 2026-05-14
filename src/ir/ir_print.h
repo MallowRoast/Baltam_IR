@@ -7,6 +7,7 @@
 
 namespace baltam {
 
+struct IRModule;
 struct MFileUnit;
 
 /**
@@ -59,10 +60,25 @@ struct IRPrintOptions {
 };
 
 /**
+ * @brief 将整个 `IRModule` 格式化为接近 LLVM IR 的文本表示。
+ */
+[[nodiscard]] std::string format_ir(
+    const IRModule& module,
+    const IRPrintOptions& options = {});
+
+/**
  * @brief 将整个 `MFileUnit` 格式化为接近 LLVM IR 的文本表示。
  */
 [[nodiscard]] std::string format_ir(
     const MFileUnit& mfile,
+    const IRPrintOptions& options = {});
+
+/**
+ * @brief 把整个 `IRModule` 打印到输出流。
+ */
+void print_ir(
+    std::ostream& os,
+    const IRModule& module,
     const IRPrintOptions& options = {});
 
 /**

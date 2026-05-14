@@ -43,14 +43,18 @@ struct IRVerifyResult {
 };
 
 IRVerifyResult verify_ir(
+    const IRModule& module,
+    const IRVerifyOptions& options = {});
+
+IRVerifyResult verify_ir(
     const MFileUnit& mfile,
     const IRVerifyOptions& options = {});
 ```
 
-调用方可以直接对完整 `MFileUnit` 调用：
+调用方优先对完整 `IRModule` 调用；需要文件级兼容入口时也可以验证 `MFileUnit`：
 
 ```cpp
-const IRVerifyResult result = verify_ir(*mfile);
+const IRVerifyResult result = verify_ir(*module);
 if (!result.ok()) {
     // 处理 Error 级诊断
 }
@@ -92,14 +96,20 @@ verifier 使用独立的 `IRVerifyDiagnostic`，不复用 `IRBuildDiagnostic`。
 
 ## 当前检查范围
 
-### 1. `MFileUnit`
+### 1. `IRModule / MFileUnit`
 
 verifier 会检查：
 
+- `IRModule::files` 不能为空
+- `IRModule::files` 中不能有空指针
+- 每个 `MFileUnit::module` 必须指回所属 module
+- module 级匿名函数表不能包含空函数体
+- 匿名函数体 ID 必须有效且不能重复
+- 匿名函数体 `lexical_parent` 必须属于当前 module
 - `entry_unit` 不能为空
 - `entry_unit` 必须属于当前 `MFileUnit::code_units`
 - `code_units` 中不能有空指针
-- 每个 `CodeUnit::parent` 必须指回当前文件
+- `ScriptUnit::file` / `FunctionUnit::file` 必须指回当前文件
 - `local_function_map` 的目标不能为空
 - `local_function_map` 的目标必须属于当前文件
 - `local_function_map` 的 key 必须与目标函数名一致
@@ -114,8 +124,9 @@ verifier 会检查：
 - 每个 `BasicBlock::parent` 必须指回当前 `CodeUnit`
 - `type() == Script` 时对象必须是 `ScriptUnit`
 - `type() == Function` 时对象必须是 `FunctionUnit`
+- `type() == AnonymousFunction` 时对象必须是 `AnonymousFunctionUnit`
 
-### 3. `FunctionUnit`
+### 3. `FunctionUnit / AnonymousFunctionUnit`
 
 verifier 会检查：
 
@@ -125,6 +136,10 @@ verifier 会检查：
 - `return_slots` 引用的 slot 必须存在
 - `return_slots` 引用的 slot 必须是 `Slot::Ret`
 - `return_slots` 内部不能重复引用同一个 slot
+- 匿名函数体 `id` 必须有效
+- 匿名函数体 `param_slots` 只能引用 `Arg` slot
+- 匿名函数体 `capture_slots` 只能引用 `Capture` slot
+- 匿名函数体参数 / 捕获列表内部不能重复
 
 ### 4. `SlotTable`
 
@@ -137,6 +152,7 @@ verifier 会检查：
 - 除 `None` 外，同一个 `HiddenRole` 在同一 `CodeUnit` 中最多出现一次
 - `Slot::InternalLocal` 可用于 lowering/runtime 内部普通状态，但不能设置
   `hidden_role`
+- `Slot::Capture` 只能出现在匿名函数体单元中
 - `WorkspaceHandle` 只能出现在 `ScriptUnit`
 - `Nargin / Nargout / Varargin / Varargout` 只能出现在 `FunctionUnit`
 
@@ -174,6 +190,7 @@ verifier 会检查：
 - 同一个 `CodeUnit` 内 `ValueId` 只能被定义一次
 - `ApplyInst::results` 内部不能重复
 - `CallInst::results` 内部不能重复
+- 多结果指令中的 `InvalidValueId` 表示占位输出位，verifier 会跳过该位
 - `ValueId` 操作数必须引用当前 unit 中已经定义过的值
 
 当前实现按指令遍历顺序检查 `ValueId` 使用。因此它也会捕获当前非 SSA IR 中不应出现的
@@ -209,6 +226,10 @@ verifier 会检查：
 - `StoreWorkspaceInst::workspace_handle_slot` 必须引用 `WorkspaceHandle` hidden slot
 - `LoadWorkspaceInst::symbol` 不能为空
 - `StoreWorkspaceInst::symbol` 不能为空
+- `CreateAnonymousFunctionHandleInst::function_id` 必须能在所属 module 的匿名函数表中找到
+- `CreateAnonymousFunctionHandleInst::captures` 的 `captured_value` 必须引用当前外层 unit
+  中已定义的值
+- 有效的 capture `source_slot` 必须属于当前外层 unit
 - `GotoInst::target` 必须非空，且属于同一 `CodeUnit`
 - `BranchInst::true_target / false_target` 必须非空，且属于同一 `CodeUnit`
 
@@ -251,19 +272,12 @@ verifier 会检查：
 当前 `test/smoke_test/smoke_test_common.h` 已经在 `require_ir_is_complete(...)` 中调用
 `verify_ir(...)`。
 
-这意味着现有四个 smoke test 会同时覆盖：
+这意味着 smoke test 会同时覆盖：
 
 - lowering 是否成功
 - IR 是否能打印
 - 关键文本输出是否符合预期
 - verifier 是否接受当前 lowering 产物
-
-当前已覆盖样例：
-
-- `test0`
-- `test0_1`
-- `test1`
-- `test1_1`
 
 ## 后续演进方向
 

@@ -105,8 +105,9 @@ Matlab 的 `for i = a ... end` 会在进入循环时确定当前循环的迭代�
   初始化迭代状态，并返回最大迭代次数。`state` 和 `max_iter` 都是 lowering/runtime
   内部值，不是 Matlab 用户可见变量。
 - `foreach_iterate`
-  根据内部 `state` 和当前 `iter_index` 读取当前迭代值。迭代下标递增由 lowering
-  显式生成，不由 `foreach_iterate` 自己更新。
+  根据内部 `state` 和当前 `iter_index` 读取当前迭代值。这里的“当前值”由 runtime
+  helper 按 Matlab `for` 规则决定，例如矩阵输入按列返回当前列。迭代下标递增由
+  lowering 显式生成，不由 `foreach_iterate` 自己更新。
 
 内部 helper 的返回类型由 helper 签名静态决定：
 
@@ -381,10 +382,13 @@ for.end:
 - 当前实现已经只把 `iter_index` 落到 internal local slot，并通过
   `SlotAttrs::fixed_type = Int64Scalar` 声明固定类型。
 - 当前实现已经把 `foreach_iterate` 调整为显式接收 `state, iter_index`。
+- `foreach_iterate` 已负责按 Matlab 规则返回当前迭代值，包括矩阵输入时返回当前列。
 - 当前实现已经把 header 比较和 latch 自增 lowering 为 `internal.cmp_gt` /
   `internal.add`，底层是 `BinaryInst(dispatch_type = Internal)`，不再复用用户级
   动态 `cmp.lt / add`。
 - `state / max_iter` 由 internal helper 签名提供 `extern / int64` 类型事实。
+- 剩余工作主要是把 helper ABI 文档化并补齐边界测试，例如空迭代源、不同形状输入和
+  runtime 错误路径。
 
 ### 10. 测试覆盖
 

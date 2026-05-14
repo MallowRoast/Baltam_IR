@@ -31,11 +31,12 @@ inline SmokeArtifacts build_ir(std::string_view mfile_path) {
     SmokeArtifacts artifacts;
     artifacts.result = parse_and_lower_mfile_to_ir(mfile_path);
 
+    require(artifacts.result.module != nullptr, "结果 IR module 不能为空");
     require(artifacts.result.mfile != nullptr, "结果文件单元不能为空");
 
     IRPrintOptions print_options;
     print_options.load_source_from_path = true;
-    artifacts.printed_ir = format_ir(*artifacts.result.mfile, print_options);
+    artifacts.printed_ir = format_ir(*artifacts.result.module, print_options);
     return artifacts;
 }
 
@@ -48,10 +49,11 @@ inline void require_no_error_diagnostics(const IRBuildResult& result) {
 }
 
 inline void require_ir_is_complete(const IRBuildResult& result) {
+    require(result.module != nullptr, "结果 IR module 不能为空");
     require(result.mfile != nullptr, "结果文件单元不能为空");
     require_no_error_diagnostics(result);
 
-    const IRVerifyResult verify_result = verify_ir(*result.mfile);
+    const IRVerifyResult verify_result = verify_ir(*result.module);
     if (!verify_result.ok()) {
         for (const IRVerifyDiagnostic& diagnostic : verify_result.diagnostics) {
             if (diagnostic.severity == IRVerifyDiagnostic::Error) {
@@ -95,7 +97,7 @@ inline void require_ir_is_complete(const IRBuildResult& result) {
         }
     }
 
-    for (const auto& unit_ptr : result.mfile->anonymous_functions.functions) {
+    for (const auto& unit_ptr : result.module->anonymous_functions.functions) {
         require(unit_ptr != nullptr, "匿名函数体不能为空");
 
         const AnonymousFunctionUnit* unit = unit_ptr.get();

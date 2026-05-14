@@ -1,378 +1,245 @@
-# Matlab IR Schema 草案
+# Matlab IR Schema
 
-## 目标
-
-本文承接 [ir_draft.md](/home/zj/Desktop/Baltam_IR/doc/ir_draft.md)，只记录当前代码实现对应的第一版 `IR` schema。
-
-主文档负责说明：
-
-- 为什么需要 `IR`
-- 第一版 `IR` 的职责边界
-- `IR` 与 `bytecode`、`typed SSA` 的关系
-
-本文只负责说明当前实际存在的数据结构：
-
-- `MFileUnit`
-- `CodeUnit`
-- `ScriptUnit`
-- `FunctionUnit`
-- `SlotTable`
-- `ValueTable`
-- `BasicBlock`
-- `Instruction`
+本文记录当前 `src/ir` 中实际存在的语义 IR schema。历史草案和已经删除的结构不再在这里展开；
+需要看设计背景时可参考 [ir_draft.md](./ir_draft.md)、[ir_lowering_design.md](./ir_lowering_design.md)
+和 [anonymous_function_handle_design.md](./anonymous_function_handle_design.md)。
 
 ## 当前范围
 
-本文默认沿用第一版 `IR` 的范围约束：
+当前实现覆盖：
 
-- 只考虑 `.m` 文件输入
-- 只考虑 `script` 和 `function`
-- 暂不考虑 `Command` / REPL 输入
-- 暂不考虑嵌套函数
-- 暂不考虑匿名函数与闭包
-- 暂不考虑 `try/catch`
-- `global` 需要显式支持
-- `persistent` 暂不进入第一版 schema
+- `.m` 文件输入
+- `script`、`function`、文件内 `local function`
+- module 级匿名函数表和 `AnonymousFunctionUnit`
+- 具名函数句柄、匿名函数句柄、`apply`、`value_apply`、`call`
+- 多返回值调用和左值列表，`~` 占位输出位用空 `ValueId` 表示
+- `if`、`switch`、`for`、`while`、`break`、`continue`、显式 / 隐式 `return`
 
-## 1. 基础类型
+当前仍未完整覆盖：
 
-### 1.1 EntityId
+- `CommandUnit` / REPL lowering。源码中只保留 `CodeUnit::Command` 和 `CommandUnit` 占位。
+- 嵌套函数、`try/catch`、`global`、`persistent`
+- 完整索引语义、成员访问、完整 Matlab 函数优先级和路径语义
 
-当前代码通过 `EntityId<Tag>` 模板定义强类型 ID。第一版实际仍在使用的只有：
+## 1. 基础 ID
 
-- `SlotId`
-- `ValueId`
+当前使用 `EntityId<Tag>` 定义强类型 ID：
 
-它们的作用分别是：
+- `SlotId`：当前 `CodeUnit` 内 frame slot 的稳定句柄。
+- `ValueId`：当前 `CodeUnit` 内指令结果值的稳定句柄。
+- `AnonymousFunctionId`：当前 `IRModule` 内匿名函数体的稳定句柄。
 
-- `SlotId`
-  作为 frame 槽位的稳定句柄
-- `ValueId`
-  作为指令结果值的稳定句柄
+`SlotId` 和 `ValueId` 按 `CodeUnit` 局部分配；`AnonymousFunctionId` 按 `IRModule` 分配。
+无效 ID 用对应的 `Invalid*Id` 常量表示。
 
-### 1.2 其他基础类型
+## 2. IRModule / MFileUnit
 
-- `InternedString = std::string`
-- `NormalizedPath = std::filesystem::path`
-- `SourceSpan`
-  使用半开区间 `[begin_offset, end_offset)` 表示源码范围
+`IRModule` 是当前构建会话的顶层拥有者：
 
-## 2. MFileUnit
+```text
+IRModule
+  files               : unique_ptr<MFileUnit>[]
+  anonymous_functions : AnonymousFunctionTable
+```
 
-`MFileUnit` 对应一个 `.m` 文件。
-
-当前推荐结构如下：
+`MFileUnit` 对应一个 `.m` 文件：
 
 ```text
 MFileUnit
-  path         : NormalizedPath
-  code_units   : CodeUnit*[]
-  entry_unit   : CodeUnit*
+  module             : IRModule*
+  path               : NormalizedPath
+  code_units         : unique_ptr<CodeUnit>[]
+  entry_unit         : CodeUnit*
+  local_function_map : map<InternedString, FunctionUnit*>
 ```
 
-### 字段说明
+约束：
 
-- `path`
-  当前文件路径。
-- `code_units`
-  文件直接拥有的全部 `CodeUnit`。
-- `entry_unit`
-  当前文件的入口代码单元。
+- `IRModule::files` 拥有所有文件单元。
+- `MFileUnit::module` 指回所属 module。
+- `MFileUnit::code_units` 只拥有该文件直接定义的 `ScriptUnit` / `FunctionUnit`。
+- 匿名函数体不由 `MFileUnit` 拥有，而由 `IRModule::anonymous_functions` 拥有。
+- `entry_unit` 必须指向当前文件拥有的入口代码单元。
+- `local_function_map` 只记录当前文件内的 local `FunctionUnit`。
 
-### 派生方法
+文件类型通过 `entry_unit` 推导：
 
-- `file_stem()`
-- `is_script_file()`
-- `is_function_file()`
+- `entry_unit->is_script()`：脚本文件。
+- `entry_unit->is_function()`：函数文件。
 
-脚本文件和函数文件不再单独缓存 `file_type`，而是通过 `entry_unit` 的真实类型推导。
+## 3. CodeUnit 类型
 
-## 3. CodeUnit / ScriptUnit / FunctionUnit
-
-### 3.1 CodeUnit
-
-`CodeUnit` 是真正的 lowering 单元。
-
-当前结构如下：
+`CodeUnit` 是所有可执行代码体的抽象基类：
 
 ```text
-CodeUnit (abstract)
-  parent        : MFileUnit*
-  name          : InternedString
-  slot_table    : SlotTable
-  value_table   : ValueTable
-  entry_block   : BasicBlock*
-  basic_blocks  : BasicBlock*[]
-  source_span   : SourceSpan
+CodeUnit
+  name         : InternedString
+  slot_table   : SlotTable
+  value_table  : ValueTable
+  entry_block  : BasicBlock*
+  basic_blocks : unique_ptr<BasicBlock>[]
+  source_span  : SourceSpan
 ```
 
-### 字段说明
+`CodeUnit` 基类不保存统一的 `MFileUnit* parent` 或 `IRModule* module`。这些关系按实际语义
+放在派生结构上：
 
-- `parent`
-  所属 `MFileUnit`。
-- `name`
-  单元名。对函数来说是函数名；对脚本来说可直接使用文件名。
-- `slot_table`
-  当前 unit 的全部 slot。
-- `value_table`
-  当前 unit 的全部 `ValueId` 元信息表。
-- `entry_block`
-  CFG 入口块。
-- `basic_blocks`
-  当前 unit 的 block 列表。
-- `source_span`
-  当前 unit 覆盖的源码范围。
+- `ScriptUnit::file -> MFileUnit`
+- `FunctionUnit::file -> MFileUnit`
+- `AnonymousFunctionUnit::lexical_parent -> CodeUnit`
+- `MFileUnit::module -> IRModule`
 
-### 虚接口
+当前 `CodeUnit::Type` 包括：
 
-`CodeUnit` 通过虚接口区分实际类型：
+- `Script`
+- `Function`
+- `AnonymousFunction`
+- `Command`
+
+`CommandUnit` 目前只是 REPL / 命令行输入的类型占位，不接入 builder、lowering、printer 或
+verifier 的主路径，也不由 `IRModule` 拥有。
+
+### ScriptUnit
 
 ```text
-type() -> script | function
+ScriptUnit : CodeUnit
+  file : MFileUnit*
 ```
 
-并提供：
+脚本变量访问 lower 为 workspace 访问。脚本按需创建 `WorkspaceHandle` hidden slot。
 
-- `is_script()`
-- `is_function()`
-
-### 3.2 ScriptUnit
-
-`ScriptUnit` 是 `CodeUnit` 的脚本特化。
-
-当前它没有新增独立字段，只固定脚本单元语义；工作区句柄 slot 仍通过
-基类上的 `find_hidden_slot(WorkspaceHandle)` 访问。
-
-### 3.3 FunctionUnit
-
-`FunctionUnit` 是 `CodeUnit` 的函数特化。
-
-当前结构如下：
+### FunctionUnit
 
 ```text
-FunctionUnit
-  param_slots   : SlotId[]
-  return_slots  : SlotId[]
+FunctionUnit : CodeUnit
+  file         : MFileUnit*
+  param_slots  : SlotId[]
+  return_slots : SlotId[]
 ```
 
-### 字段说明
+`param_slots` 和 `return_slots` 按源码声明顺序保存接口 slot。参数名、返回值名和源码位置由
+对应 `Slot` 提供。
 
-- `param_slots`
-  按源码声明顺序保存参数 slot。
-- `return_slots`
-  按源码声明顺序保存返回值 slot。
-
-参数名字、返回值名字以及源码位置，都统一由对应 `Slot` 提供，不再重复保存单独描述结构。
-
-## 4. SlotAttrs / Slot / SlotTable
-
-### 4.1 SlotAttrs
+### AnonymousFunctionUnit
 
 ```text
-SlotAttrs
-  is_mutable      : bool
-  hidden_role     : HiddenRole
-  fixed_type      : FixedType
+AnonymousFunctionUnit : CodeUnit
+  id             : AnonymousFunctionId
+  lexical_parent : CodeUnit*
+  param_slots    : SlotId[]
+  capture_slots  : SlotId[]
 ```
 
-其中 `HiddenRole` 当前包括：
+匿名函数体没有 Matlab 名字空间中的函数名，也没有 `return_slots`。其 body 直接通过
+`ReturnInst` 返回表达式 lowering 后的 `ValueId`。
 
-- `None`
-- `Nargin`
-- `Nargout`
-- `Varargin`
-- `Varargout`
-- `WorkspaceHandle`
+`lexical_parent` 记录匿名函数表达式出现的位置，用于诊断、source 归属和 local function lookup。
 
-`hidden_role` 只对 `Slot::Hidden` 有意义。普通 lowering 内部状态不使用
-`HiddenRole`，而是通过 `Slot::InternalLocal` 表达。
+## 4. Slot
 
-`FixedType` 当前包括：
-
-- `Unknown`
-- `Int64Scalar`
-
-它用于表达 schema 已经完全确定的 slot 类型，例如 for lowering 里的内部
-`iter_index`。
-
-### 4.2 Slot
-
-```text
-Slot
-  slot_id       : SlotId
-  type          : arg | local | internal_local | ret | hidden
-  name          : InternedString
-  source_span   : SourceSpan
-  attrs         : SlotAttrs
-```
-
-### 字段说明
-
-- `slot_id`
-  slot 级稳定句柄。
-- `type`
-  slot 的类别。
-  - `arg`：函数输入参数。
-  - `local`：用户源码中的普通局部变量。
-  - `internal_local`：lowering/runtime 创建的普通内部局部状态，可重复出现，不带
-    `HiddenRole`。
-  - `ret`：函数返回值。
-  - `hidden`：带 `HiddenRole` 的特殊 ABI/runtime slot，同一角色在一个
-    `CodeUnit` 中至多出现一次。
-- `name`
-  源码名字或编译器生成名字。
-- `source_span`
-  对应源码范围。
-- `attrs`
-  slot 级属性。
-
-当前版本不再保存 `frame_index`。
-
-### 4.3 SlotTable
+`SlotTable` 是当前 `CodeUnit` 的 slot 定义表：
 
 ```text
 SlotTable
   slots : Slot[]
 ```
 
-当前版本直接使用单一 `slots` 容器保存全部 slot 定义，不再维护：
-
-- `arg_slots`
-- `local_slots`
-- `ret_slots`
-- `hidden_slots`
-
-### SlotTable helper
-
-当前代码提供：
-
-- `empty()`
-- `find_slot(SlotId)`
-- `find_hidden_slot(HiddenRole)`
-
-## 5. ValueInfo / ValueTable
-
-### 5.1 ValueInfo
+`Slot`：
 
 ```text
-ValueInfo
-  value_id      : ValueId
-  result_index  : size_t
-  type_fact     : TypeFact
-  def           : Instruction*
+Slot
+  slot_id     : SlotId
+  type        : Arg | Local | InternalLocal | Capture | Ret | Hidden
+  name        : InternedString
+  source_span : SourceSpan
+  attrs       : SlotAttrs
 ```
 
-### 字段说明
+`SlotAttrs`：
 
-- `value_id`
-  值级稳定句柄。
-- `result_index`
-  该值在定义指令结果列表中的序号；单结果指令固定为 `0`。
-- `type_fact`
-  当前附着在该值上的类型事实。
-- `def`
-  定义该值的指令，非拥有指针。
+```text
+SlotAttrs
+  is_mutable  : bool
+  hidden_role : None | Nargin | Nargout | Varargin | Varargout | WorkspaceHandle
+  fixed_type  : Unknown | Int64Scalar
+```
 
-### 5.2 ValueTable
+约束：
+
+- `Slot::Capture` 只能出现在 `AnonymousFunctionUnit`。
+- `Slot::Hidden` 必须设置非 `None` 的 `hidden_role`。
+- 非 `Hidden` slot 的 `hidden_role` 必须是 `None`。
+- 除 `None` 外，同一 `HiddenRole` 在一个 `CodeUnit` 中至多出现一次。
+- `WorkspaceHandle` 只能出现在 `ScriptUnit`。
+- `Nargin / Nargout / Varargin / Varargout` 只能出现在 `FunctionUnit`。
+
+## 5. ValueTable
+
+`ValueTable` 是 `ValueId` 的 side metadata 表：
 
 ```text
 ValueTable
   values : ValueInfo[]
 ```
 
-### 字段说明
+`ValueInfo`：
 
-- `values`
-  当前 `CodeUnit` 中全部值的 side table。推荐按 `ValueId.value()` 稠密索引。
+```text
+ValueInfo
+  value_id     : ValueId
+  result_index : size_t
+  type_fact    : TypeFact
+  def          : Instruction*
+```
 
-### ValueTable helper
+说明：
 
-当前建议提供：
+- `IRBuilder::create_value()` 会先创建一条 `ValueInfo` 占位记录。
+- `append_instruction()` 会把产生结果的指令绑定到 `ValueInfo::def`。
+- 多结果指令用 `result_index` 记录该 `ValueId` 在结果列表中的位置。
+- 多返回值调用中的 `~` 占位输出位用 `InvalidValueId` 保留位次，不进入 `ValueTable`，也没有
+  `ValueInfo`。
 
-- `empty()`
-- `find(ValueId)`
+`TypeFact` 是保守的构建期种子事实，不等价于完整类型推断。当前已知事实包括：
 
-### 5.3 构建期类型事实
-
-`IRBuilder` 在 `append_instruction()` 时会给能够静态确定的结果写入第一版
-`TypeFact`。当前规则是保守的种子事实，不等价于完整类型推导：
-
-- `ConstInst`
-  根据常量种类写入精确类型事实，例如 `Int64Constant -> int64 scalar`、
-  `Float64Constant -> double scalar`。
-- `LoadSlotInst`
-  如果读取的 slot 带有 `SlotAttrs::fixed_type`，结果值使用该固定类型；否则保持
-  `unknown`。
-- `CopyInst`
-  复制输入 `ValueId` 当前已有的 `TypeFact`。
-- `CallInst(dispatch_type = internal)`
-  只有已知 internal helper 有构建期摘要。当前 `internal.foreach_init` 的第 0 个
-  结果为 `extern scalar`，第 1 个结果为 `int64 scalar`；`internal.switch_match`
-  的第 0 个结果为 `logical scalar`；其他 internal call 结果保持 `unknown`。
-- `CreateNamedFunctionHandleInst`
-  结果固定为 `function_handle scalar`。
-- `BinaryInst(dispatch_type = internal)`
-  `internal.cmp_gt` 结果为 `logical scalar`；`internal.add` 只有在左右操作数都已有
-  类型事实、且 `TypeSet` 与 scalar 属性完全一致时，结果才继承该类型，否则保持
-  `unknown`。
-
-动态分派的 `UnaryInst / BinaryInst / CallInst`、`ApplyInst` 和 `LoadWorkspaceInst`
-在构建期默认保持 `unknown`，等待后续类型分析或调用解析 pass 收窄。
+- 常量指令按常量种类写入精确类型。
+- `CreateNamedFunctionHandleInst` / `CreateAnonymousFunctionHandleInst` 结果是
+  `function_handle scalar`。
+- 带 `fixed_type` 的 slot 被 `load_slot` 读取时可产生固定类型事实。
+- 部分 internal helper 有手写摘要，例如 `internal.foreach_init` 和
+  `internal.switch_match`。
 
 ## 6. BasicBlock
-
-当前结构如下：
 
 ```text
 BasicBlock
   parent        : CodeUnit*
   label         : InternedString
   source_span   : SourceSpan
-  instructions  : Instruction*[]
+  instructions  : unique_ptr<Instruction>[]
   predecessors  : BasicBlock*[]
   successors    : BasicBlock*[]
 ```
 
-### 字段说明
+约束：
 
-- `parent`
-  所属 `CodeUnit`。
-- `label`
-  文本标签，主要用于打印、调试和诊断。
-- `source_span`
-  当前 block 覆盖的源码范围。
-- `instructions`
-  顺序指令列表。
-- `predecessors`
-  前驱块集合。
-- `successors`
-  后继块集合。
+- `parent` 必须指向所属 `CodeUnit`。
+- `entry_block` 必须属于 `basic_blocks`。
+- 终结类指令和普通指令都存放在 `instructions` 中。
+- 若 block 中存在 terminator，它必须是最后一条指令。
+- CFG 目标同时保存在 terminator 指令和 `predecessors/successors` 中，verifier 会检查两者一致。
 
-### BasicBlock 约束
+## 7. Operand / Constant / Op
 
-- 终结类指令与普通指令统一建模
-- 如果 block 中存在终结指令，则它必须是最后一条
-- 当前代码同时保存：
-  - `predecessors/successors`
-  - `GotoInst/BranchInst` 的目标块
+`Operand`：
 
-这是一处已知双重状态，后续应收敛为单一真源
+```text
+Operand = variant<ValueId, SlotId, InternedString>
+```
 
-### BasicBlock helper
+字面量不直接进入 `Operand`，必须先经 `ConstInst` 物化为 `ValueId`。
 
-当前代码提供：
-
-- `has_instructions()`
-- `has_predecessors()`
-- `has_successors()`
-- `terminator()`
-- `has_terminator()`
-
-## 7. Constant / UnaryOp / BinaryOp / Operand
-
-### 7.1 Constant
-
-当前常量集合包括：
+`Constant` 当前包括：
 
 - `LogicalConstant`
 - `Int64Constant`
@@ -383,15 +250,7 @@ BasicBlock
 - `StringLiteralConstant`
 - `EmptyDoubleMatrixConstant`
 
-统一表示为：
-
-```text
-Constant = variant<...>
-```
-
-### 7.2 UnaryOp
-
-当前一元操作包括：
+`UnaryOp` 当前包括：
 
 - `Uplus`
 - `Uminus`
@@ -399,241 +258,156 @@ Constant = variant<...>
 - `Transpose`
 - `Ctranspose`
 
-### 7.3 BinaryOp
+`BinaryOp` 当前包括算术、点算术、逻辑和比较操作：
 
-当前二元操作包括：
+- `Add/Sub/Mul/Rdiv/Ldiv/Pow`
+- `ElemMul/ElemRdiv/ElemLdiv/ElemPow`
+- `And/Or`
+- `Lt/Le/Gt/Ge/Eq/Ne`
 
-- 算术：`Add/Sub/Mul/Rdiv/Ldiv/Pow`
-- 点算术：`ElemMul/ElemRdiv/ElemLdiv/ElemPow`
-- 逻辑：`And/Or`
-- 比较：`Lt/Le/Gt/Ge/Eq/Ne`
+## 8. Instruction
 
-### 7.4 Operand
-
-当前操作数集合是：
-
-```text
-Operand = variant<
-  ValueId,
-  SlotId,
-  InternedString
->
-```
-
-也就是说：
-
-- 值引用直接用 `ValueId`
-- slot 引用直接用 `SlotId`
-- 名字引用直接用 `InternedString`
-
-当前版本不允许操作数直接承载立即数，所有进入数据流的字面量都应先经 `ConstInst` 物化成 `ValueId`。
-
-## 8. InstAttrs / EffectClass / Instruction
-
-### 8.1 InstAttrs
-
-```text
-InstAttrs
-  may_throw    : bool
-  is_synthetic : bool
-```
-
-### 8.2 EffectClass
-
-```text
-EffectClass
-  pure
-  frame
-  heap
-  env
-  opaque
-```
-
-### 8.3 Instruction 基类
-
-当前结构如下：
+所有指令继承自 `Instruction`：
 
 ```text
 Instruction
-  parent       : BasicBlock*
-  type         : Instruction::Type
-  effect       : EffectClass
-  source_span  : SourceSpan
-  attrs        : InstAttrs
+  parent      : BasicBlock*
+  type        : Instruction::Type
+  effect      : EffectClass
+  source_span : SourceSpan
+  attrs       : InstAttrs
 ```
 
-当前 `Instruction` 采用：
+`EffectClass` 当前包括：
 
-- 继承层次表达具体指令数据结构
-- `parent` 反向指回所属 `BasicBlock`
-- `Instruction::Type` 作为显式判别标签
+- `Pure`
+- `Frame`
+- `Heap`
+- `Env`
+- `Opaque`
 
-这里保留 `type` 标签的目的，是避免在核心 IR 上依赖 RTTI 做分派。
+`InstAttrs` 当前包括：
 
-## 8. 当前已实现的指令类
+- `may_throw`
+- `is_synthetic`
 
-### 8.1 普通指令
+### 普通数据与环境指令
 
 - `ConstInst`
   - `result : ValueId`
-  - `value  : Constant`
+  - `value : Constant`
 - `LoadSlotInst`
-  - `result  : ValueId`
+  - `result : ValueId`
   - `slot_id : SlotId`
-  - 读取的是已经静态绑定好的 frame slot
 - `StoreSlotInst`
   - `slot_id : SlotId`
-  - `value   : Operand`
+  - `value : Operand`
 - `LoadWorkspaceInst`
-  - `result   : ValueId`
+  - `result : ValueId`
   - `workspace_handle_slot : SlotId`
-  - `symbol   : InternedString`
-  - 读取的是 workspace 中名为 `symbol` 的名字，而不是静态 frame slot
-  - 在当前 printer 中显示为 `load_env`
+  - `symbol : InternedString`
 - `StoreWorkspaceInst`
   - `workspace_handle_slot : SlotId`
-  - `symbol   : InternedString`
-  - `value    : Operand`
-  - 在当前 printer 中显示为 `store_env`
-- `CreateNamedFunctionHandleInst`
-  - `result              : ValueId`
-  - `name                : InternedString`
-  - `resolution_mode     : lookup | prebound`
-  - `bound_dispatch_type : dynamic | builtin | internal | mfunction`
-  - `m_function_target   : FunctionUnit*`
-  - 表示源码层 `@name` 构造具名函数句柄。
-  - 这条 IR 只表达“是否已静态预绑定”，不直接保存 `lookup` 的运行时结果。
-  - `lookup`：运行到本指令时查询一次。运行时查到则返回已绑定句柄；查不到则返回
-    unresolved 具名句柄，后续调用该句柄时继续按名字查询。
-  - `prebound`：IR 构建或前置分析已经确定目标，运行时直接创建已绑定句柄，不查询。
-  - verifier 约束：
-    - `lookup`：`bound_dispatch_type = dynamic`，`m_function_target = nullptr`
-    - `prebound builtin`：`m_function_target = nullptr`
-    - `prebound mfunction`：`m_function_target` 必须指向同一 `MFileUnit` 内的函数
-    - `prebound` 暂不允许 `dynamic` 或 `internal`
-  - 打印格式：
-    - `[%0, function_handle] = create_named_func_handle @sin lookup`
-    - `[%0, function_handle] = create_named_func_handle @sin prebound builtin`
-    - `[%0, function_handle] = create_named_func_handle @sin prebound mfunc @file::sin`
-- `ApplyInst`
-  - `results        : ValueId[]`
-  - `callee_or_base : Operand`
-  - `arguments      : Operand[]`
-  - 表示尚未完成名字消歧的源码层 `A(...)`
-- `ValueApplyInst`
-  - `results   : ValueId[]`
-  - `base      : ValueId`
-  - `arguments : Operand[]`
-  - 表示 base 已经明确是运行时值，但圆括号应用尚未分派为函数句柄调用或圆括号取值
-  - 打印格式：`[%1, unknown] = value_apply %0(%idx)`
-- `CallInst`
-  - `results           : ValueId[]`
-  - `callee_kind       : direct | indirect`
-  - `dispatch_type     : dynamic | builtin | internal | mfunction`
-  - `callee            : Operand`
-  - `m_function_target : FunctionUnit*`
-  - `arguments         : Operand[]`
-  - 只表示已经确认是调用的语义；`callee_kind` 说明 callee 的表示形式，
-    `dispatch_type` 说明调用目标是否已经静态确定以及目标类别。
-  - 静态分派到 local M 函数是 `dispatch_type = mfunction` 的一种，IR 中必须保存
-    对应的 `FunctionUnit*` 作为函数实例目标。
-  - lowering / runtime 内部 C++ helper 使用 `dispatch_type = internal`，打印为
-    `internal.xxx` 目标，不参与普通用户名字解析。
+  - `symbol : InternedString`
+  - `value : Operand`
 - `CopyInst`
   - `result : ValueId`
-  - `value  : Operand`
-- `UnaryInst`
-  - `result        : ValueId`
-  - `op            : UnaryOp`
-  - `dispatch_type : dynamic | builtin | internal`
-  - `operand       : Operand`
-- `BinaryInst`
-  - `result        : ValueId`
-  - `op            : BinaryOp`
-  - `dispatch_type : dynamic | builtin | internal`
-  - `lhs           : Operand`
-  - `rhs           : Operand`
-  - 运算符如果静态分派到 M 函数，不继续保留为 `UnaryInst` / `BinaryInst`，
-    而是 lower 成 `CallInst(dispatch_type = mfunction)`。
+  - `value : Operand`
 
-### 8.2 终结类指令
+### 函数句柄与应用
+
+- `CreateNamedFunctionHandleInst`
+  - `result : ValueId`
+  - `name : InternedString`
+  - `resolution_mode : RuntimeLookup | Prebound`
+  - `bound_dispatch_type : Dynamic | Builtin | Internal | MFunction`
+  - `m_function_target : FunctionUnit*`
+- `CreateAnonymousFunctionHandleInst`
+  - `result : ValueId`
+  - `function_id : AnonymousFunctionId`
+  - `captures : CaptureValue[]`
+
+`CaptureValue`：
+
+```text
+CaptureValue
+  name           : InternedString
+  source_slot    : SlotId
+  captured_value : ValueId
+```
+
+`source_slot` 的含义取决于外层 unit：
+
+- 外层是函数 / 匿名函数体：被捕获变量自己的静态 slot。
+- 外层是脚本：脚本的 `WorkspaceHandle` hidden slot，`name` 是 workspace symbol。
+
+真正表达构造点捕获值的是 `captured_value`。
+
+- `ApplyInst`
+  - `results : ValueId[]`
+  - `callee_or_base : Operand`
+  - `arguments : Operand[]`
+- `ValueApplyInst`
+  - `results : ValueId[]`
+  - `base : ValueId`
+  - `arguments : Operand[]`
+- `CallInst`
+  - `results : ValueId[]`
+  - `callee_kind : Direct | Indirect`
+  - `dispatch_type : Dynamic | Builtin | Internal | MFunction`
+  - `callee : Operand`
+  - `m_function_target : FunctionUnit*`
+  - `arguments : Operand[]`
+
+`ApplyInst` 保留尚未消歧的源码层 `A(...)`。`ValueApplyInst` 表示 base 已经是运行时值，
+但尚未分派为函数句柄调用或圆括号索引。`CallInst` 只表达已经确认是调用的语义。
+
+`results` 允许保留空输出位：当源码写 `[~, b] = f()` 时，第一个输出位为
+`InvalidValueId`，printer 显示为 `[]`，verifier 和 value table 绑定会跳过该位。
+
+### 运算指令
+
+- `UnaryInst`
+  - `result : ValueId`
+  - `op : UnaryOp`
+  - `dispatch_type : Dynamic | Builtin | Internal`
+  - `operand : Operand`
+- `BinaryInst`
+  - `result : ValueId`
+  - `op : BinaryOp`
+  - `dispatch_type : Dynamic | Builtin | Internal`
+  - `lhs : Operand`
+  - `rhs : Operand`
+
+运算符如果静态分派到 M 函数，lowering 会生成 `CallInst(dispatch_type = MFunction)`，而不是
+继续保留为 `UnaryInst` / `BinaryInst`。
+
+### 终结指令
 
 - `GotoInst`
   - `target : BasicBlock*`
 - `BranchInst`
-  - `condition    : Operand`
-  - `true_target  : BasicBlock*`
+  - `condition : Operand`
+  - `true_target : BasicBlock*`
   - `false_target : BasicBlock*`
 - `ReturnInst`
   - `values : Operand[]`
 
-## 9. `LoadSlot` 与 `LoadWorkspace` 的区别
+## 9. 打印约定
 
-这两个节点都表现为“读一个值”，但它们读取的语义空间不同。
+当前文本 IR 的几个重要约定：
 
-- `LoadSlotInst`
-  - 输入操作数是 `slot_id : SlotId`
-  - `SlotId` 是 IR 构建阶段就已经确定的静态句柄
-  - 读取的是当前 `CodeUnit` frame 内的 slot
-- `LoadWorkspaceInst`
-  - 输入由 `workspace_handle_slot : SlotId` 和 `symbol : InternedString` 组成
-  - `workspace_handle_slot` 指向工作区句柄 slot，`symbol` 是要在 workspace 中查找的名字
-  - 读取的是当前 workspace 的动态名字绑定
-  - 当前打印文本里用 `load_env` 表示这一语义
-
-换句话说：
-
-- `LoadSlotInst` = 读取静态 slot
-- `LoadWorkspaceInst` = 通过环境句柄按名字读取 workspace
-
-## 10. 当前结构约束
-
-### 10.1 MFileUnit / CodeUnit
-
-- `entry_unit` 必须属于当前 `MFileUnit`
-- `basic_blocks` 中的 block 必须都属于当前 `CodeUnit`
-- `entry_block` 必须属于当前 `CodeUnit`
-
-### 10.2 FunctionUnit
-
-- `param_slots` 只能引用 `arg` slot
-- `return_slots` 只能引用 `ret` slot
-- `param_slots` 和 `return_slots` 的顺序应与源码声明顺序一致
-
-### 10.3 Hidden slot
-
-- 同一个 `CodeUnit` 中，除 `None` 外的同一 `HiddenRole` 至多出现一个对应 slot
-- `WorkspaceHandle` 只应出现在 `ScriptUnit`
-- `Nargin/Nargout/Varargin/Varargout` 只应出现在 `FunctionUnit`
-
-### 10.4 BasicBlock
-
-- 若 block 中存在终结指令，则必须是最后一条
-- block 中除最后一条外不应出现其他终结指令
-
-## 11. 已经删除的旧设计
-
-为了避免与旧文档混淆，以下结构已经不再属于当前 schema：
-
-- `MFileId`
-- `CodeUnitId`
-- `BlockId`
-- `InstId`
-- `Value` 元数据表
-- `BasicBlockAttrs`
-- `Instruction` / `Terminator` 分离建模
-- `Opcode`
-- `OpData`
-- `TerminatorOpcode`
-- `TermData`
-- `ParamDesc`
-- `ReturnDesc`
-- `MFileAttrs`
-- `CodeUnitAttrs`
-- `arg_slots/local_slots/ret_slots/hidden_slots`
-- `frame_index`
+- `LoadWorkspaceInst` 打印为 `load_env`。
+- `StoreWorkspaceInst` 打印为 `store_env`。
+- `dispatch_type = MFunction` 的 call 打印为 `call mfunc @name(...)`。
+- `dispatch_type = Internal` 的 direct call 打印为 `call internal.name(...)`。
+- `ValueApplyInst` 打印为 `value_apply %base(...)`。
+- 多返回值输出打印为 `([%0, type], [%1, type]) = ...`。
+- 空输出位打印为 `[]`，例如 `([], [%4, unknown]) = call mfunc @pair_ops(...)`。
 
 ## 相关文档
 
-- [ir_draft.md](/home/zj/Desktop/Baltam_IR/doc/ir_draft.md)
-- [execution_strategy.md](/home/zj/Desktop/Baltam_IR/doc/execution_strategy.md)
+- [IR Lowering 设计](./ir_lowering_design.md)
+- [IR Builder 设计](./ir_builder_design.md)
+- [IR Verifier 设计](./ir_verifier_design.md)
+- [匿名函数句柄设计](./anonymous_function_handle_design.md)

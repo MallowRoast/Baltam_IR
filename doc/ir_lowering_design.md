@@ -10,6 +10,8 @@
 - 从 parser 产出的 `pcdata[]` 直接 lower
 - 生成可验证、可打印、带源码注释的 `IR`
 - 文件内 `local` 函数的最小支持
+- 具名函数句柄、匿名函数句柄和 `value_apply`
+- 多返回值调用和 `~` 占位输出位
 - `if / else`
 - `switch / case / otherwise`
 - `for / while` 循环和循环内 `break / continue`
@@ -71,12 +73,13 @@ std::vector<std::shared_ptr<pcdata>>
 
 当前实现会完成以下工作：
 
-- 创建 `MFileUnit`
+- 创建 `IRModule` 和 `MFileUnit`
 - 为每个 parser 单元创建 `ScriptUnit` 或 `FunctionUnit`
+- 为匿名函数表达式创建 module 级 `AnonymousFunctionUnit`
 - 在 lowering 前先识别入口单元和文件内 local `FunctionUnit`
 - 为函数从 `mFileFunc` AST 预声明参数 slot 和返回值 slot
 - 为每个 unit 创建 `entry` 基本块
-- lower 当前 `test0 / test1 / test2 / test3 / test4` 语法样例所需的语句/表达式子集：
+- lower 当前 smoke 语法样例所需的语句/表达式子集：
   - 简单赋值
   - 数值字面量
   - 名字读取
@@ -84,6 +87,10 @@ std::vector<std::shared_ptr<pcdata>>
   - 二元运算
   - 名字形式的圆括号应用
   - 带输出参数的圆括号应用语句
+  - 多返回值调用和 `~` 占位输出位
+  - 具名函数句柄 `@name`
+  - 匿名函数句柄 `@(args) expr`
+  - 值圆括号应用 `value_apply`
   - 文件内 `local` 函数的最小分派
   - `if / else`
   - `switch / case / otherwise`，当前采用 `switch.dispatch / switch.case /
@@ -118,7 +125,9 @@ std::vector<std::shared_ptr<pcdata>>
   则表达式会直接 lower 成 `CallInst(dispatch_type = MFunction)`；若已经被局部变量
   遮蔽，则回退为普通 `UnaryInst` / `BinaryInst`
 - lowering 阶段的静态名字查询统一走两个入口：
-  - `lookup_var(name)` 查询当前 lowering 已知的变量表，当前底层来自 slot 名字绑定表。
+  - `lookup_var(name)` 查询当前 lowering 已知的变量表，当前底层来自 `IRLowerer` 按
+    `CodeUnit` 保存的 `name -> SlotId` side table。这张表只属于 lowering 期语义状态，
+    不由 `IRBuilder` 持有，也不进入最终 IR。
   - `lookup_method(name)` 查询当前 lowering 已知的函数表，当前只包含文件内 local 函数；
     后续预留接入 `import A.a` 和嵌套函数。
 - `@name` 应 lower 成 `CreateNamedFunctionHandleInst`。该节点表达的是“构造具名函数句柄”，
@@ -131,6 +140,11 @@ std::vector<std::shared_ptr<pcdata>>
   - 该指令结果类型固定为 `function_handle scalar`。
 - `WorkspaceHandle` hidden slot 只出现在 `ScriptUnit`，并在第一次脚本名字读写时按需创建；
   当前脚本环境槽位名字采用 `<script_name>_env`
+- `@(args) expr` 会 lower 成 `CreateAnonymousFunctionHandleInst`，并在
+  `IRModule::anonymous_functions` 中创建 `AnonymousFunctionUnit`。捕获变量在构造点先
+  lower 成外层 `ValueId`，匿名函数体内部通过自己的 `Capture` slot 读取捕获值。
+- 多返回值调用按左值列表长度生成结果位；`~` 占位输出位保留位次，但不创建真实
+  `ValueId`，printer 显示为 `[]`。
 
 ### 源码位置
 
@@ -157,7 +171,7 @@ std::vector<std::shared_ptr<pcdata>>
 `IRLowerer` 不直接操作 `MFileUnit / Slot / Instruction` 细节，而是通过 `IRBuilder` 落地：
 
 - `IRBuilder` 负责对象创建、插入点管理和 CFG 边维护
-- `IRLowerer` 负责 AST 语义决策、名字分类和源码位置桥接
+- `IRLowerer` 负责 AST 语义决策、名字分类、lowering 期名字绑定和源码位置桥接
 
 block 的创建与 `entry` 指定现在由 `CodeUnit` 自身完成，builder 只维护当前插入点。
 
@@ -165,31 +179,11 @@ block 的创建与 `entry` 指定现在由 `CodeUnit` 自身完成，builder 只
 
 当前端到端闭环测试是：
 
-- `test/smoke_test/syntax/test0_smoke.cpp`
-- `test/smoke_test/syntax/test0_1_smoke.cpp`
-- `test/smoke_test/syntax/test1_smoke.cpp`
-- `test/smoke_test/syntax/test1_1_smoke.cpp`
-- `test/smoke_test/syntax/test2_smoke.cpp`
-- `test/smoke_test/syntax/test2_1_smoke.cpp`
-- `test/smoke_test/syntax/test2_2_smoke.cpp`
-- `test/smoke_test/syntax/test2_3_smoke.cpp`
-- `test/smoke_test/syntax/test3_smoke.cpp`
-- `test/smoke_test/syntax/test3_1_smoke.cpp`
-- `test/smoke_test/syntax/test3_2_smoke.cpp`
-- `test/smoke_test/syntax/test3_3_smoke.cpp`
-- `test/smoke_test/syntax/test4_smoke.cpp`
-- `test/smoke_test/syntax/test4_1_smoke.cpp`
-- `test/smoke_test/syntax/test4_2_smoke.cpp`
-- `test/smoke_test/syntax/test4_3_smoke.cpp`
+- 语法样例：`test/smoke_test/syntax/*_smoke.cpp`
+- 功能样例：`test/smoke_test/feature/*_smoke.cpp`
 
 它会：
 
-- parse `test/m/test0/test0.m` / `test/m/test0/test0_1.m` / `test/m/test1/test1.m` /
-  `test/m/test1/test1_1.m` / `test/m/test2/test2.m` / `test/m/test2/test2_1.m` /
-  `test/m/test2/test2_2.m` / `test/m/test2/test2_3.m` / `test/m/test3/test3.m` /
-  `test/m/test3/test3_1.m` / `test/m/test3/test3_2.m` / `test/m/test3/test3_3.m` /
-  `test/m/test4/test4.m` / `test/m/test4/test4_1.m` / `test/m/test4/test4_2.m` /
-  `test/m/test4/test4_3.m`
 - build 成 `IR` 并检查结构完整、没有 `Error` 诊断
 - 校验各自的核心侧重点是否 lower 正确：
   - `test1`：脚本里即使定义了 local `sin`，主体中的 `sin(a)` 仍保留为 `apply`
@@ -213,6 +207,8 @@ block 的创建与 `entry` 指定现在由 `CodeUnit` 自身完成，builder 只
     `for.latch / while.latch`
   - `test4_3`：`switch case` 包裹 `for / while` 时，循环内 `break / continue` 命中
     最近循环，循环正常结束后回到 `switch.end`
+  - `test5_1`：具名函数句柄、匿名函数句柄、捕获值和 `value_apply`
+  - `test7`：多返回值签名、多结果 `call` 和 `~` 占位输出位
 - 调用 `ir_print` 打印文本 IR
 - 校验关键打印结果与源码行号注释
 
@@ -222,7 +218,7 @@ block 的创建与 `entry` 指定现在由 `CodeUnit` 自身完成，builder 只
 
 - `switch` 的字符串、对象、枚举等完整匹配语义
 - `try / catch`
-- 嵌套函数、匿名函数、闭包
+- 嵌套函数和完整闭包 runtime
 - `global / persistent`
 - `eval` / 动态名字解析
 - 更复杂的 `A(...)` 消歧

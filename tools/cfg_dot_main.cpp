@@ -169,7 +169,9 @@ bool verify_lowering_result(const baltam::IRBuildResult& result) {
         }
     }
 
-    const baltam::IRVerifyResult verify_result = baltam::verify_ir(*result.mfile);
+    const baltam::IRVerifyResult verify_result = result.module != nullptr
+        ? baltam::verify_ir(*result.module)
+        : baltam::verify_ir(*result.mfile);
     if (!verify_result.ok()) {
         for (const baltam::IRVerifyDiagnostic& diagnostic : verify_result.diagnostics) {
             if (diagnostic.severity == baltam::IRVerifyDiagnostic::Error) {

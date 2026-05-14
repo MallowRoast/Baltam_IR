@@ -1,6 +1,7 @@
 # `runtime_private_plus_dispatch_probe` 观察记录
 
-本文记录 [runtime_private_plus_dispatch_probe.m](/home/zj/Desktop/Matlab/test/m/operator_plus_dispatch/runtime_private_plus_dispatch_probe.m:1) 的可观测现象，并给出一个足够解释这些现象的工作模型；这里不试图声称已经完整还原 MATLAB 的内部实现。
+本文记录 `runtime_private_plus_dispatch_probe.m` 的可观测现象，并给出一个足够解释这些现象的
+工作模型；这里不试图声称已经完整还原 MATLAB 的内部实现。
 
 ## 1. 脚本概览
 
@@ -238,7 +239,7 @@ end
 
 ### 3.1 `clear plus` 与 `rehash` 的顺序
 
-补充 probe 见 [add_private_clear_plus_order_probe.m](/home/zj/Desktop/Matlab/test/m/operator_plus_dispatch/add_private_clear_plus_order_probe.m:1)。
+补充 probe：`add_private_clear_plus_order_probe.m`。
 
 新增 `private/plus.m` 之后，针对 `plus(1, 2)`：
 
@@ -316,7 +317,7 @@ end
 
 ### 3.2 `inaccessible error` 的抛出阶段
 
-补充 probe 见 [inaccessible_error_stage_probe.m](/home/zj/Desktop/Matlab/test/m/operator_plus_dispatch/inaccessible_error_stage_probe.m:1)。
+补充 probe：`inaccessible_error_stage_probe.m`。
 
 这个 probe 先让 `caller/private/foo.m` 返回 `901`，同时在 path 上放一个 `base/foo.m` 返回 `101`，然后删除 `private/foo.m`：
 

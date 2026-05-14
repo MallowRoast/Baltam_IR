@@ -89,7 +89,8 @@
 - 只有“函数体重新加载”与“当前可见性已刷新”同时成立时，`1 + 2` 才会按当时的 `private` 状态重新分派，再决定是否还能折叠。
 - 对这个 probe 而言，这通常对应 `clear functions + rehash` 或 `rehash + clear functions`；前者保证调用点绑定失效，后者保证重建绑定时看到的是新的文件系统状态。
 
-`runtime_private_plus_dispatch_probe` 的具体过程与观测结果见 [runtime_private_plus_dispatch_probe.md](/home/zj/Desktop/Matlab/doc/runtime_private_plus_dispatch_probe.md:1)。
+`runtime_private_plus_dispatch_probe` 的具体过程与观测结果见
+[runtime_private_plus_dispatch_probe.md](./runtime_private_plus_dispatch_probe.md)。
 
 ## 4. 后续计划
 
@@ -110,4 +111,6 @@
 
 ## 附录
 
-`runtime_private_plus_dispatch_probe` 的完整观察记录、现象矩阵，以及 `clear plus` / `clear functions` / `rehash` 的差异，见 [runtime_private_plus_dispatch_probe.md](/home/zj/Desktop/Matlab/doc/runtime_private_plus_dispatch_probe.md:1)。
+`runtime_private_plus_dispatch_probe` 的完整观察记录、现象矩阵，以及 `clear plus` /
+`clear functions` / `rehash` 的差异，见
+[runtime_private_plus_dispatch_probe.md](./runtime_private_plus_dispatch_probe.md)。

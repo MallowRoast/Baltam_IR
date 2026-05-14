@@ -9,8 +9,9 @@ void verify_complete_ir(const IRBuildResult& result) {
     smoke_test::require_ir_is_complete(result);
     smoke_test::require(result.mfile->is_function_file(), "test5_1 应构造成函数文件");
     smoke_test::require(result.mfile->code_units.size() == 1, "test5_1 应只生成主函数代码单元");
+    smoke_test::require(result.module != nullptr, "test5_1 应生成 IR module");
     smoke_test::require(
-        result.mfile->anonymous_functions.functions.size() == 1,
+        result.module->anonymous_functions.functions.size() == 1,
         "test5_1 应生成一个匿名函数体");
 }
 
@@ -43,7 +44,7 @@ void verify_outer_function(const IRBuildResult& result) {
 }
 
 void verify_anonymous_body(const IRBuildResult& result) {
-    const auto& anon_functions = result.mfile->anonymous_functions.functions;
+    const auto& anon_functions = result.module->anonymous_functions.functions;
     smoke_test::require(!anon_functions.empty() && anon_functions.front() != nullptr,
                         "匿名函数体不能为空");
 

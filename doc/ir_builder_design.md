@@ -6,11 +6,10 @@
 
 `IRBuilder` 是一层低层原始构造器，职责很收敛：
 
-- 创建 `MFileUnit / ScriptUnit / FunctionUnit`
+- 创建 `IRModule / MFileUnit / ScriptUnit / FunctionUnit / AnonymousFunctionUnit`
 - 维护当前 unit 的插入点
-- 分配 `SlotId / ValueId`
+- 分配 `SlotId / ValueId / AnonymousFunctionId`
 - 创建 slot / hidden slot
-- 维护静态名字到 `SlotId` 的绑定
 - 追加指令并同步维护 CFG 边
 - 收集构建期诊断
 
@@ -25,12 +24,13 @@
 - `begin_file(...)`
 - `begin_script_unit(...)`
 - `begin_function_unit(...)`
+- `begin_anonymous_function_unit(...)`
+- `set_current_unit(...)`
 - `set_insert_point(...)`
 - `create_slot(...)`
 - `create_hidden_slot(...)`
 - `create_value()`
-- `bind_name(...)`
-- `find_name(...)`
+- `create_anonymous_function_id()`
 - `append_instruction(...)`
 - `finish()`
 
@@ -49,6 +49,7 @@ builder 只维护“当前插入点”，不再负责 block 的创建和入口�
 
 - AST 语义判定
 - 名字按 `slot / workspace` 分类
+- lowering 期 `name -> SlotId` 绑定
 - `if` 等结构化语句展开
 - 源码 `location -> SourceSpan` 桥接
 
@@ -68,17 +69,18 @@ IRBuildDiagnostic
 - 没有活动 unit 或 block
 - 重复 hidden slot
 - terminator 后继续插指令
-- 当前名字绑定缺少有效 `SlotId`
 
 ### 2. `IRBuildResult`
 
 ```text
 IRBuildResult
-  mfile        : unique_ptr<MFileUnit>
-  diagnostics  : IRBuildDiagnostic[]
+  module      : unique_ptr<IRModule>
+  mfile       : MFileUnit*
+  diagnostics : IRBuildDiagnostic[]
 ```
 
-builder 和 lowering 当前统一复用这一个结果结构。
+`module` 拥有所有文件单元和匿名函数体；`mfile` 是便利裸指针，指向本次文件级 lowering
+入口对应的 `MFileUnit`。
 
 ### 3. `IRUnitBuildState`
 
@@ -89,7 +91,6 @@ IRUnitBuildState
   unit            : CodeUnit*
   current_block   : BasicBlock*
   ids             : IRIdAllocator
-  name_bindings   : unordered_map<InternedString, SlotId>
 ```
 
 字段职责如下：
@@ -100,10 +101,6 @@ IRUnitBuildState
   当前插入点
 - `ids`
   当前 unit 内的 `SlotId / ValueId` 分配器
-- `name_bindings`
-  当前 unit 的静态名字表，只保存 `name -> SlotId`。
-  在函数 lowering 中，它除了服务局部 slot 绑定外，也会参与 `A(...)` 的分派：
-  已绑定名字保留为 `apply`，未绑定名字可直接收敛成 `call`
 
 ### 4. `IRIdAllocator`
 
@@ -117,26 +114,29 @@ IRIdAllocator
 
 - `SlotId` 按 unit 局部递增
 - `ValueId` 按 unit 局部递增
+- `AnonymousFunctionId` 按 module 递增
 
-builder 不跨 unit 共享 ID 分配器。
+builder 不跨 unit 共享 `SlotId / ValueId` 分配器。
 
-## 当前名字绑定模型
+## 名字绑定归属
 
-当前 builder 不再维护额外的名字绑定结构体，也不再区分“调用绑定”。
+`IRBuilder` 不维护名字绑定。lowering 期 `name -> SlotId` 是 AST 语义作用域状态，
+由 `IRLowerer` 的每个 `CodeUnit` side table 持有。
 
-`name_bindings` 只服务静态 slot 名字：
+这张 lowering 表只服务静态 slot 名字：
 
 - 函数参数名
 - 函数返回值名
 - 已创建的 local 名
+- 匿名函数参数名和捕获名
 
 script 名字访问不进入这张表，而是直接 lower 成：
 
 - `LoadWorkspaceInst`
 - `StoreWorkspaceInst`
 
-因此 builder 里的名字表现在本质上就是一个 `name -> SlotId` 的 side table。
-函数调用是否能从 `apply` 收敛成 `call`，也依赖这张表中“名字是否已经被绑定成变量”这一事实。
+函数调用是否能从 `apply` 收敛成 `call`，依赖 `IRLowerer` 中“名字是否已经被绑定成变量”
+这一事实。builder 只负责创建 slot 本身，不判断源码名字语义。
 
 ## 构建期不变量
 
@@ -157,6 +157,7 @@ builder 当前主动维护这些约束：
 - AST 遍历
 - parser 接口调用
 - workspace / global / dynamic call 解析
+- lowering 期名字绑定
 - verifier 全量校验
 - bytecode lowering
 
@@ -170,7 +171,7 @@ builder 当前主动维护这些约束：
 parse_mfile()
   -> IRLowerer
   -> IRBuilder
-  -> MFileUnit / CodeUnit / BasicBlock / Instruction
+  -> IRModule / MFileUnit / CodeUnit / BasicBlock / Instruction
 ```
 
 其中：
