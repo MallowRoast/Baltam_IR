@@ -1,14 +1,13 @@
 #pragma once
 
 #include "ir/ir_lowering.h"
-#include "ir/ir_print.h"
 #include "ir/ir_verify.h"
 
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 
 namespace baltam::smoke_test {
 
@@ -24,7 +23,6 @@ inline void require(bool condition, const char* message) {
 
 struct SmokeArtifacts {
     IRBuildResult result;
-    std::string printed_ir;
 };
 
 inline SmokeArtifacts build_ir(std::string_view mfile_path) {
@@ -33,10 +31,6 @@ inline SmokeArtifacts build_ir(std::string_view mfile_path) {
 
     require(artifacts.result.module != nullptr, "结果 IR module 不能为空");
     require(artifacts.result.mfile != nullptr, "结果文件单元不能为空");
-
-    IRPrintOptions print_options;
-    print_options.load_source_from_path = true;
-    artifacts.printed_ir = format_ir(*artifacts.result.module, print_options);
     return artifacts;
 }
 
@@ -153,17 +147,49 @@ inline const Instruction* find_first_instruction(
     return nullptr;
 }
 
-inline std::string find_line_containing(
-    std::string_view text,
-    std::string_view needle) {
-    std::istringstream input{std::string(text)};
-    std::string line;
-    while (std::getline(input, line)) {
-        if (line.find(needle) != std::string::npos) {
-            return line;
+inline const SlotInfo* find_slot_by_name(
+    const CodeUnit& unit,
+    std::string_view name) {
+    for (const SlotInfo& slot : unit.slot_table.slots) {
+        if (slot.name == name) {
+            return &slot;
         }
     }
-    return {};
+    return nullptr;
+}
+
+inline const SlotInfo* find_slot_by_tag(
+    const CodeUnit& unit,
+    SlotTag tag) {
+    for (const SlotInfo& slot : unit.slot_table.slots) {
+        if (slot.slot.tag == tag) {
+            return &slot;
+        }
+    }
+    return nullptr;
+}
+
+inline bool operand_is_slot(const Operand& operand, Slot slot) {
+    return std::holds_alternative<Slot>(operand) &&
+        std::get<Slot>(operand) == slot;
+}
+
+inline bool block_stores_slot_name(
+    const BasicBlock& block,
+    const CodeUnit& unit,
+    std::string_view name) {
+    for (const auto& inst_ptr : block.instructions) {
+        if (inst_ptr == nullptr || inst_ptr->type() != Instruction::StoreSlot) {
+            continue;
+        }
+
+        const auto& store = static_cast<const StoreSlotInst&>(*inst_ptr);
+        const SlotInfo* slot = unit.slot_table.find_slot(store.slot);
+        if (slot != nullptr && slot->name == name) {
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace baltam::smoke_test

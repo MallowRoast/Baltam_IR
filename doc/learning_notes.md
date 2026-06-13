@@ -61,7 +61,7 @@
 - `World age in Julia: Optimizing method dispatch in the presence of eval`
   DOI: https://dl.acm.org/doi/10.1145/3428275
 
-### 3. `load_slot / store_slot` 到寄存器化 / SSA 提升的经典做法
+### 3. `load / store` 到寄存器化 / SSA 提升的经典做法
 
 后续需要系统复习和对照实现的点：
 

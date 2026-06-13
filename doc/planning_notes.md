@@ -107,7 +107,7 @@
 
 在普通函数里，局部变量槽位比脚本名字更适合做 SSA 化，原因主要有这些：
 
-- 不会像脚本那样依赖动态 workspace 名字查找
+- 不会像脚本 `ScriptVar` 那样依赖 caller/base 绑定，以及绑定失效后的动态 lookup
 - 普通调用不会把这些局部变量当成可回写入参去修改
 - 参数、返回值和局部变量一旦绑定成 slot，语义通常更稳定
 
@@ -116,7 +116,7 @@
 但这里不能简单地说“函数里的 slot 都可以 SSA 化”，至少还要考虑以下几类例外：
 
 1. 控制流合流。`if / else`、循环之后，同一个变量会有多次定义，需要 `phi` 或等价机制。这不是不能 SSA，而是要做完整 SSA 构造。
-2. `global` / `persistent`。它们比脚本 workspace 更稳定，但也不等同于普通局部 slot，因为底层存储不只属于当前 frame。
+2. `global` / `persistent`。它们比脚本 `ScriptVar` 的运行时绑定更稳定，但也不等同于普通局部 slot，因为底层存储不只属于当前 frame。
 3. `eval`、`assignin`、`clear` 之类会破坏环境稳定性的操作。这些点会切断许多 SSA 假设。
 4. `nested function` / closure。若外层局部被内层捕获，它就不再是纯当前函数私有 slot。
 5. 索引或成员更新。例如 `a.x = 1`、`a(i) = 2`。即使 `a` 是局部变量，也往往需要更细的对象更新建模，而不是简单改写成 SSA 名字重绑定。
@@ -124,12 +124,12 @@
 如果把这件事压缩成更接近 pass 入口条件的说法，更稳妥的结论是：
 
 - 普通函数中的纯局部 slot，原则上很适合 SSA 化
-- 脚本中的 workspace 名字不适合作为默认 SSA 主体
+- 脚本中的 `ScriptVar` slot 不适合作为默认 SSA 主体
 - `global`、`persistent`、closure 捕获变量和受动态环境影响的名字，不应默认按纯 SSA 局部处理
 
 如果要把这条原则压缩成一句设计话，可以写成：
 
-> 在函数中，未逃逸、未被特殊语义影响的局部 slot，可作为寄存器化 / SSA lowering 的主要对象；脚本名字、`global`、`persistent`、closure 捕获变量以及受动态环境影响的名字，不应默认按纯 SSA 局部处理。
+> 在函数中，未逃逸、未被特殊语义影响的局部 slot，可作为寄存器化 / SSA lowering 的主要对象；脚本 `ScriptVar`、`global`、`persistent`、closure 捕获变量以及受动态环境影响的名字，不应默认按纯 SSA 局部处理。
 
 后面的寄存器化 / SSA 提升 pass，基本就是按这条边界来落地：先在 function 内的纯局部 slot 上做，再逐步扩展到跨 block 的完整 SSA 构造。
 
@@ -151,21 +151,16 @@
 
 重点不是把 pass 设计一次写死，而是先把“为什么值得做”和“最小触发条件”记清楚，避免后续实现时又回到 script / function 名字语义是否稳定的老问题上。
 
-### Pass 1：脚本 `LoadWorkspaceInst` 降级到 `LoadSlotInst`
+### Pass 1：脚本 `ScriptVar` slot 绑定稳定性分析
 
 #### 目标
 
-在 script IR 中，尽可能把原本保守生成的：
+script lowering 已经为源码中静态出现的变量创建 `ScriptVar` slot，并把读写 lower 成
+`LoadSlotInst` / `StoreSlotInst`。这个 pass 的目标不是替换指令种类，而是分析这些
+`ScriptVar` slot 在一段区间内的运行时绑定是否稳定。
 
-- `LoadWorkspaceInst`
-  打印时显示为 `load_env`
-
-收敛成：
-
-- `LoadSlotInst`
-  打印时显示为 `load_slot`
-
-这样做的核心动机是：当前 script lowering 把名字读取统一建模成 workspace 访问，是一个正确但偏保守的基线。如果后续 pass 能证明某段区间内某个名字的含义已经稳定，就没有必要继续保留动态按名查询。
+如果能证明某个 `ScriptVar` slot 的绑定未失效，执行层就可以直接访问已绑定存储；如果绑定
+已经失效，运行时再回退到按名字 lookup，并按当前规则重新绑定或报错。
 
 #### 当前已知的两类机会
 
@@ -176,39 +171,42 @@
 - 某个符号先被定义
 - 在下一次重新定义之前，后续只发生读取，不再发生新的写入
 
-在这种情况下，这一段 use 链上的 `LoadWorkspaceInst` 可以收敛成读取一个稳定 slot。
+在这种情况下，这一段 use 链上的 `LoadSlotInst(ScriptVar)` 可以直接读取稳定绑定。
 
 可以把它理解成 script 层的一个局部名字稳定区间分析：
 
-- `StoreWorkspaceInst @a`
-- 后面若干次 `LoadWorkspaceInst @a`
-- 直到下一次 `StoreWorkspaceInst @a` 之前
+- `StoreSlotInst(ScriptVar @a)`
+- 后面若干次 `LoadSlotInst(ScriptVar @a)`
+- 直到下一次 `StoreSlotInst(ScriptVar @a)`、`clear a` 或其他绑定失效点之前
 
-这一段读取都可以改写成针对同一个 slot 的 `load_slot`。
+这一段读取都可以走同一个已绑定存储，不需要每次重新按名字 lookup。
 
 ##### 2. 脚本在函数中被调用
 
-当 script 是在函数上下文中被调用时，script 中的名字语义可能已经不再需要完整保留为“开放 workspace 查询”。如果调用边界已经把相关符号收紧为单一含义，那么脚本内部对这些名字的读取也有机会进一步收敛成 `load_slot`。
+当 script 是在函数上下文中被调用时，脚本自己的 `ScriptVar` slot 可以在运行时绑定到
+caller 中同名的静态 slot，或绑定到 caller/base 的动态环境存储。如果调用边界已经把相关
+符号收紧为单一存储位置，那么脚本内部对这些名字的读写就可以直接访问该绑定位置。
 
 这一类场景本质上依赖更强的调用上下文信息，但它值得单独记下来，因为它和“裸 script 顶层执行”不是同一类保守性要求。
 
 #### 预期收益
 
-- 减少动态 workspace 查询
+- 减少动态 lookup
 - 让 script 与 function 在局部稳定区间内共享更多 IR 形状
 - 为后续调用分派收敛提供更强的前提
 
 #### 需要注意的问题
 
 - 这个 pass 不能只看名字是否出现，还要看 def-use 的区间边界
-- 若后续引入 `global`、`persistent`、`eval` 或其他动态名字特性，需要重新评估可收敛范围
-- 这里当前只明确记录 `LoadWorkspaceInst -> LoadSlotInst`，不等价于所有 `StoreWorkspaceInst` 也可以直接改写
+- `clear`、`eval`、`assignin`、脚本重入、`global`、`persistent` 等都可能让绑定失效
+- 即使 IR 指令仍是 `load` / `store`，执行层也必须能在绑定失效时退回动态 lookup
 
 ### Pass 2：脚本中的 `apply` 降级到 `call`
 
 #### 目标
 
-在 script IR 中，当前 `A(...)` 会保守 lower 成 `apply`，因为在一般脚本场景下，名字 `A` 的含义未必稳定，可能是函数，也可能被 workspace 中的同名变量遮蔽。
+在 script IR 中，当前 `A(...)` 会保守 lower 成 `apply`，因为在一般脚本场景下，名字 `A`
+的含义未必稳定，可能是函数，也可能被脚本变量、base/caller 绑定或动态 env 中的同名变量遮蔽。
 
 如果后续 pass 已经证明某个 script 名字在当前位置只能有一个含义，那么：
 
@@ -233,7 +231,7 @@
 #### 需要注意的问题
 
 - 这个 pass 的正确性依赖于名字含义稳定性，而不是语法形状本身
-- 如果某个名字仍可能被 workspace 中的变量遮蔽，就必须保留 `apply`
+- 如果某个名字仍可能被脚本变量或动态 env 中的变量遮蔽，就必须保留 `apply`
 - 因此它更像是“名字消歧 pass”的后半段，而不是一个单纯的指令替换 pass
 
 ### Pass 3：对可静态确定目标的 `M` 函数做内联
@@ -246,8 +244,8 @@
 
 初版内联 pass 不追求“一上来就支持所有 `M` 函数”，而是先把最容易证明正确的一小类场景收进来。更合适的前提大致是：
 
-- `callee` 可以静态分派，最好已经是 `dispatch_type = MFunction` 的 `call mfunc`，
-  至少也应是名字绑定稳定的直接 `call`
+- `callee` 已经由后续名字解析 pass 静态分派，最好是 `dispatch_type = MFunction` 的
+  `call mfunc`；基础 lowering 生成的动态 direct `call` 不能直接作为内联前提
 - `caller` 和 `callee` 都是 `FunctionUnit`，暂不考虑 `script`
 - `callee` 没有复杂控制流，初版先限制为单一线性 block，不含 `branch`、循环和多出口 `return`
 - `callee` 不包含 `eval`、`assignin`、`clear`、`addpath`、`cd` 等会破坏环境稳定性的操作
@@ -274,11 +272,11 @@
 - script 名字、动态环境操作、`global` / `persistent`、closure 都会显著提高正确性成本
 - 先限制为无复杂控制流，可以避免一开始就引入 block 拼接、`phi` 合流和更多 CFG 变换细节
 
-### Pass 4：函数中纯局部 `load_slot` / `store_slot` 的寄存器化与 SSA 提升
+### Pass 4：函数中纯局部 `load` / `store` 的寄存器化与 SSA 提升
 
 #### 目标
 
-在 function IR 中，把满足前提的 `load_slot` / `store_slot` 收敛成更接近寄存器式 `ValueId` 的数据流，减少 frame slot 往返，并为后续常量传播、类型分析、DCE 和算术优化提供更干净的输入。
+在 function IR 中，把满足前提的 `load` / `store` 收敛成更接近寄存器式 `ValueId` 的数据流，减少 frame slot 往返，并为后续常量传播、类型分析、DCE 和算术优化提供更干净的输入。
 
 这里说的“寄存器化”不一定要求主 `IR` 立刻整体改写成全局常驻 SSA。更实际的第一步是：
 
@@ -290,7 +288,7 @@
 初版更适合先处理一小类纯函数局部场景：
 
 - 当前 unit 是 `FunctionUnit`，而不是 `ScriptUnit`
-- 只处理参数、局部变量、返回值这类普通 frame slot；不处理 `hidden slot`
+- 只处理参数、局部变量、返回值这类普通 frame slot；不处理 `ScriptVar` 和 ABI/special slot
 - 对应 slot 不是 `global`、`persistent`
 - 对应 slot 没有被 `nested function` / closure 捕获，也不存在其他逃逸路径
 - 当前 basic block 或 region 中不包含 `eval`、`assignin`、`clear`、`addpath`、`cd` 等会破坏环境稳定性的操作
@@ -300,9 +298,9 @@
 #### 基本做法
 
 - 为每个候选 slot 维护当前可用的 reaching value
-- `load_slot` 若能命中当前已知值，则直接改写成该值
-- `store_slot` 不再急着物化成 frame 写入，而是先更新该 slot 的当前值状态
-- 对没有后续观察者的冗余 `store_slot` 做删除
+- `load` 若能命中当前已知值，则直接改写成该值
+- `store` 不再急着物化成 frame 写入，而是先更新该 slot 的当前值状态
+- 对没有后续观察者的冗余 `store` 做删除
 - 在 region 出口、显式 `return` 或其他需要物化 frame 状态的位置，再决定是否回写 slot
 - 扩展到跨 block 时，再补 `phi`、live-in / live-out 和支配关系处理
 
@@ -329,8 +327,9 @@
 
 这条 pass 更适合先用于函数文件。
 
-原因是当前函数文件中的 local 调用已经会显式 lower 成
-`dispatch_type = MFunction` 的 `CallInst`，可达性边比较清楚。
+这条 pass 依赖前置名字解析 pass 已经把可证明稳定的 local 调用收敛成
+`dispatch_type = MFunction` 的 `CallInst`。基础 lowering 中的动态 direct `call`
+还不能作为可达性边。
 
 脚本文件中的 local 函数原则上也可以删除，因为文件外部无法直接访问它们；但脚本场景要额外排除几类情况：
 
@@ -357,6 +356,13 @@ CFG 清理规则处理。
 - 合并空的直通 block，例如只包含 `br label %next` 且没有必须保留的语义标记。
 - 折叠连续跳转，例如 `A -> B -> C` 中 `B` 只是空跳转块时，把 `A` 改跳 `C`。
 - 合并只有一个 predecessor、一个 successor，且不会改变源码注释 / debug 边界语义的 block。
+- 清理 canonical loop 中确认多余的 block：
+  - `while.latch` 只有回跳且没有显式 `continue` 以它为目标时，可以把前驱改跳
+    `while.header` 后删除该 latch。
+  - `for.latch` 若没有显式 `continue` 以它为目标、只有唯一 predecessor，且只包含内部
+    index 自增和回跳，可以把这些指令合并到 predecessor 末尾后删除该 latch。
+  - `for.end / while.end` 若没有 `break` 或其他控制流边以它为目标，且只是空直通块，
+    可以按普通空块规则合并。
 - 删除或更新过时的 predecessor / successor 边，保证 CFG 边和 terminator 目标一致。
 
 #### 与 `for` lowering 的关系
@@ -369,7 +375,9 @@ for.preheader -> for.header -> for.body -> for.latch -> for.header
 ```
 
 后续如果某个具体循环没有 `break / continue`，且 `latch` 只包含简单自增和回跳，
-CFG simplify 可以选择性地把 `body -> latch` 这类结构压缩掉。
+CFG simplify 可以选择性地把 `body -> latch` 这类结构压缩掉。这里的“去除循环中的
+多余 block”必须由 CFG simplify 完成，并且每次删除或合并 block 后都要同步更新
+terminator、predecessor/successor 和 verifier 可见的 CFG 状态。
 
 但这个优化不应在 lowering 阶段做，原因是：
 
@@ -388,7 +396,34 @@ CFG simplify 可以选择性地把 `body -> latch` 这类结构压缩掉。
 第一阶段更建议默认保守：先提供 pass 和测试，不急着改变当前 smoke test 的打印基线。
 等需要面向执行性能时，再决定是否默认启用。
 
-### Pass 7：常量折叠
+### Pass 7：块内常量指令去重
+
+#### 目标
+
+在单个 basic block 内，把值完全相同、类型事实相同的 `ConstInst` 合并成一条，减少
+lowering 产生的重复常量，并让后续常量折叠、复制消除和 DCE 看到更短的数据流。
+
+这条 pass 只处理已经物化的 IR 常量指令，不尝试判断 Matlab 表达式是否常量。例如
+`1`、`10` 这样的 `ConstInst` 可以去重，但 `call @colon(%1, %10)` 不能因为参数是常量就
+在这里折叠。
+
+#### 第一阶段可以覆盖的规则
+
+- 按 basic block 建立局部常量表，key 至少包含 `Constant` 内容和 `TypeFact`。
+- 扫描同一 block 时，第一次出现的常量作为 canonical value；后续相同常量的所有 use
+  替换为 canonical `ValueId`。
+- 删除被替换且已经没有 use 的重复 `ConstInst`，同时维护 `ValueTable`、def-use 信息和
+  verifier 约束。
+
+#### 安全边界
+
+- 第一版只做块内去重，因为同一 block 内先出现的常量天然支配后续 use；跨 block 去重要等
+  dominator 信息稳定后再做。
+- 不跨越到 `CallInst / ApplyInst / BinaryInst` 的语义判断；这些属于常量折叠或名字稳定性
+  pass 的职责。
+- 如果源码调试边界要求保留某条非 synthetic 常量指令，可以先只删除 synthetic 重复常量。
+
+### Pass 8：常量折叠
 
 #### 目标
 
@@ -413,7 +448,7 @@ CFG simplify 暴露更多机会。
 
 > 操作语义已经静态确定，并且输入都是可用常量事实。
 
-### Pass 8：复制消除 / copy propagation
+### Pass 9：复制消除 / copy propagation
 
 #### 目标
 
@@ -436,7 +471,7 @@ copy-on-write，也不是函数调用参数的物理复制。
   就不能再按普通别名处理。
 - 当前阶段更适合先做局部、显式 use 列表或扫描式替换版本，等 def-use 基础设施稳定后再扩展。
 
-### Pass 9：死分支消除
+### Pass 10：死分支消除
 
 #### 目标
 
@@ -470,7 +505,7 @@ br label %then
 - 如果条件值来自 `ApplyInst` 或动态 `CallInst`，即使看起来名字是 `true/false` 相关函数，也不能折叠。
 - 对循环分支做消除时要特别注意是否会改变 loop 结构；删除后必须立刻跑 CFG 验证和 CFG simplify。
 
-### Pass 10：死代码消除
+### Pass 11：死代码消除
 
 #### 目标
 
@@ -485,9 +520,9 @@ br label %then
 
 #### 安全边界
 
-- `StoreSlotInst / StoreWorkspaceInst` 不能仅因为结果为空就删除；它们表达写入。
+- `StoreSlotInst` 不能仅因为结果为空就删除；它表达写入。
 - `ApplyInst / CallInst` 默认不能删除，因为可能有副作用、抛错、修改动态环境或触发分派逻辑。
-- `LoadWorkspaceInst` 是否可删除需要谨慎：即使只是读，也可能涉及动态 workspace 查询和错误行为。
+- `LoadSlotInst` 是否可删除需要谨慎：普通 frame slot 的纯读取通常可删，但 `ScriptVar` 绑定失效时可能触发动态 lookup 或错误行为。
 - 删除指令后必须同步更新 `ValueTable`、CFG 状态和后续 use 信息。
 
 第一版 DCE 更适合作为保守 pass：只删除明确 pure、明确无 use 的内容。等 effect model 更细以后，
@@ -498,10 +533,10 @@ br label %then
 当前更合理的实现顺序是：
 
 1. 先做 script 名字稳定区间分析
-2. 基于稳定结果把部分 `LoadWorkspaceInst` 收敛成 `LoadSlotInst`
+2. 基于稳定结果标记部分 `ScriptVar` slot 可直接访问已绑定存储
 3. 再基于同一份稳定信息，把部分 `apply` 收敛成 `call`
-4. 跑一轮基础 cleanup：复制消除、常量折叠、死分支消除、CFG simplify、DCE
-5. 再对满足前提的静态 `call` / `call mfunc` 做函数内联
+4. 跑一轮基础 cleanup：块内常量指令去重、复制消除、常量折叠、死分支消除、CFG simplify、DCE
+5. 再对满足前提、已由名字解析 pass 收敛的 `call mfunc` 做函数内联
 6. 内联后重复基础 cleanup，吃掉内联暴露出来的 copy、常量、死分支和死代码
 7. 再对 function 内的纯局部 slot 做寄存器化 / SSA 提升，先从单 block 或稳定 region 开始
 8. 最后做基于 `MFunction` 调用可达性的 local function DCE；若内联后出现新的死 local 函数，可以再重复一轮

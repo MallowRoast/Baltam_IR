@@ -2,6 +2,11 @@
 
 这份笔记整理了 MATLAB 解释器视角下 `import` 的机制、作用域、执行时机，以及它对名字解析和函数分派的影响。
 
+`import` 对运算符语法的影响有一份独立实测记录，见
+[operator_local_import_dispatch_probe.md](./operator_local_import_dispatch_probe.md)。这里最容易踩坑的是
+`colon`：function 文件中的 `1:3` 不吃 `import A.colon`，但 script 文件中的 `1:3`
+会吃 `import A.colon`。
+
 ## 1. `import` 是什么，以及推荐写法
 
 `import` 的核心作用，不是“加载一个模块对象”，而是：

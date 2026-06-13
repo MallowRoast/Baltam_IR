@@ -106,15 +106,17 @@ ScriptUnit : CodeUnit
   file : MFileUnit*
 ```
 
-脚本变量访问 lower 为 workspace 访问。脚本按需创建 `WorkspaceHandle` hidden slot。
+脚本中静态出现的变量会进入当前脚本单元的 slot 表，slot tag 为 `ScriptVar`。基础
+lowering 不再生成 workspace 读写指令；运行时可以根据 `ScriptVar` slot 的绑定状态决定
+直接访问已绑定存储，或在绑定失效后退回动态 lookup。
 
 ### FunctionUnit
 
 ```text
 FunctionUnit : CodeUnit
   file         : MFileUnit*
-  param_slots  : SlotId[]
-  return_slots : SlotId[]
+  param_slots  : Slot[]
+  return_slots : Slot[]
 ```
 
 `param_slots` 和 `return_slots` 按源码声明顺序保存接口 slot。参数名、返回值名和源码位置由
@@ -126,8 +128,8 @@ FunctionUnit : CodeUnit
 AnonymousFunctionUnit : CodeUnit
   id             : AnonymousFunctionId
   lexical_parent : CodeUnit*
-  param_slots    : SlotId[]
-  capture_slots  : SlotId[]
+  param_slots    : Slot[]
+  capture_slots  : Slot[]
 ```
 
 匿名函数体没有 Matlab 名字空间中的函数名，也没有 `return_slots`。其 body 直接通过
@@ -141,37 +143,50 @@ AnonymousFunctionUnit : CodeUnit
 
 ```text
 SlotTable
-  slots : Slot[]
+  slots : SlotInfo[]
 ```
 
-`Slot`：
+`Slot` 是变量的静态身份：
 
 ```text
 Slot
-  slot_id     : SlotId
-  type        : Arg | Local | InternalLocal | Capture | Ret | Hidden
-  name        : InternedString
-  source_span : SourceSpan
-  attrs       : SlotAttrs
+  id  : SlotId
+  tag : SlotTag
 ```
 
-`SlotAttrs`：
+`SlotInfo` 保存 slot 的 side metadata：
 
 ```text
-SlotAttrs
-  is_mutable  : bool
-  hidden_role : None | Nargin | Nargout | Varargin | Varargout | WorkspaceHandle
-  fixed_type  : Unknown | Int64Scalar
+SlotInfo
+  slot        : Slot
+  name        : InternedString
+  source_span : SourceSpan
+  value_type  : Unknown | Int64Scalar | LogicalScalar
 ```
+
+`SlotTag` 当前包括：
+
+- `BaseVar`
+- `ScriptVar`
+- `Local`
+- `Arg`
+- `Ret`
+- `Capture`
+- `InternalLocal`
+- `Global`
+- `Persistent`
+- `Nargin`
+- `Nargout`
+- `Varargin`
+- `Varargout`
 
 约束：
 
-- `Slot::Capture` 只能出现在 `AnonymousFunctionUnit`。
-- `Slot::Hidden` 必须设置非 `None` 的 `hidden_role`。
-- 非 `Hidden` slot 的 `hidden_role` 必须是 `None`。
-- 除 `None` 外，同一 `HiddenRole` 在一个 `CodeUnit` 中至多出现一次。
-- `WorkspaceHandle` 只能出现在 `ScriptUnit`。
+- `Slot` 是否有效只由 `SlotId` 决定；`SlotTag` 不包含 `Invalid` 哨兵。
+- `ScriptVar` 只能出现在 `ScriptUnit`。
+- `Capture` 只能出现在 `AnonymousFunctionUnit`。
 - `Nargin / Nargout / Varargin / Varargout` 只能出现在 `FunctionUnit`。
+- `Nargin / Nargout / Varargin / Varargout` 在同一个 `CodeUnit` 中同一 tag 至多出现一次。
 
 ## 5. ValueTable
 
@@ -205,7 +220,7 @@ ValueInfo
 - 常量指令按常量种类写入精确类型。
 - `CreateNamedFunctionHandleInst` / `CreateAnonymousFunctionHandleInst` 结果是
   `function_handle scalar`。
-- 带 `fixed_type` 的 slot 被 `load_slot` 读取时可产生固定类型事实。
+- 带 `value_type` 的 slot 被 `LoadSlotInst` 读取时可产生固定类型事实。
 - 部分 internal helper 有手写摘要，例如 `internal.foreach_init` 和
   `internal.switch_match`。
 
@@ -234,7 +249,7 @@ BasicBlock
 `Operand`：
 
 ```text
-Operand = variant<ValueId, SlotId, InternedString>
+Operand = variant<ValueId, Slot, InternedString>
 ```
 
 字面量不直接进入 `Operand`，必须先经 `ConstInst` 物化为 `ValueId`。
@@ -288,7 +303,6 @@ Instruction
 
 `InstAttrs` 当前包括：
 
-- `may_throw`
 - `is_synthetic`
 
 ### 普通数据与环境指令
@@ -298,17 +312,9 @@ Instruction
   - `value : Constant`
 - `LoadSlotInst`
   - `result : ValueId`
-  - `slot_id : SlotId`
+  - `slot : Slot`
 - `StoreSlotInst`
-  - `slot_id : SlotId`
-  - `value : Operand`
-- `LoadWorkspaceInst`
-  - `result : ValueId`
-  - `workspace_handle_slot : SlotId`
-  - `symbol : InternedString`
-- `StoreWorkspaceInst`
-  - `workspace_handle_slot : SlotId`
-  - `symbol : InternedString`
+  - `slot : Slot`
   - `value : Operand`
 - `CopyInst`
   - `result : ValueId`
@@ -319,7 +325,7 @@ Instruction
 - `CreateNamedFunctionHandleInst`
   - `result : ValueId`
   - `name : InternedString`
-  - `resolution_mode : RuntimeLookup | Prebound`
+  - `resolution_mode : Runtime | Static`
   - `bound_dispatch_type : Dynamic | Builtin | Internal | MFunction`
   - `m_function_target : FunctionUnit*`
 - `CreateAnonymousFunctionHandleInst`
@@ -332,14 +338,14 @@ Instruction
 ```text
 CaptureValue
   name           : InternedString
-  source_slot    : SlotId
+  source_slot    : Slot
   captured_value : ValueId
 ```
 
 `source_slot` 的含义取决于外层 unit：
 
 - 外层是函数 / 匿名函数体：被捕获变量自己的静态 slot。
-- 外层是脚本：脚本的 `WorkspaceHandle` hidden slot，`name` 是 workspace symbol。
+- 外层是脚本：被捕获变量自己的 `ScriptVar` slot。
 
 真正表达构造点捕获值的是 `captured_value`。
 
@@ -379,8 +385,8 @@ CaptureValue
   - `lhs : Operand`
   - `rhs : Operand`
 
-运算符如果静态分派到 M 函数，lowering 会生成 `CallInst(dispatch_type = MFunction)`，而不是
-继续保留为 `UnaryInst` / `BinaryInst`。
+基础 lowering 不会仅因为存在同名 local 函数就把运算符静态分派到 M 函数。`MFunction`
+分派应由后续名字解析 / 优化 pass 在完整考虑 `import`、`private`、路径和遮蔽规则后生成。
 
 ### 终结指令
 
@@ -391,19 +397,27 @@ CaptureValue
   - `true_target : BasicBlock*`
   - `false_target : BasicBlock*`
 - `ReturnInst`
-  - `values : Operand[]`
+  - `values : ValueId[]`
 
 ## 9. 打印约定
 
 当前文本 IR 的几个重要约定：
 
-- `LoadWorkspaceInst` 打印为 `load_env`。
-- `StoreWorkspaceInst` 打印为 `store_env`。
+- block label 顶格打印，指令缩进两个空格。
+- block label 默认携带前驱注释，格式为 `label: ; preds = [%pred0, %pred1]`。
+  `entry` 没有前驱时不打印 `preds`。`ir_print --no-cfg` 可关闭这类注释。
+- slot 表打印在 unit 头部，slot 条目比 `; slots:` 再缩进一级。
+- `LoadSlotInst` 打印为 `load %slotN`。
+- `StoreSlotInst` 打印为 `store %slotN, value`。
+- `CreateNamedFunctionHandleInst` 打印为 `create_named_func_handle @name runtime` 或
+  `create_named_func_handle @name static builtin/mfunction ...`。
 - `dispatch_type = MFunction` 的 call 打印为 `call mfunc @name(...)`。
-- `dispatch_type = Internal` 的 direct call 打印为 `call internal.name(...)`。
-- `ValueApplyInst` 打印为 `value_apply %base(...)`。
+- `dispatch_type = Internal` 的 direct call 打印为 `call @internal.name(...)`。
+- `ValueApplyInst` 打印为 `value_apply(%base, ...)`。
 - 多返回值输出打印为 `([%0, type], [%1, type]) = ...`。
 - 空输出位打印为 `[]`，例如 `([], [%4, unknown]) = call mfunc @pair_ops(...)`。
+- 行尾源码注释默认只显示源码行号，例如 `; line 11-13`。需要折叠后的源码片段时，
+  使用 `ir_print --source-full`。
 
 ## 相关文档
 

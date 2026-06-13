@@ -8,12 +8,28 @@
 namespace baltam {
 namespace {
 
+bool label_matches_query(std::string_view label, std::string_view query) {
+    if (label == query) {
+        return true;
+    }
+    constexpr std::string_view switch_prefix = "switch.";
+    if (query.rfind(switch_prefix, 0) != 0 ||
+        label.rfind(switch_prefix, 0) != 0) {
+        return false;
+    }
+
+    const std::string_view kind = query.substr(switch_prefix.size());
+    const std::string suffix = "." + std::string(kind);
+    return label.size() > switch_prefix.size() + suffix.size() &&
+        label.compare(label.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
 std::vector<const BasicBlock*> find_blocks_by_label(
     const CodeUnit& unit,
     std::string_view label) {
     std::vector<const BasicBlock*> blocks;
     for (const auto& block_ptr : unit.basic_blocks) {
-        if (block_ptr != nullptr && block_ptr->label == label) {
+        if (block_ptr != nullptr && label_matches_query(block_ptr->label, label)) {
             blocks.push_back(block_ptr.get());
         }
     }
@@ -49,12 +65,12 @@ void verify_switch_exits_to_for_latch(const CodeUnit& unit) {
     smoke_test::require(found, "for body 中的 switch.end 应回到 for.latch");
 }
 
-void verify_switch_exits_to_while_latch(const CodeUnit& unit) {
+void verify_switch_exits_to_while_header(const CodeUnit& unit) {
     const std::vector<const BasicBlock*> switch_ends = find_blocks_by_label(unit, "switch.end");
-    const std::vector<const BasicBlock*> while_latches =
-        find_blocks_by_label(unit, "while.latch");
+    const std::vector<const BasicBlock*> while_headers =
+        find_blocks_by_label(unit, "while.header");
     smoke_test::require(switch_ends.size() == 2, "应有两个 switch.end");
-    smoke_test::require(while_latches.size() == 1, "应有唯一 while.latch");
+    smoke_test::require(while_headers.size() == 1, "应有唯一 while.header");
 
     bool found = false;
     for (const BasicBlock* block : switch_ends) {
@@ -63,9 +79,9 @@ void verify_switch_exits_to_while_latch(const CodeUnit& unit) {
             continue;
         }
         const auto& go = static_cast<const GotoInst&>(*terminator);
-        found = found || go.target == while_latches.front();
+        found = found || go.target == while_headers.front();
     }
-    smoke_test::require(found, "while body 中的 switch.end 应回到 while.latch");
+    smoke_test::require(found, "while body 中的 switch.end 应回到 while.header");
 }
 
 void verify_core_focus(const IRBuildResult& result) {
@@ -78,28 +94,14 @@ void verify_core_focus(const IRBuildResult& result) {
                         "应生成一层 for.latch");
     smoke_test::require(count_blocks_by_label(*entry, "while.header") == 1,
                         "应生成一层 while.header");
-    smoke_test::require(count_blocks_by_label(*entry, "while.latch") == 1,
-                        "应生成一层 while.latch");
-    smoke_test::require(count_blocks_by_label(*entry, "switch.dispatch") == 2,
-                        "应生成两个 switch.dispatch");
-    smoke_test::require(count_blocks_by_label(*entry, "switch.case") == 4,
-                        "应生成四个 switch.case body 块");
+    smoke_test::require(count_blocks_by_label(*entry, "switch.case") == 2,
+                        "应生成两个 switch.case 判断块");
+    smoke_test::require(count_blocks_by_label(*entry, "switch.body") == 2,
+                        "应生成两个 switch.body 块");
     smoke_test::require(count_blocks_by_label(*entry, "switch.otherwise") == 2,
                         "应生成两个 switch.otherwise");
     verify_switch_exits_to_for_latch(*entry);
-    verify_switch_exits_to_while_latch(*entry);
-}
-
-void verify_printed_ir(const std::string& printed_ir) {
-    smoke_test::require(
-        printed_ir.find("script @test4_2 {") != std::string::npos,
-        "应打印 test4_2 脚本头");
-    smoke_test::require(
-        printed_ir.find("switch.end:\n  br label %for.latch") != std::string::npos,
-        "switch.end 应打印为跳回外层 for.latch");
-    smoke_test::require(
-        printed_ir.find("switch.end.1:\n  br label %while.latch") != std::string::npos,
-        "第二个 switch.end 应打印为跳回外层 while.latch");
+    verify_switch_exits_to_while_header(*entry);
 }
 
 } // namespace
@@ -111,8 +113,6 @@ int main() {
             baltam::smoke_test::build_ir(TEST4_2_MFILE_PATH);
         baltam::verify_complete_ir(artifacts.result);
         baltam::verify_core_focus(artifacts.result);
-        baltam::verify_printed_ir(artifacts.printed_ir);
-        std::cout << artifacts.printed_ir << '\n';
     } catch (const std::exception& ex) {
         std::cerr << "test4_2_smoke 失败: " << ex.what() << '\n';
         return 1;

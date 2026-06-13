@@ -9,7 +9,7 @@
 - 创建 `IRModule / MFileUnit / ScriptUnit / FunctionUnit / AnonymousFunctionUnit`
 - 维护当前 unit 的插入点
 - 分配 `SlotId / ValueId / AnonymousFunctionId`
-- 创建 slot / hidden slot
+- 创建 slot
 - 追加指令并同步维护 CFG 边
 - 收集构建期诊断
 
@@ -28,7 +28,6 @@
 - `set_current_unit(...)`
 - `set_insert_point(...)`
 - `create_slot(...)`
-- `create_hidden_slot(...)`
 - `create_value()`
 - `create_anonymous_function_id()`
 - `append_instruction(...)`
@@ -48,8 +47,8 @@ builder 只维护“当前插入点”，不再负责 block 的创建和入口�
 `IRLowerer` 负责更高层的 lowering 状态，包括：
 
 - AST 语义判定
-- 名字按 `slot / workspace` 分类
-- lowering 期 `name -> SlotId` 绑定
+- 名字分类和 slot 绑定
+- lowering 期 `name -> Slot` 绑定
 - `if` 等结构化语句展开
 - 源码 `location -> SourceSpan` 桥接
 
@@ -67,7 +66,7 @@ IRBuildDiagnostic
 用于承载构建期错误和 warning，例如：
 
 - 没有活动 unit 或 block
-- 重复 hidden slot
+- 无效 slot tag 使用
 - terminator 后继续插指令
 
 ### 2. `IRBuildResult`
@@ -120,20 +119,20 @@ builder 不跨 unit 共享 `SlotId / ValueId` 分配器。
 
 ## 名字绑定归属
 
-`IRBuilder` 不维护名字绑定。lowering 期 `name -> SlotId` 是 AST 语义作用域状态，
+`IRBuilder` 不维护名字绑定。lowering 期 `name -> Slot` 是 AST 语义作用域状态，
 由 `IRLowerer` 的每个 `CodeUnit` side table 持有。
 
 这张 lowering 表只服务静态 slot 名字：
 
+- 脚本中静态出现的变量名
 - 函数参数名
 - 函数返回值名
 - 已创建的 local 名
 - 匿名函数参数名和捕获名
 
-script 名字访问不进入这张表，而是直接 lower 成：
-
-- `LoadWorkspaceInst`
-- `StoreWorkspaceInst`
+script 名字访问也进入这张表，slot tag 为 `ScriptVar`。基础 lowering 会生成
+`LoadSlotInst` / `StoreSlotInst`，文本 IR 打印为 `load` / `store`。运行时再根据
+`ScriptVar` slot 的绑定状态决定是否直接访问已绑定存储，或在绑定失效后退回动态 lookup。
 
 函数调用是否能从 `apply` 收敛成 `call`，依赖 `IRLowerer` 中“名字是否已经被绑定成变量”
 这一事实。builder 只负责创建 slot 本身，不判断源码名字语义。
@@ -145,10 +144,9 @@ builder 当前主动维护这些约束：
 1. 只有存在活动 unit 时才能创建 slot / value。
 2. 只有存在活动 block 时才能追加指令。
 3. `BasicBlock` 一旦已有 terminator，就不能继续追加指令。
-4. 同一个 `CodeUnit` 中，同一 `HiddenRole` 只能有一个 hidden slot。
-5. `WorkspaceHandle` 只能出现在 `ScriptUnit`。
-6. `Nargin / Nargout / Varargin / Varargout` 只能出现在 `FunctionUnit`。
-7. 追加 `GotoInst / BranchInst` 时立即同步维护 `predecessors / successors`。
+4. `Slot` 由 `SlotId` 和 `SlotTag` 组成，是否有效只由 `SlotId` 判断。
+5. `Nargin / Nargout / Varargin / Varargout` 只能出现在 `FunctionUnit`。
+6. 追加 `GotoInst / BranchInst` 时立即同步维护 `predecessors / successors`。
 
 ## Builder 不负责的事
 
@@ -156,7 +154,7 @@ builder 当前主动维护这些约束：
 
 - AST 遍历
 - parser 接口调用
-- workspace / global / dynamic call 解析
+- dynamic env / global / dynamic call 解析
 - lowering 期名字绑定
 - verifier 全量校验
 - bytecode lowering

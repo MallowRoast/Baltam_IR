@@ -2,7 +2,7 @@ function c = test0_1()
 % TEST0_1 覆盖与 test0 对应的函数 lowering / print 闭环。
 %
 % 这个用例用于验证 function 场景下的几个关键点：
-% 1. 参数、返回值和局部变量访问会 lowering 成 load_slot / store_slot
+% 1. 参数、返回值和局部变量访问会 lowering 成 load / store
 % 2. sin(a) 在函数中按函数名分派，因此应生成 call，而不是保留为 apply
 % 3. 继续覆盖返回槽位、if / else 和隐式 ret
 %

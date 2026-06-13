@@ -66,7 +66,7 @@
 - 即使 `a` 已知是 `double`
 - 也不能只凭参数类型断定 `sin` 一定是 builtin
 
-因为它仍可能受 workspace 遮蔽、local 函数、`private`、路径变化等因素影响。
+因为它仍可能受脚本变量或动态 env 遮蔽、local 函数、`private`、路径变化等因素影响。
 
 ## 3. 第一版范围
 
@@ -76,10 +76,11 @@
 
 - IR builder 只写入“构建时能明确知道”的类型事实
 - `ConstInst` 写入精确常量类型事实；`CopyInst` 复制输入值的类型事实
-- `LoadSlotInst` 只有在读取固定类型 slot 时写入类型事实，否则保持 `unknown`
+- `LoadSlotInst` 只有在读取带 `SlotInfo::value_type` 约束的 slot 时写入类型事实，否则保持
+  `unknown`
 - 少数 `dispatch_type = Internal` 的 call / binary primitive 拥有构建期摘要；动态分派
   或未知 internal 目标仍保持 `unknown`
-- `LoadWorkspaceInst`、`UnaryInst`、`ApplyInst` 以及动态 `BinaryInst / CallInst` 在构建阶段
+- `ScriptVar` slot 读取、`UnaryInst`、`ApplyInst` 以及动态 `BinaryInst / CallInst` 在构建阶段
   默认保持 `unknown`
 - `Any` 不作为构建阶段的默认值；它表示后续类型分析已经运行，但只能给出全集上界
 - 先在 `FunctionUnit` 中实现正式类型数据流，再逐步扩大到脚本稳定区间
@@ -246,14 +247,14 @@ ValueInfo* ValueTable::find(ValueId value_id) noexcept {
 
 ### 5.3 `Slot` 只保留可选的类型约束
 
-`Slot` 仍然可以携带一份轻量“声明约束”或“运行时固定角色类型”，但它不应直接等同于当前值类型。
+`SlotInfo` 仍然可以携带一份轻量“声明约束”或“运行时固定角色类型”，但它不应直接等同于当前值类型。
 
 例如：
 
-- `WorkspaceHandle` hidden slot 的运行时对象类型是固定的
-- 以后若支持 builtin ABI 或参数注解，也可以把约束挂在 `Arg/Ret slot` 上
+- lowering 内部的 `InternalLocal` 迭代下标可以声明为 `Int64Scalar`
+- 以后若支持 builtin ABI 或参数注解，也可以把约束挂在 `Arg/Ret` slot 的 metadata 上
 
-但 `load_slot` 产生的 `ValueId` 类型，仍应由 reaching defs 或数据流分析得出。
+但 `load` 产生的 `ValueId` 类型，仍应由 reaching defs 或数据流分析得出。
 
 ## 6. 与调用分派相关的解析事实
 
@@ -297,7 +298,7 @@ struct ResolutionFact {
 IR builder 只写入不依赖数据流、不依赖名字解析、也不依赖 Matlab 动态分派的事实。
 
 - `ConstInst` 直接给出精确类型事实
-- `LoadSlotInst` 如果读取的 slot 带有 `SlotAttrs::fixed_type`，则直接使用该固定类型
+- `LoadSlotInst` 如果读取的 slot 带有 `SlotInfo::value_type` 约束，则直接使用该固定类型
 - `CopyInst` 复制输入值的 `TypeFact`
 - 已知 internal helper / primitive 可以写入保守摘要
 - 其他结果值默认保持 `unknown`
@@ -309,7 +310,7 @@ IR builder 只写入不依赖数据流、不依赖名字解析、也不依赖 Ma
 - `StringLiteralConstant -> string`
 - `EmptyDoubleMatrixConstant`
   如果当前实现能明确表达空 double 矩阵，则可记录为 `double` 且非标量；否则保留 `unknown`
-- `SlotAttrs::Int64Scalar -> int64 scalar`
+- `SlotInfo::value_type = Int64Scalar -> int64 scalar`
 - `internal.foreach_init(iterable) -> (extern scalar, int64 scalar)`
 - `internal.cmp_gt(lhs, rhs) -> logical scalar`
 - `internal.add(lhs, rhs)`
@@ -324,7 +325,7 @@ Matlab 源码中的普通数字字面量当前按 double 语义降低；例如 `
 构建结束后，再由单独的类型推导 pass 逐步填充更多事实：
 
 - 没有固定类型的 `LoadSlotInst` 可通过 slot reaching-def / 前向数据流获得类型事实
-- `LoadWorkspaceInst` 只有在脚本名字稳定区间分析能证明来源时才给出更强事实
+- `ScriptVar` slot 读取只有在脚本名字稳定区间分析能证明绑定或 reaching def 时才给出更强事实
 - `UnaryInst / BinaryInst` 只有在静态分派或 builtin 语义可证明时才给出具体结果类型
 - `ApplyInst / CallInst` 只有在名字解析和实参类型足够收敛时才给出具体结果类型
 
@@ -347,13 +348,13 @@ Matlab 源码中的普通数字字面量当前按 double 语义降低；例如 `
 
 本质上这是一套 non-SSA 前向数据流分析。
 
-### 7.4 workspace 读取
+### 7.4 脚本 slot 读取
 
-- `LoadWorkspaceInst`
+- `LoadSlotInst(ScriptVar)`
   构建阶段默认保持 `unknown`
 
 除非后续单独做了脚本名字稳定区间分析，否则不应在这一层擅自给出更强类型结论。
-如果类型推导 pass 已经确认无法稳定该 workspace 读取，才可把它设为 `Any`。
+如果类型推导 pass 已经确认无法稳定该脚本 slot 读取，才可把它设为 `Any`。
 
 ### 7.5 调用结果
 
@@ -447,7 +448,7 @@ OUT[block] : SlotId -> TypeFact
 在这些点附近：
 
 - 名字解析环境可能失效
-- 一部分 slot / workspace 相关假设可能需要回退
+- 一部分 slot 绑定或动态 env 相关假设可能需要回退
 - 已缓存的分派结论可能只能在 guard 成立时复用
 
 因此这里的类型事实设计应天然允许：
@@ -481,7 +482,7 @@ OUT[block] : SlotId -> TypeFact
 - 不把主 `IR` 改造成全局强类型表示
 - 不要求每个 `ValueId` 都有精确类型
 - 不要求完整 Matlab 类型格
-- 不要求一次覆盖脚本 workspace、`global`、`persistent`、closure
+- 不要求一次覆盖脚本 `ScriptVar` 绑定、`global`、`persistent`、closure
 - 不要求立刻支持所有 builtin 的精细摘要
 
 先把“函数内纯局部 slot + 少量 builtin + 基础数据流”打通，收益和复杂度比最高。

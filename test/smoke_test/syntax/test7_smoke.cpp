@@ -42,37 +42,37 @@ const ReturnInst* final_return(const CodeUnit& unit) {
 
 void require_slot(
     const CodeUnit& unit,
-    SlotId slot_id,
-    Slot::Type type,
+    Slot slot,
+    SlotTag tag,
     std::string_view name,
     const char* message) {
-    const Slot* slot = unit.slot_table.find_slot(slot_id);
-    smoke_test::require(slot != nullptr, message);
-    smoke_test::require(slot->type == type, message);
-    smoke_test::require(slot->name == name, message);
+    const SlotInfo* info = unit.slot_table.find_slot(slot);
+    smoke_test::require(info != nullptr, message);
+    smoke_test::require(info->slot.tag == tag, message);
+    smoke_test::require(info->name == name, message);
 }
 
 void verify_signature(const FunctionUnit& function) {
     smoke_test::require(function.param_slots.size() == 2, "test7 应声明两个输入参数");
     smoke_test::require(function.return_slots.size() == 2, "test7 应声明两个返回值");
-    require_slot(function, function.param_slots[0], Slot::Arg, "x", "第一个参数应为 x");
-    require_slot(function, function.param_slots[1], Slot::Arg, "y", "第二个参数应为 y");
+    require_slot(function, function.param_slots[0], SlotTag::Arg, "x", "第一个参数应为 x");
+    require_slot(function, function.param_slots[1], SlotTag::Arg, "y", "第二个参数应为 y");
     require_slot(
         function,
         function.return_slots[0],
-        Slot::Ret,
+        SlotTag::Ret,
         "sum_value",
         "第一个返回值应为 sum_value");
     require_slot(
         function,
         function.return_slots[1],
-        Slot::Ret,
+        SlotTag::Ret,
         "diff_value",
         "第二个返回值应为 diff_value");
 }
 
 void verify_no_placeholder_slot(const FunctionUnit& function) {
-    for (const Slot& slot : function.slot_table.slots) {
+    for (const SlotInfo& slot : function.slot_table.slots) {
         smoke_test::require(slot.name != "~", "占位符不应创建名为 ~ 的 slot");
     }
 }
@@ -80,10 +80,10 @@ void verify_no_placeholder_slot(const FunctionUnit& function) {
 void verify_local_signature(const FunctionUnit& function) {
     smoke_test::require(function.param_slots.size() == 2, "pair_ops 应声明两个输入参数");
     smoke_test::require(function.return_slots.size() == 2, "pair_ops 应声明两个返回值");
-    require_slot(function, function.param_slots[0], Slot::Arg, "a", "pair_ops 第一个参数应为 a");
-    require_slot(function, function.param_slots[1], Slot::Arg, "b", "pair_ops 第二个参数应为 b");
-    require_slot(function, function.return_slots[0], Slot::Ret, "s", "pair_ops 第一个返回值应为 s");
-    require_slot(function, function.return_slots[1], Slot::Ret, "d", "pair_ops 第二个返回值应为 d");
+    require_slot(function, function.param_slots[0], SlotTag::Arg, "a", "pair_ops 第一个参数应为 a");
+    require_slot(function, function.param_slots[1], SlotTag::Arg, "b", "pair_ops 第二个参数应为 b");
+    require_slot(function, function.return_slots[0], SlotTag::Ret, "s", "pair_ops 第一个返回值应为 s");
+    require_slot(function, function.return_slots[1], SlotTag::Ret, "d", "pair_ops 第二个返回值应为 d");
 }
 
 void verify_multi_result_call(const FunctionUnit& function, const FunctionUnit& pair_ops) {
@@ -92,8 +92,13 @@ void verify_multi_result_call(const FunctionUnit& function, const FunctionUnit& 
     for (const CallInst* call : calls) {
         smoke_test::require(call->results.size() == 2, "pair_ops 调用应产生两个结果值");
         smoke_test::require(call->arguments.size() == 2, "pair_ops 调用应接收两个参数");
-        smoke_test::require(call->dispatch_type == MFunction, "pair_ops 应静态分派为 MFunction");
-        smoke_test::require(call->m_function_target == &pair_ops, "pair_ops call 应绑定到 local function");
+        smoke_test::require(call->dispatch_type == Dynamic, "pair_ops 应保留为动态 direct call");
+        smoke_test::require(call->m_function_target == nullptr, "pair_ops call 不应绑定到 local function");
+        smoke_test::require(
+            call->callee_kind == CallInst::Direct &&
+                std::holds_alternative<InternedString>(call->callee) &&
+                std::get<InternedString>(call->callee) == "pair_ops",
+            "pair_ops call 应保留直接 callee 名字");
     }
 
     std::size_t stores_to_returns = 0;
@@ -110,15 +115,15 @@ void verify_multi_result_call(const FunctionUnit& function, const FunctionUnit& 
                 continue;
             }
             const auto& store = static_cast<const StoreSlotInst&>(*inst_ptr);
-            if ((store.slot_id == function.return_slots[0] &&
+            if ((store.slot == function.return_slots[0] &&
                  std::holds_alternative<ValueId>(store.value) &&
                  std::get<ValueId>(store.value) == calls[0]->results[0]) ||
-                (store.slot_id == function.return_slots[1] &&
+                (store.slot == function.return_slots[1] &&
                  std::holds_alternative<ValueId>(store.value) &&
                  std::get<ValueId>(store.value) == calls[0]->results[1])) {
                 ++stores_to_returns;
             }
-            if (store.slot_id == function.return_slots[1] &&
+            if (store.slot == function.return_slots[1] &&
                 std::holds_alternative<ValueId>(store.value) &&
                 std::get<ValueId>(store.value) == calls[1]->results[1]) {
                 placeholder_call_second_result_stored = true;
@@ -134,42 +139,15 @@ void verify_multi_result_call(const FunctionUnit& function, const FunctionUnit& 
 void verify_returns(const FunctionUnit& function, const FunctionUnit& pair_ops) {
     const ReturnInst* main_ret = final_return(function);
     smoke_test::require(main_ret != nullptr, "test7 应有返回指令");
-    smoke_test::require(main_ret->values.size() == 2, "test7 ret 应返回两个槽位");
-    smoke_test::require(
-        std::holds_alternative<SlotId>(main_ret->values[0]) &&
-            std::get<SlotId>(main_ret->values[0]) == function.return_slots[0],
-        "test7 第一个 ret 值应为 sum_value slot");
-    smoke_test::require(
-        std::holds_alternative<SlotId>(main_ret->values[1]) &&
-            std::get<SlotId>(main_ret->values[1]) == function.return_slots[1],
-        "test7 第二个 ret 值应为 diff_value slot");
+    smoke_test::require(main_ret->values.size() == 2, "test7 ret 应返回两个值");
+    smoke_test::require(main_ret->values[0].is_valid(), "test7 第一个 ret 值应为 ValueId");
+    smoke_test::require(main_ret->values[1].is_valid(), "test7 第二个 ret 值应为 ValueId");
 
     const ReturnInst* local_ret = final_return(pair_ops);
     smoke_test::require(local_ret != nullptr, "pair_ops 应有返回指令");
-    smoke_test::require(local_ret->values.size() == 2, "pair_ops ret 应返回两个槽位");
-}
-
-void verify_printed_ir(const std::string& printed_ir) {
-    smoke_test::require(
-        printed_ir.find("define @test7(%slot0 @x, %slot1 @y) -> "
-                        "(%slot2 @sum_value, %slot3 @diff_value)") != std::string::npos,
-        "打印结果应包含 test7 双返回签名");
-    smoke_test::require(
-        printed_ir.find("define @pair_ops(%slot0 @a, %slot1 @b) -> (%slot2 @s, %slot3 @d)") !=
-            std::string::npos,
-        "打印结果应包含 pair_ops 双返回签名");
-    smoke_test::require(
-        printed_ir.find(") = call mfunc @pair_ops(") != std::string::npos,
-        "打印结果应包含双结果 mfunc call");
-    smoke_test::require(
-        printed_ir.find("@\"~\"") == std::string::npos,
-        "打印结果不应包含占位符 slot 名字");
-    smoke_test::require(
-        printed_ir.find("([], [") != std::string::npos,
-        "打印结果应把占位输出位显示为空");
-    smoke_test::require(
-        printed_ir.find("ret (%slot2, %slot3)") != std::string::npos,
-        "打印结果应包含双返回 ret");
+    smoke_test::require(local_ret->values.size() == 2, "pair_ops ret 应返回两个值");
+    smoke_test::require(local_ret->values[0].is_valid(), "pair_ops 第一个 ret 值应为 ValueId");
+    smoke_test::require(local_ret->values[1].is_valid(), "pair_ops 第二个 ret 值应为 ValueId");
 }
 
 } // namespace
@@ -196,8 +174,6 @@ int main() {
         baltam::verify_local_signature(*pair_ops);
         baltam::verify_multi_result_call(*function, *pair_ops);
         baltam::verify_returns(*function, *pair_ops);
-        baltam::verify_printed_ir(artifacts.printed_ir);
-        std::cout << artifacts.printed_ir << '\n';
     } catch (const std::exception& ex) {
         std::cerr << "test7_smoke 失败: " << ex.what() << '\n';
         return 1;

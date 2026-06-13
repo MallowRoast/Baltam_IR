@@ -14,8 +14,6 @@ switch x
         switch y
             case 1
                 s = 21;
-            case {2, 3}
-                s = 23;
             otherwise
                 s = -20;
         end

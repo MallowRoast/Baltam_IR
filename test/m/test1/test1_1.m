@@ -1,11 +1,11 @@
 function c = test1_1()
 % TEST1_1 在 test0_1 的函数骨架上增加 local 函数 sin / cos / plus / uminus。
 %
-% 这个用例专门覆盖“函数中的 local 函数分派”和“同名局部变量遮蔽”。
+% 这个用例专门覆盖“函数中的未绑定名字调用”和“同名局部变量遮蔽”。
 %
 % 这里一共验证 4 件事：
-% 1. `sin(a)` 在函数里应直接静态分派到 local `sin`
-% 2. 一元算子 `-a` 在存在 local `uminus` 时，应静态分派到 local `uminus`
+% 1. `sin(a)` 在基础 lowering 中应保留为动态 direct call，不提前绑定 local `sin`
+% 2. 一元算子 `-a` 在基础 lowering 中应保留为普通 unary neg，不提前绑定 local `uminus`
 % 3. `cos = 1` 之后，`cos(a)` 不应再命中 local `cos`，而应把 `cos` 当作局部变量
 % 4. `plus = 1` 之后，`a = 1 + 2` 不应再命中 local `plus`，而应回退成普通 `add`
 %
@@ -14,7 +14,7 @@ function c = test1_1()
 % - `plus = 1` 用来验证运算符对应的函数名也会被局部变量遮蔽
 % - `cos = 1` 用来验证普通调用名同样会被局部变量遮蔽
 %
-% 主函数后面的 local 定义则提供这些静态分派目标：
+% 主函数后面的 local 定义只进入 local function 表，后续名字解析 pass 再决定是否静态绑定：
 % - `sin(x) = x + 1`
 % - `cos(x) = x + 1`
 % - `plus(x, y) = x`

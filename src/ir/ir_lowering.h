@@ -111,19 +111,9 @@ private:
     /**
      * @brief 查询 lowering 阶段静态已知的变量表。
      *
-     * 未命中时返回 `InvalidSlotId`。
+     * 未命中时返回 `InvalidSlot`。
      */
-    [[nodiscard]] SlotId lookup_var(std::string_view name) const noexcept;
-
-    /**
-     * @brief 查询 lowering 阶段静态已知的函数表。
-     *
-     * 目前只返回当前文件 local 函数。未命中时返回 `nullptr`。
-     * 后续这里继续接入：
-     * - import A.a 的静态导入函数表
-     * - 嵌套函数表
-     */
-    [[nodiscard]] const FunctionUnit* lookup_method(std::string_view name) const noexcept;
+    [[nodiscard]] Slot lookup_var(std::string_view name) const noexcept;
 
     /**
      * @brief 判断当前函数中的名字调用是否可直接收敛为 `call`。
@@ -144,11 +134,11 @@ private:
         SourceSpan source_span);
 
     void predeclare_function_signature(const pcdata& parsed_unit);
-    [[nodiscard]] SlotId ensure_slot_binding(std::string_view name, SourceSpan source_span);
-    [[nodiscard]] SlotId lookup_slot_binding(std::string_view name, SourceSpan source_span);
-    [[nodiscard]] SlotId ensure_workspace_handle_slot(SourceSpan source_span);
-    void bind_name(std::string_view name, SlotId slot_id, SourceSpan source_span);
-    [[nodiscard]] const SlotId* find_name(std::string_view name) const noexcept;
+    [[nodiscard]] Slot ensure_slot_binding(std::string_view name, SourceSpan source_span);
+    [[nodiscard]] Slot lookup_slot_binding(std::string_view name, SourceSpan source_span);
+    [[nodiscard]] std::vector<ValueId> load_function_return_values(SourceSpan source_span);
+    void bind_name(std::string_view name, Slot slot, SourceSpan source_span);
+    [[nodiscard]] const Slot* find_name(std::string_view name) const noexcept;
 
     /**
      * @brief 当前正在 lowering 的循环控制流目标。
@@ -190,9 +180,9 @@ private:
      *
      * 该表不属于最终 IR，只记录当前 unit 在 lowering 过程中已经确定为变量语义的名字。
      * 函数 lowering 会根据它判断源码中的 `A(...)` 应收敛为直接 `call`，还是先
-     * `load_slot` 后 `value_apply`。
+     * `load` 后 `value_apply`。
      */
-    std::unordered_map<const CodeUnit*, std::unordered_map<InternedString, SlotId>>
+    std::unordered_map<const CodeUnit*, std::unordered_map<InternedString, Slot>>
         unit_name_bindings_;
     // 这里把 vector 当作小型栈使用；相比 std::stack，调试和必要时遍历诊断更直接。
     std::vector<LoopControlContext> loop_stack_;

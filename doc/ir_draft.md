@@ -29,7 +29,8 @@ AST -> IR -> bytecode -> interpreter/profile -> typed SSA -> LLVM IR
 这样分层的核心原因不是“SSA 不好”，而是 Matlab 的完整动态语义不适合作为全局常驻 SSA 的
 主干表示。尤其是：
 
-- workspace 访问
+- 脚本 `ScriptVar` slot 的运行时绑定和失效
+- 动态 env 访问
 - 动态名字解析
 - 动态函数分派
 - `eval`
@@ -56,7 +57,8 @@ AST -> IR -> bytecode -> interpreter/profile -> typed SSA -> LLVM IR
 
 更适合作为 SSA region 边界的部分通常是：
 
-- workspace 读写
+- 脚本 `ScriptVar` 绑定失效点
+- 动态 env 读写
 - `eval` / `evalin` / `assignin`
 - `clear`
 - path 修改
@@ -81,7 +83,7 @@ AST -> IR -> bytecode -> interpreter/profile -> typed SSA -> LLVM IR
 - 脚本、函数、文件内 local function
 - module 级匿名函数体
 - slot / value / basic block / instruction 基础对象模型
-- workspace 读写和 frame slot 读写
+- 脚本 `ScriptVar` slot、函数 frame slot 和动态 env 边界
 - `apply`、`value_apply`、`call`
 - 具名函数句柄和匿名函数句柄
 - 多返回值和 `~` 占位输出位
@@ -101,18 +103,19 @@ AST -> IR -> bytecode -> interpreter/profile -> typed SSA -> LLVM IR
 
 凡是会影响 Matlab 动态语义的行为，都应在 IR 中显式出现，而不是隐藏在普通变量读写里。
 
-脚本中的名字读写应先保留为 workspace 访问；函数中的静态局部变量才使用 slot 访问。后续
-pass 可以在证明名字稳定后再收敛为更低成本的形式。
+脚本中静态出现的变量也应进入 slot 表，tag 为 `ScriptVar`。它的 IR 读写仍打印为
+`load` / `store`，但执行层需要根据运行时绑定状态决定直接访问已绑定存储，还是在绑定失效后
+退回动态 lookup。函数中的静态局部变量则使用 `Local/Arg/Ret` 等普通 frame slot。
 
 ### 2. Non-SSA，但允许局部 ValueId
 
 IR 不是 SSA IR，但允许用 `ValueId` 表达指令结果，方便表达式级数据流。真正的可变程序状态
-仍然通过 slot 或 workspace 表达。
+仍然通过 slot 或动态 env 表达。
 
 因此：
 
 - block 内可以有短生命周期值
-- block 间的可变状态必须落入 slot / workspace
+- block 间的可变状态必须落入 slot，或在动态语言机制下落入 env
 - 多结果指令可以产生多个 `ValueId`
 - `~` 占位输出位保留结果位次，但没有真实 `ValueId`
 
@@ -132,14 +135,14 @@ IR 应容易 lowering 到 bytecode：
 - slot 可以映射到 frame layout
 - block 可以线性化为 bytecode 基本块和跳转
 - dynamic env / dynamic call 语义保持显式
-- 不在 lowering 阶段偷偷静态化 workspace 名字或函数路径
+- 不在 lowering 阶段偷偷静态化脚本 slot 的运行时绑定或函数路径
 
 ### 5. 便于后续 region 提取
 
 虽然 IR 不是主优化 IR，但它应清楚表达哪些区域适合进入 typed SSA，哪些区域必须留在解释
 执行语义里。
 
-这要求 effect、workspace、call dispatch、slot 读写和 CFG 边界都保持可分析。
+这要求 effect、动态 env、call dispatch、slot 读写和 CFG 边界都保持可分析。
 
 ## 相关文档
 

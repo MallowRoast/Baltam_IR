@@ -4,18 +4,25 @@
 #include <iostream>
 #include <string_view>
 #include <variant>
+#include <vector>
 
 namespace baltam {
 namespace {
 
-std::size_t count_blocks_by_label(const CodeUnit& unit, std::string_view label) {
-    std::size_t count = 0;
+std::vector<const BasicBlock*> find_blocks_by_label(
+    const CodeUnit& unit,
+    std::string_view label) {
+    std::vector<const BasicBlock*> blocks;
     for (const auto& block_ptr : unit.basic_blocks) {
         if (block_ptr != nullptr && block_ptr->label == label) {
-            ++count;
+            blocks.push_back(block_ptr.get());
         }
     }
-    return count;
+    return blocks;
+}
+
+std::size_t count_blocks_by_label(const CodeUnit& unit, std::string_view label) {
+    return find_blocks_by_label(unit, label).size();
 }
 
 std::size_t count_direct_calls(const CodeUnit& unit, std::string_view callee) {
@@ -63,14 +70,33 @@ std::size_t count_internal_calls(const CodeUnit& unit, std::string_view callee) 
 
 std::size_t count_internal_iter_index_slots(const CodeUnit& unit) {
     std::size_t count = 0;
-    for (const Slot& slot : unit.slot_table.slots) {
-        if (slot.name == "__foreach_iter_index" &&
-            slot.type == Slot::InternalLocal &&
-            slot.attrs.fixed_type == SlotAttrs::Int64Scalar) {
+    for (const SlotInfo& slot : unit.slot_table.slots) {
+        if (slot.name == "__for_idx" &&
+            slot.slot.tag == SlotTag::InternalLocal &&
+            slot.value_type == SlotValueType::Int64Scalar) {
             ++count;
         }
     }
     return count;
+}
+
+bool has_synthetic_goto_between_labels(
+    const CodeUnit& unit,
+    std::string_view source_label,
+    std::string_view target_label) {
+    for (const BasicBlock* block : find_blocks_by_label(unit, source_label)) {
+        const Instruction* terminator = block != nullptr ? block->terminator() : nullptr;
+        if (terminator == nullptr || terminator->type() != Instruction::Goto) {
+            continue;
+        }
+        const auto& go = static_cast<const GotoInst&>(*terminator);
+        if (go.attrs.is_synthetic != 0 &&
+            go.target != nullptr &&
+            go.target->label == target_label) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void verify_complete_ir(const IRBuildResult& result) {
@@ -107,34 +133,9 @@ void verify_core_focus(const IRBuildResult& result) {
                         "两层 for 应创建两个独立的 internal iter_index slot");
     smoke_test::require(smoke_test::count_instructions(*entry, Instruction::Binary) == 6,
                         "test2_2 应包含两套内部比较、自增以及 i*j 和 s+...");
-}
-
-void verify_printed_ir(const std::string& printed_ir) {
     smoke_test::require(
-        printed_ir.find("; mfile \"" TEST2_2_MFILE_PATH "\"") != std::string::npos,
-        "应打印 test2_2 文件头");
-    smoke_test::require(
-        printed_ir.find("script @test2_2 {") != std::string::npos,
-        "应打印 test2_2 脚本头");
-    smoke_test::require(
-        printed_ir.find("for.preheader:") != std::string::npos &&
-            printed_ir.find("for.preheader.1:") != std::string::npos,
-        "内外两层 preheader 应通过标签后缀区分");
-    smoke_test::require(
-        printed_ir.find("for.latch:") != std::string::npos &&
-            printed_ir.find("for.latch.1:") != std::string::npos,
-        "内外两层 latch 应通过标签后缀区分");
-    smoke_test::require(
-        printed_ir.find("for.end:") != std::string::npos &&
-            printed_ir.find("for.end.1:") != std::string::npos,
-        "内外两层 end 应通过标签后缀区分");
-    smoke_test::require(
-        printed_ir.find("br label %for.latch.1") != std::string::npos &&
-            printed_ir.find("br label %for.latch") != std::string::npos,
-        "内层循环体应跳内层 latch，内层结束后应回到外层 latch");
-    smoke_test::require(
-        printed_ir.find("store_env %test2_2_env, @s") != std::string::npos,
-        "内层循环体应写回 workspace 变量 s");
+        has_synthetic_goto_between_labels(*entry, "for.end", "for.latch"),
+        "内层 for 正常结束后应回到外层 for.latch");
 }
 
 } // namespace
@@ -146,8 +147,6 @@ int main() {
             baltam::smoke_test::build_ir(TEST2_2_MFILE_PATH);
         baltam::verify_complete_ir(artifacts.result);
         baltam::verify_core_focus(artifacts.result);
-        baltam::verify_printed_ir(artifacts.printed_ir);
-        std::cout << artifacts.printed_ir << '\n';
     } catch (const std::exception& ex) {
         std::cerr << "test2_2_smoke 失败: " << ex.what() << '\n';
         return 1;

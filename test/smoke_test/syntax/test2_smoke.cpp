@@ -95,22 +95,15 @@ void verify_for_cfg(const CodeUnit& unit) {
 }
 
 void verify_for_slots(const CodeUnit& unit) {
-    const Slot* iter_index_slot = nullptr;
-    for (const Slot& slot : unit.slot_table.slots) {
-        if (slot.name == "__foreach_iter_index") {
-            iter_index_slot = &slot;
-            break;
-        }
-    }
+    const SlotInfo* iter_index_slot =
+        smoke_test::find_slot_by_name(unit, "__for_idx");
 
     smoke_test::require(iter_index_slot != nullptr,
-                        "for 应创建 __foreach_iter_index slot");
-    smoke_test::require(iter_index_slot->type == Slot::InternalLocal,
-                        "__foreach_iter_index 应是 internal_local slot");
-    smoke_test::require(iter_index_slot->attrs.fixed_type == SlotAttrs::Int64Scalar,
-                        "__foreach_iter_index 类型应固定为 int64 scalar");
-    smoke_test::require(iter_index_slot->attrs.hidden_role == SlotAttrs::None,
-                        "__foreach_iter_index 不应占用 hidden_role");
+                        "for 应创建 __for_idx slot");
+    smoke_test::require(iter_index_slot->slot.tag == SlotTag::InternalLocal,
+                        "__for_idx 应是 internal_local slot");
+    smoke_test::require(iter_index_slot->value_type == SlotValueType::Int64Scalar,
+                        "__for_idx 类型应固定为 int64 scalar");
 }
 
 void verify_core_focus(const IRBuildResult& result) {
@@ -130,51 +123,6 @@ void verify_core_focus(const IRBuildResult& result) {
                         "test2 应包含 header 内部比较、用户循环体加法和 latch 内部自增");
 }
 
-void verify_printed_ir(const std::string& printed_ir) {
-    smoke_test::require(
-        printed_ir.find("; mfile \"" TEST2_MFILE_PATH "\"") != std::string::npos,
-        "应打印 test2 文件头");
-    smoke_test::require(
-        printed_ir.find("script @test2 {") != std::string::npos,
-        "应打印 test2 脚本头");
-    smoke_test::require(
-        printed_ir.find("for.preheader:") != std::string::npos &&
-            printed_ir.find("for.header:") != std::string::npos &&
-            printed_ir.find("for.body:") != std::string::npos &&
-            printed_ir.find("for.latch:") != std::string::npos &&
-            printed_ir.find("for.end:") != std::string::npos,
-        "应打印 for 的五个基本块");
-    smoke_test::require(
-        printed_ir.find("call @colon") != std::string::npos,
-        "应打印 colon call");
-    smoke_test::require(
-        printed_ir.find("@internal.colon") == std::string::npos,
-        "colon 不应打印为 internal 静态分派目标");
-    smoke_test::require(
-        printed_ir.find("call @internal.foreach_init") != std::string::npos,
-        "应打印 internal.foreach_init 调用");
-    smoke_test::require(
-        printed_ir.find("([%4, extern], [%5, int64]) = call @internal.foreach_init") != std::string::npos,
-        "foreach_init 应打印静态内部返回类型");
-    smoke_test::require(
-        printed_ir.find("internal_local @__foreach_iter_index : int64") != std::string::npos,
-        "iter_index slot 应打印为 internal_local fixed int64");
-    smoke_test::require(
-        printed_ir.find("call @internal.foreach_iterate") != std::string::npos,
-        "应打印 internal.foreach_iterate 调用");
-    smoke_test::require(
-        printed_ir.find("internal.cmp_gt") != std::string::npos &&
-            printed_ir.find("internal.add") != std::string::npos,
-        "应打印内部静态分派运算");
-    smoke_test::require(
-        printed_ir.find("@__foreach_state") == std::string::npos &&
-            printed_ir.find("@__foreach_max_iter") == std::string::npos,
-        "state/max_iter 不应再落到 slot");
-    smoke_test::require(
-        printed_ir.find("store_env %test2_env, @s") != std::string::npos,
-        "循环体应写回 workspace 变量 s");
-}
-
 } // namespace
 } // namespace baltam
 
@@ -184,8 +132,6 @@ int main() {
             baltam::smoke_test::build_ir(TEST2_MFILE_PATH);
         baltam::verify_complete_ir(artifacts.result);
         baltam::verify_core_focus(artifacts.result);
-        baltam::verify_printed_ir(artifacts.printed_ir);
-        std::cout << artifacts.printed_ir << '\n';
     } catch (const std::exception& ex) {
         std::cerr << "test2_smoke 失败: " << ex.what() << '\n';
         return 1;

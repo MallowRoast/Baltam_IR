@@ -20,199 +20,38 @@ struct TypeFact {
     TypeSet types = TypeSet::any();
 };
 
-/**
- * @brief slot 级语义属性。
- *
- * `Slot::Type` 决定 slot 在 frame 中的语义分类。这里仅保存不改变 slot 身份的补充
- * 事实，例如是否可变、是否有固定类型，以及 `Slot::Hidden` 专用的隐藏角色。
- */
-struct SlotAttrs {
-    /**
-     * @brief slot 级固定类型事实。
-     *
-     * 大多数 slot 的类型需要依赖后续分析收窄，因此保持 `Unknown`。少数
-     * lowering/runtime 内部 slot 的类型由 IR schema 静态决定，可通过该字段声明。
-     */
-    enum FixedType : std::uint8_t {
-        Unknown,
-        Int64Scalar,
-    };
-
-    /**
-     * @brief `Slot::Hidden` 的角色类型。
-     *
-     * 这类 slot 不对应用户源码中的普通局部变量，而是承载调用约定或执行环境
-     * 所必需的特殊运行时状态。普通 lowering 内部局部状态应使用
-     * `Slot::InternalLocal`，不要占用 hidden role。
-     *
-     * hidden slot 这样设计的目的主要有三点：
-     * 1. 让 frame 布局保持稳定，不因可变参数个数或环境对象细节而动态改变。
-     * 2. 把用户可见变量与运行时辅助状态分开，降低后续优化和验证的歧义。
-     * 3. 让 bytecode、解释器和 JIT 都能通过统一的 slot 机制访问这些隐藏状态。
-     */
-    enum HiddenRole : std::uint8_t {
-        None,             ///< 不是特殊隐藏角色。
-        Nargin,           ///< 当前调用点实际输入参数个数。
-        Nargout,          ///< 当前调用点期望输出参数个数。
-        Varargin,         ///< 多余输入参数的聚合容器，而不是动态数量的多个 slot。
-        Varargout,        ///< 额外输出参数的聚合容器，而不是动态数量的多个 slot。
-        WorkspaceHandle,  ///< 工作区句柄，用于间接访问 script workspace。
-    };
-
-    /**
-     * @brief 构造一个清零后的 slot 属性集合。
-     */
-    SlotAttrs() noexcept
-        : is_mutable(0),
-          hidden_role(None),
-          fixed_type(Unknown) {}
-
-    std::uint8_t is_mutable : 1;
-    std::uint8_t hidden_role : 3;
-    std::uint8_t fixed_type : 2;
-};
 
 /**
- * @brief frame 中的变量槽位定义。
+ * @brief slot 表项。
  */
-struct Slot {
-    /**
-     * @brief slot 的类别。
-     */
-    enum Type : std::uint8_t {
-        Arg,            ///< 函数输入参数 slot。
-        Local,          ///< 用户源码中的普通局部变量 slot。
-        InternalLocal,  ///< lowering/runtime 创建的普通内部局部状态 slot。
-        Capture,        ///< 匿名函数捕获值 slot。
-        Ret,            ///< 函数返回值 slot。
-        Hidden,         ///< 带 `HiddenRole` 的特殊 ABI/runtime slot。
-    };
-
-    SlotId slot_id = InvalidSlotId;
-    Type type = Local;
+struct SlotInfo {
+    Slot slot;
     InternedString name;
     SourceSpan source_span;
-    SlotAttrs attrs;
-
-    /**
-     * @brief 判断当前 slot 是否为参数 slot。
-     *
-     * @return `type == Arg` 时返回 true。
-     */
-    [[nodiscard]] bool is_arg() const noexcept {
-        return type == Arg;
-    }
-
-    /**
-     * @brief 判断当前 slot 是否为局部 slot。
-     *
-     * @return `type == Local` 时返回 true。
-     */
-    [[nodiscard]] bool is_local() const noexcept {
-        return type == Local;
-    }
-
-    /**
-     * @brief 判断当前 slot 是否为 lowering/runtime 内部局部 slot。
-     *
-     * @return `type == InternalLocal` 时返回 true。
-     */
-    [[nodiscard]] bool is_internal_local() const noexcept {
-        return type == InternalLocal;
-    }
-
-    /**
-     * @brief 判断当前 slot 是否为匿名函数捕获 slot。
-     *
-     * @return `type == Capture` 时返回 true。
-     */
-    [[nodiscard]] bool is_capture() const noexcept {
-        return type == Capture;
-    }
-
-    /**
-     * @brief 判断当前 slot 是否为返回值 slot。
-     *
-     * @return `type == Ret` 时返回 true。
-     */
-    [[nodiscard]] bool is_ret() const noexcept {
-        return type == Ret;
-    }
-
-    /**
-     * @brief 判断当前 slot 是否为隐藏 slot。
-     *
-     * @return `type == Hidden` 时返回 true。
-     */
-    [[nodiscard]] bool is_hidden() const noexcept {
-        return type == Hidden;
-    }
+    SlotValueType value_type = SlotValueType::Unknown;
 };
 
 /**
  * @brief `CodeUnit` 的 slot 表。
- *
- * 当前版本直接使用单一 `slots` 容器保存全部 slot 定义。普通分类由
- * `Slot::type` 决定，只有 `Slot::Hidden` 需要再通过 `SlotAttrs::hidden_role`
- * 指明具体 ABI/runtime 角色。
  */
 struct SlotTable {
-    std::vector<Slot> slots;
+    std::vector<SlotInfo> slots;
 
-    /**
-     * @brief 判断 slot 表是否为空。
-     *
-     * @return `slots.empty()` 的结果。
-     */
     [[nodiscard]] bool empty() const noexcept {
         return slots.empty();
     }
 
-    /**
-     * @brief 按 `slot_id` 查找 slot。
-     *
-     * @param slot_id 待查找的 slot ID。
-     * @return 找到时返回对应 slot 指针，否则返回 `nullptr`。
-     */
-    [[nodiscard]] Slot* find_slot(SlotId slot_id) noexcept {
-        return const_cast<Slot*>(std::as_const(*this).find_slot(slot_id));
+    [[nodiscard]] SlotInfo* find_slot(Slot slot) noexcept {
+        return const_cast<SlotInfo*>(std::as_const(*this).find_slot(slot));
     }
 
-    /**
-     * @brief 按 `slot_id` 查找 slot。
-     *
-     * @param slot_id 待查找的 slot ID。
-     * @return 找到时返回对应 slot 指针，否则返回 `nullptr`。
-     */
-    [[nodiscard]] const Slot* find_slot(SlotId slot_id) const noexcept {
-        for (const Slot& slot : slots) {
-            if (slot.slot_id == slot_id) {
-                return &slot;
-            }
+    [[nodiscard]] const SlotInfo* find_slot(Slot slot) const noexcept {
+        if (!slot.is_valid()) {
+            return nullptr;
         }
-        return nullptr;
-    }
-
-    /**
-     * @brief 查找指定隐藏角色对应的 slot。
-     *
-     * @param role 待查找的隐藏角色。
-     * @return 找到时返回对应 slot 指针，否则返回 `nullptr`。
-     */
-    [[nodiscard]] Slot* find_hidden_slot(SlotAttrs::HiddenRole role) noexcept {
-        return const_cast<Slot*>(std::as_const(*this).find_hidden_slot(role));
-    }
-
-    /**
-     * @brief 查找指定隐藏角色对应的 slot。
-     *
-     * @param role 待查找的隐藏角色。
-     * @return 找到时返回对应 slot 指针，否则返回 `nullptr`。
-     */
-    [[nodiscard]] const Slot* find_hidden_slot(SlotAttrs::HiddenRole role) const noexcept {
-        for (const Slot& slot : slots) {
-            if (slot.is_hidden() && slot.attrs.hidden_role == role) {
-                return &slot;
+        for (const SlotInfo& info : slots) {
+            if (info.slot == slot) {
+                return &info;
             }
         }
         return nullptr;

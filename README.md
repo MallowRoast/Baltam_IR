@@ -1,7 +1,7 @@
 # Baltam IR
 
 `Baltam_IR` 是面向 `M` 语言 / Matlab 风格语言的 high-level IR 实验仓库。当前重点是把
-脚本、函数、workspace、slot、调用分派和控制流等高层动态语义稳定落到 IR，而不是过早把
+脚本、函数、slot、动态 env、调用分派和控制流等高层动态语义稳定落到 IR，而不是过早把
 整门语言压成全局 SSA。
 
 当前设想的主流水线是：
@@ -23,10 +23,10 @@ AST -> IR -> bytecode -> interpreter/profile -> typed SSA -> LLVM IR
 
 当前 lowering 覆盖：
 
-- 脚本 workspace 访问：`load_env` / `store_env`
-- 函数 slot 访问：`load_slot` / `store_slot`
+- 脚本变量静态编号为 `ScriptVar` slot，文本 IR 打印为 `load` / `store`
+- 函数变量、参数、返回值和捕获值同样通过 slot 访问，文本 IR 打印为 `load` / `store`
 - `apply`、`value_apply`、`call`
-- 文件内 local 函数的最小静态分派，打印为 `call mfunc`
+- 文件内 local 函数单元收集；调用在基础 lowering 中先保持动态 direct call
 - 具名函数句柄、匿名函数句柄
 - 多返回值调用和 `[~, b] = f(...)` 占位输出位
 - `if / else`

@@ -57,7 +57,7 @@ void verify_anonymous_body(const IRBuildResult& result) {
     smoke_test::require(anon.slot_table.find_slot(anon.capture_slots[0])->name == "y",
                         "匿名函数捕获 slot 应为 y");
     smoke_test::require(
-        anon.slot_table.find_slot(anon.capture_slots[0])->type == Slot::Capture,
+        anon.slot_table.find_slot(anon.capture_slots[0])->slot.tag == SlotTag::Capture,
         "匿名函数捕获 y 应使用 Capture slot");
     smoke_test::require(
         smoke_test::count_instructions(anon, Instruction::LoadSlot) == 2,
@@ -73,25 +73,8 @@ void verify_anonymous_body(const IRBuildResult& result) {
                         "匿名函数体应直接 ret 表达式结果");
     const auto* ret = static_cast<const ReturnInst*>(entry->terminator());
     smoke_test::require(ret->values.size() == 1, "匿名函数体 ret 应返回一个表达式值");
-    smoke_test::require(std::holds_alternative<ValueId>(ret->values[0]),
+    smoke_test::require(ret->values[0].is_valid(),
                         "匿名函数体 ret 应返回 ValueId 而不是返回 slot");
-}
-
-void verify_printed_ir(const std::string& printed_ir) {
-    smoke_test::require(
-        printed_ir.find("create_anon_func #anon0 captures { %slot2 }") !=
-            std::string::npos,
-        "外层 IR 应只打印 create_anon_func 捕获了哪些 slot");
-    smoke_test::require(
-        printed_ir.find(" from %slot") == std::string::npos,
-        "create_anon_func 打印不应展示 capture value 映射细节");
-    smoke_test::require(
-        printed_ir.find("anon #anon0(%slot0 @t) captures (%slot1 @y) {") !=
-            std::string::npos,
-        "应打印匿名函数体头部");
-    smoke_test::require(
-        printed_ir.find("value_apply %") != std::string::npos,
-        "应打印 f(x) 的 value_apply");
 }
 
 } // namespace
@@ -104,8 +87,6 @@ int main() {
         baltam::verify_complete_ir(artifacts.result);
         baltam::verify_outer_function(artifacts.result);
         baltam::verify_anonymous_body(artifacts.result);
-        baltam::verify_printed_ir(artifacts.printed_ir);
-        std::cout << artifacts.printed_ir << '\n';
     } catch (const std::exception& ex) {
         std::cerr << "test5_1_smoke 失败: " << ex.what() << '\n';
         return 1;

@@ -1,5 +1,7 @@
 #include "smoke_test_common.h"
 
+#include "ir/ir_print.h"
+
 #include <cstddef>
 #include <iostream>
 #include <string_view>
@@ -9,12 +11,28 @@
 namespace baltam {
 namespace {
 
+bool label_matches_query(std::string_view label, std::string_view query) {
+    if (label == query) {
+        return true;
+    }
+    constexpr std::string_view switch_prefix = "switch.";
+    if (query.rfind(switch_prefix, 0) != 0 ||
+        label.rfind(switch_prefix, 0) != 0) {
+        return false;
+    }
+
+    const std::string_view kind = query.substr(switch_prefix.size());
+    const std::string suffix = "." + std::string(kind);
+    return label.size() > switch_prefix.size() + suffix.size() &&
+        label.compare(label.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
 std::vector<const BasicBlock*> find_blocks_by_label(
     const CodeUnit& unit,
     std::string_view label) {
     std::vector<const BasicBlock*> blocks;
     for (const auto& block_ptr : unit.basic_blocks) {
-        if (block_ptr != nullptr && block_ptr->label == label) {
+        if (block_ptr != nullptr && label_matches_query(block_ptr->label, label)) {
             blocks.push_back(block_ptr.get());
         }
     }
@@ -84,12 +102,10 @@ void verify_complete_ir(const IRBuildResult& result) {
 }
 
 void verify_switch_and_loop_shape(const CodeUnit& unit) {
-    smoke_test::require(count_blocks_by_label(unit, "switch.dispatch") == 1,
-                        "应生成一个 switch.dispatch");
     smoke_test::require(count_blocks_by_label(unit, "switch.case") == 2,
-                        "应生成两个 switch.case body 块");
-    smoke_test::require(count_blocks_by_label(unit, "switch.next") == 2,
-                        "应生成两个 switch.next 块");
+                        "应生成两个 switch.case 判断块");
+    smoke_test::require(count_blocks_by_label(unit, "switch.body") == 2,
+                        "应生成两个 switch.body 块");
     smoke_test::require(count_blocks_by_label(unit, "switch.otherwise") == 1,
                         "应生成一个 switch.otherwise");
     smoke_test::require(count_blocks_by_label(unit, "switch.end") == 1,
@@ -105,8 +121,6 @@ void verify_switch_and_loop_shape(const CodeUnit& unit) {
                         "switch case 中应生成一层 for.end");
     smoke_test::require(count_blocks_by_label(unit, "while.header") == 1,
                         "switch case 中应生成一层 while.header");
-    smoke_test::require(count_blocks_by_label(unit, "while.latch") == 1,
-                        "switch case 中应生成一层 while.latch");
     smoke_test::require(count_blocks_by_label(unit, "while.end") == 1,
                         "switch case 中应生成一层 while.end");
 }
@@ -114,21 +128,21 @@ void verify_switch_and_loop_shape(const CodeUnit& unit) {
 void verify_break_continue_targets(const CodeUnit& unit) {
     const std::vector<const BasicBlock*> for_latches = find_blocks_by_label(unit, "for.latch");
     const std::vector<const BasicBlock*> for_ends = find_blocks_by_label(unit, "for.end");
-    const std::vector<const BasicBlock*> while_latches =
-        find_blocks_by_label(unit, "while.latch");
+    const std::vector<const BasicBlock*> while_headers =
+        find_blocks_by_label(unit, "while.header");
     const std::vector<const BasicBlock*> while_ends = find_blocks_by_label(unit, "while.end");
 
     smoke_test::require(for_latches.size() == 1, "应有唯一 for.latch");
     smoke_test::require(for_ends.size() == 1, "应有唯一 for.end");
-    smoke_test::require(while_latches.size() == 1, "应有唯一 while.latch");
+    smoke_test::require(while_headers.size() == 1, "应有唯一 while.header");
     smoke_test::require(while_ends.size() == 1, "应有唯一 while.end");
 
     smoke_test::require(count_user_gotos_to(unit, for_latches.front()) == 1,
                         "for 内 continue 应跳到 for.latch，而不是 switch");
     smoke_test::require(count_user_gotos_to(unit, for_ends.front()) == 1,
                         "for 内 break 应跳到 for.end，而不是 switch");
-    smoke_test::require(count_user_gotos_to(unit, while_latches.front()) == 1,
-                        "while 内 continue 应跳到 while.latch，而不是 switch");
+    smoke_test::require(count_user_gotos_to(unit, while_headers.front()) == 1,
+                        "while 内 continue 应跳到 while.header，而不是 switch");
     smoke_test::require(count_user_gotos_to(unit, while_ends.front()) == 1,
                         "while 内 break 应跳到 while.end，而不是 switch");
 }
@@ -150,6 +164,30 @@ void verify_loop_exits_to_switch_end(const CodeUnit& unit) {
         "while 正常结束后应 synthetic goto 到 switch.end");
 }
 
+void verify_printed_loop_exit_layout(const MFileUnit& mfile) {
+    IRPrintOptions options;
+    options.print_file_header = false;
+    options.print_slot_table = false;
+    options.print_source_comments = false;
+    options.print_block_predecessors = false;
+    options.print_type_facts = false;
+
+    const std::string text = format_ir(mfile, options);
+    const std::size_t for_end = text.find("\nfor.end:");
+    const std::size_t next_case = text.find("\nswitch.case.1:");
+    const std::size_t while_end = text.find("\nwhile.end:");
+    const std::size_t otherwise = text.find("\nswitch.otherwise:");
+
+    smoke_test::require(for_end != std::string::npos, "打印 IR 应包含 for.end");
+    smoke_test::require(next_case != std::string::npos, "打印 IR 应包含 switch.case.1");
+    smoke_test::require(while_end != std::string::npos, "打印 IR 应包含 while.end");
+    smoke_test::require(otherwise != std::string::npos, "打印 IR 应包含 switch.otherwise");
+    smoke_test::require(for_end < next_case,
+                        "switch case 内 for.end 应打印在下一条 case 判断之前");
+    smoke_test::require(while_end < otherwise,
+                        "switch case 内 while.end 应打印在 otherwise 之前");
+}
+
 void verify_core_focus(const IRBuildResult& result) {
     const CodeUnit* entry = result.mfile->entry_unit;
     smoke_test::require(entry != nullptr && entry->is_script(), "入口应为脚本单元");
@@ -165,23 +203,7 @@ void verify_core_focus(const IRBuildResult& result) {
                         "for case 应生成一次 foreach_iterate");
     smoke_test::require(smoke_test::count_instructions(*entry, Instruction::Branch) == 8,
                         "switch、for、while 与四个 if 应生成八条条件分支");
-}
-
-void verify_printed_ir(const std::string& printed_ir) {
-    smoke_test::require(
-        printed_ir.find("; mfile \"" TEST4_3_MFILE_PATH "\"") != std::string::npos,
-        "应打印 test4_3 文件头");
-    smoke_test::require(
-        printed_ir.find("script @test4_3 {") != std::string::npos,
-        "应打印 test4_3 脚本头");
-    smoke_test::require(
-        printed_ir.find("for.preheader:") != std::string::npos &&
-            printed_ir.find("while.header:") != std::string::npos,
-        "应打印 switch case 内的 for / while 块");
-    smoke_test::require(
-        printed_ir.find("continue;") != std::string::npos &&
-            printed_ir.find("break;") != std::string::npos,
-        "应保留 break / continue 的源码注释");
+    verify_printed_loop_exit_layout(*result.mfile);
 }
 
 } // namespace
@@ -193,8 +215,6 @@ int main() {
             baltam::smoke_test::build_ir(TEST4_3_MFILE_PATH);
         baltam::verify_complete_ir(artifacts.result);
         baltam::verify_core_focus(artifacts.result);
-        baltam::verify_printed_ir(artifacts.printed_ir);
-        std::cout << artifacts.printed_ir << '\n';
     } catch (const std::exception& ex) {
         std::cerr << "test4_3_smoke 失败: " << ex.what() << '\n';
         return 1;

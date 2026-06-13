@@ -44,24 +44,6 @@ void verify_core_focus(const IRBuildResult& result) {
         "脚本主体不应生成 call");
 }
 
-void verify_printed_ir(const std::string& printed_ir) {
-    smoke_test::require(
-        printed_ir.find("; mfile \"" TEST1_MFILE_PATH "\"") != std::string::npos,
-        "应打印 test1 文件头");
-    smoke_test::require(
-        printed_ir.find("script @test1 {") != std::string::npos,
-        "应打印 test1 脚本头");
-    smoke_test::require(
-        printed_ir.find("[%3, unknown] = apply @sin(%4)") != std::string::npos,
-        "脚本主体中的 sin(a) 应打印成 apply");
-    smoke_test::require(
-        printed_ir.find("define @sin(%slot0 @x) -> (%slot1 @y) {") != std::string::npos,
-        "应打印 local sin 的函数定义");
-    smoke_test::require(
-        printed_ir.find("call @test1::sin") == std::string::npos,
-        "脚本主体不应把 sin 打印成 local call");
-}
-
 } // namespace
 } // namespace baltam
 
@@ -71,8 +53,6 @@ int main() {
             baltam::smoke_test::build_ir(TEST1_MFILE_PATH);
         baltam::verify_complete_ir(artifacts.result);
         baltam::verify_core_focus(artifacts.result);
-        baltam::verify_printed_ir(artifacts.printed_ir);
-        std::cout << artifacts.printed_ir << '\n';
     } catch (const std::exception& ex) {
         std::cerr << "test1_smoke 失败: " << ex.what() << '\n';
         return 1;

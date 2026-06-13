@@ -153,19 +153,11 @@ public:
     /**
      * @brief 为当前 unit 创建一个 slot。
      */
-    [[nodiscard]] SlotId create_slot(
-        Slot::Type type,
+    [[nodiscard]] Slot create_slot(
+        SlotTag tag,
         std::string_view name,
         SourceSpan source_span,
-        SlotAttrs attrs = {});
-
-    /**
-     * @brief 为当前 unit 创建一个 hidden slot。
-     */
-    [[nodiscard]] SlotId create_hidden_slot(
-        std::string_view name,
-        SlotAttrs::HiddenRole role,
-        SourceSpan source_span);
+        SlotValueType value_type = SlotValueType::Unknown);
 
     /**
      * @brief 为当前 unit 分配一个新的 `ValueId`。

@@ -199,6 +199,56 @@ using InternedString = std::string;
 inline constexpr SlotId InvalidSlotId = SlotId::invalid();
 
 /**
+ * @brief slot 的静态类别。
+ */
+enum class SlotTag : std::uint8_t {
+    BaseVar,
+    ScriptVar,
+    Local,
+    Arg,
+    Ret,
+    Capture,
+    InternalLocal,
+    Global,
+    Persistent,
+    Nargin,
+    Nargout,
+    Varargin,
+    Varargout,
+};
+
+/**
+ * @brief slot 固定值类型事实。
+ */
+enum class SlotValueType : std::uint8_t {
+    Unknown,
+    Int64Scalar,
+    LogicalScalar,
+};
+
+/**
+ * @brief 静态变量槽位。
+ */
+struct Slot {
+    SlotId id = InvalidSlotId;
+    SlotTag tag = SlotTag::Local;
+
+    [[nodiscard]] constexpr bool is_valid() const noexcept {
+        return id.is_valid();
+    }
+};
+
+inline constexpr Slot InvalidSlot{};
+
+[[nodiscard]] constexpr inline bool operator==(Slot lhs, Slot rhs) noexcept {
+    return lhs.id == rhs.id && lhs.tag == rhs.tag;
+}
+
+[[nodiscard]] constexpr inline bool operator!=(Slot lhs, Slot rhs) noexcept {
+    return !(lhs == rhs);
+}
+
+/**
  * @brief 无效的 `ValueId` 常量。
  */
 inline constexpr ValueId InvalidValueId = ValueId::invalid();

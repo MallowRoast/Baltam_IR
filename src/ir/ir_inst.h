@@ -148,7 +148,7 @@ enum DispatchType : std::uint8_t {
  */
 using Operand = std::variant<
     ValueId,
-    SlotId,
+    Slot,
     InternedString>;
 
 /**
@@ -193,8 +193,6 @@ public:
         Const,
         LoadSlot,
         StoreSlot,
-        LoadWorkspace,
-        StoreWorkspace,
         CreateNamedFunctionHandle,
         CreateAnonymousFunctionHandle,
         Apply,
@@ -265,81 +263,37 @@ public:
 };
 
 /**
- * @brief `load_slot` 指令。
+ * @brief `load` 指令。
  */
 class LoadSlotInst final : public Instruction {
 public:
     /**
-     * @brief 构造 `load_slot` 指令。
+     * @brief 构造 `load` 指令。
      *
-     * `load_slot` 的输入操作数是 `SlotId`，表示一个在 IR 构建阶段就已经静态绑定好的
-     * frame 槽位句柄。它读取的是当前 `CodeUnit` 的 slot 空间，而不是按名字查询
-     * workspace。
+     * `load` 的输入操作数是 `Slot`，表示一个在 IR 构建阶段就已经静态绑定好的
+     * frame 槽位句柄。它读取的是当前 `CodeUnit` 的 slot 空间。
      */
     LoadSlotInst() noexcept : Instruction(Instruction::LoadSlot) {
         effect = Frame;
     }
 
     ValueId result = InvalidValueId;
-    SlotId slot_id = InvalidSlotId;
+    Slot slot = InvalidSlot;
 };
 
 /**
- * @brief `store_slot` 指令。
+ * @brief `store` 指令。
  */
 class StoreSlotInst final : public Instruction {
 public:
     /**
-     * @brief 构造 `store_slot` 指令。
+     * @brief 构造 `store` 指令。
      */
     StoreSlotInst() noexcept : Instruction(Instruction::StoreSlot) {
         effect = Frame;
     }
 
-    SlotId slot_id = InvalidSlotId;
-    Operand value;
-};
-
-/**
- * @brief `load_workspace` 指令。
- *
- * `load_workspace` 与 `load_slot` 的核心区别在于输入不是静态 `SlotId`，而是：
- * - 一个指向工作区句柄 slot 的 `workspace_handle_slot`
- * - 一个需要在 workspace 中查询的 `symbol`
- *
- * 因此它表达的是“按名字访问 workspace”，而不是“读取已经静态绑定好的 frame 槽位”。
- */
-class LoadWorkspaceInst final : public Instruction {
-public:
-    /**
-     * @brief 构造 `load_workspace` 指令。
-     */
-    LoadWorkspaceInst() noexcept : Instruction(Instruction::LoadWorkspace) {
-        effect = Env;
-    }
-
-    ValueId result = InvalidValueId;
-    SlotId workspace_handle_slot = InvalidSlotId;
-    InternedString symbol;
-};
-
-/**
- * @brief `store_workspace` 指令。
- *
- * 该指令与 `store_slot` 的区别同样在于写回目标并非静态 slot，而是当前 workspace 中
- * 名为 `symbol` 的动态名字。
- */
-class StoreWorkspaceInst final : public Instruction {
-public:
-    /**
-     * @brief 构造 `store_workspace` 指令。
-     */
-    StoreWorkspaceInst() noexcept : Instruction(Instruction::StoreWorkspace) {
-        effect = Env;
-    }
-
-    SlotId workspace_handle_slot = InvalidSlotId;
-    InternedString symbol;
+    Slot slot = InvalidSlot;
     Operand value;
 };
 
@@ -347,15 +301,15 @@ public:
  * @brief 构造具名函数句柄指令。
  *
  * 该指令表达源码层 `@name`。它必须区分两类语义：
- * - `RuntimeLookup`：运行到这条指令时按当前函数搜索环境查询一次。若查到目标，
+ * - `Runtime`：运行到这条指令时按当前函数搜索环境查询一次。若查到目标，
  *   runtime 句柄会冻结该目标；若查不到，runtime 句柄保留名字，后续每次调用再查询。
- * - `Prebound`：IR 构建或前置分析已经确定目标。运行时直接构造已绑定句柄，不再查询。
+ * - `Static`：IR 构建或前置分析已经确定目标。运行时直接构造已绑定句柄，不再查询。
  */
 class CreateNamedFunctionHandleInst final : public Instruction {
 public:
     enum ResolutionMode : std::uint8_t {
-        RuntimeLookup,
-        Prebound,
+        Runtime,
+        Static,
     };
 
     /**
@@ -368,7 +322,7 @@ public:
 
     ValueId result = InvalidValueId;
     InternedString name;
-    ResolutionMode resolution_mode = RuntimeLookup;
+    ResolutionMode resolution_mode = Runtime;
     DispatchType bound_dispatch_type = Dynamic;
     FunctionUnit* m_function_target = nullptr;
 };
@@ -389,13 +343,12 @@ public:
          * @brief 捕获来源槽位。
          *
          * 在函数 / 匿名函数体中，`source_slot` 是被捕获变量自己的静态 slot，
-         * lowering 通过 `load_slot source_slot` 得到 `captured_value`。
+         * lowering 通过 `load source_slot` 得到 `captured_value`。
          *
-         * 在脚本中，变量来自动态 workspace，没有变量专属 slot。此时
-         * `source_slot` 是脚本的 WorkspaceHandle hidden slot，lowering 通过
-         * `load_workspace source_slot, name` 得到 `captured_value`。
+         * 在脚本中，`source_slot` 是脚本中该变量自己的 `ScriptVar` slot。运行时
+         * 可以根据该 slot 的绑定状态决定直接访问已绑定存储，或退回动态 lookup。
          */
-        SlotId source_slot = InvalidSlotId;
+        Slot source_slot = InvalidSlot;
         ValueId captured_value = InvalidValueId;
     };
 
@@ -579,7 +532,7 @@ public:
      */
     ReturnInst() noexcept : Instruction(Instruction::Return) {}
 
-    std::vector<Operand> values;
+    std::vector<ValueId> values;
 };
 
 } // namespace baltam

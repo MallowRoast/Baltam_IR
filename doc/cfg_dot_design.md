@@ -81,7 +81,7 @@ terminator 的语义信息：
 目标 block 类别标注：
 
 - 跳到 `for.end / while.end`：`break`
-- 跳到 `for.latch / while.latch`：`continue`
+- 跳到 `for.latch / while.header`：`continue`
 
 普通 synthetic 跳转不标注，避免图中过多噪声。
 

@@ -17,7 +17,7 @@
 原因分别是：
 
 - 先只做这些数值标量，是因为它们的运算符语义最清晰，最容易先建立“类型可确认 + 结果可求值”的闭环。
-- 先只做函数文件，是因为脚本名字语义依赖 workspace，很难稳定地静态确定相关符号到底会被当成变量还是函数。
+- 先只做函数文件，是因为脚本名字语义依赖 `ScriptVar` 的运行时绑定和动态 env，很难稳定地静态确定相关符号到底会被当成变量还是函数。
 - 先只做运算符，是因为普通函数调用通常太动态，难以静态确定最终分派；而运算符对这些标量更容易收敛到对应类的对象函数分派。
 
 当前明确不处理：
@@ -92,6 +92,11 @@
 `runtime_private_plus_dispatch_probe` 的具体过程与观测结果见
 [runtime_private_plus_dispatch_probe.md](./runtime_private_plus_dispatch_probe.md)。
 
+运算符语法是否会命中 local function 或 `import` 的实测矩阵见
+[operator_local_import_dispatch_probe.md](./operator_local_import_dispatch_probe.md)。其中需要特别注意：
+大多数运算符在 function 和 script 中都会吃 local/import；`&&` / `||` 不吃；
+`colon` 在 function 中不吃 local/import，但在 script 中会吃。
+
 ## 4. 后续计划
 
 后续可以继续往这几个方向扩展：
@@ -114,3 +119,6 @@
 `runtime_private_plus_dispatch_probe` 的完整观察记录、现象矩阵，以及 `clear plus` /
 `clear functions` / `rehash` 的差异，见
 [runtime_private_plus_dispatch_probe.md](./runtime_private_plus_dispatch_probe.md)。
+
+运算符 local/import 分派矩阵见
+[operator_local_import_dispatch_probe.md](./operator_local_import_dispatch_probe.md)。

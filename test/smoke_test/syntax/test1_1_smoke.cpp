@@ -16,7 +16,10 @@ const FunctionUnit* find_function_unit_by_name(const MFileUnit& mfile, std::stri
     return nullptr;
 }
 
-std::size_t count_local_calls_to(const CodeUnit& unit, std::string_view callee_name) {
+std::size_t count_calls_to(
+    const CodeUnit& unit,
+    std::string_view callee_name,
+    DispatchType dispatch_type) {
     std::size_t count = 0;
     for (const auto& block_ptr : unit.basic_blocks) {
         if (block_ptr == nullptr) {
@@ -29,7 +32,7 @@ std::size_t count_local_calls_to(const CodeUnit& unit, std::string_view callee_n
             }
 
             const auto* call = static_cast<const CallInst*>(inst_ptr.get());
-            if (call->dispatch_type != MFunction) {
+            if (call->dispatch_type != dispatch_type) {
                 continue;
             }
 
@@ -78,8 +81,8 @@ void verify_core_focus(const IRBuildResult& result) {
         "mfile 上的 local 函数索引应指向 uminus 单元");
 
     smoke_test::require(
-        smoke_test::count_instructions(*entry, Instruction::Call) == 2,
-        "主函数中应有两条静态 M 函数 call 指令");
+        smoke_test::count_instructions(*entry, Instruction::Call) == 1,
+        "主函数中只应为 sin(a) 生成一条动态 direct call");
     smoke_test::require(
         smoke_test::count_instructions(*entry, Instruction::Apply) == 0,
         "主函数中不应再用 apply 表达已绑定变量 cos(a)");
@@ -87,56 +90,26 @@ void verify_core_focus(const IRBuildResult& result) {
         smoke_test::count_instructions(*entry, Instruction::ValueApply) == 1,
         "主函数中应有一条 value_apply 指令用于已绑定变量 cos(a)");
     smoke_test::require(
-        count_local_calls_to(*entry, "plus") == 0,
+        count_calls_to(*entry, "plus", MFunction) == 0,
         "plus 被局部变量遮蔽后，a = 1 + 2 不应命中 local plus");
     smoke_test::require(
-        count_local_calls_to(*entry, "sin") == 1,
-        "b = sin(a) 应命中 local sin");
+        count_calls_to(*entry, "sin", Dynamic) == 1,
+        "b = sin(a) 应保留为动态 direct call");
     smoke_test::require(
-        count_local_calls_to(*entry, "uminus") == 1,
-        "e = -a 应命中 local uminus");
-}
-
-void verify_printed_ir(const std::string& printed_ir) {
+        count_calls_to(*entry, "sin", MFunction) == 0,
+        "b = sin(a) 不应在 lowering 阶段静态命中 local sin");
     smoke_test::require(
-        printed_ir.find("; mfile \"" TEST1_1_MFILE_PATH "\"") != std::string::npos,
-        "应打印 test1_1 文件头");
+        count_calls_to(*entry, "uminus", MFunction) == 0,
+        "e = -a 不应在 lowering 阶段静态命中 local uminus");
     smoke_test::require(
-        printed_ir.find("define @test1_1() -> (%slot0 @c) {") != std::string::npos,
-        "应打印 test1_1 主函数头");
+        smoke_test::count_instructions(*entry, Instruction::Unary) == 1,
+        "e = -a 应保留为普通 unary neg");
     smoke_test::require(
-        printed_ir.find("call mfunc @sin(") != std::string::npos,
-        "主函数中的 sin(a) 应打印成静态 M 函数 call");
-    smoke_test::require(
-        printed_ir.find("call mfunc @uminus(") != std::string::npos,
-        "e = -a 应打印成静态 M 函数 uminus call");
-    smoke_test::require(
-        printed_ir.find("call mfunc @cos(") == std::string::npos,
-        "cos(a) 不应打印成静态 M 函数 call");
-    smoke_test::require(
-        printed_ir.find("value_apply ") != std::string::npos,
-        "cos(a) 应打印成 value_apply");
-    smoke_test::require(
-        printed_ir.find("apply @cos") == std::string::npos,
-        "cos(a) 不应打印成名字 apply");
-    smoke_test::require(
-        printed_ir.find("local @cos") != std::string::npos,
+        smoke_test::find_slot_by_name(*entry, "cos") != nullptr,
         "主函数中应存在名为 cos 的局部变量槽位");
     smoke_test::require(
-        printed_ir.find("local @plus") != std::string::npos,
+        smoke_test::find_slot_by_name(*entry, "plus") != nullptr,
         "主函数中应存在名为 plus 的局部变量槽位");
-    smoke_test::require(
-        printed_ir.find("define @sin(%slot0 @x) -> (%slot1 @y) {") != std::string::npos,
-        "应打印 local sin 的函数定义");
-    smoke_test::require(
-        printed_ir.find("define @cos(%slot0 @x) -> (%slot1 @y) {") != std::string::npos,
-        "应打印 local cos 的函数定义");
-    smoke_test::require(
-        printed_ir.find("define @plus(%slot0 @x, %slot1 @y) -> (%slot2 @z) {") != std::string::npos,
-        "应打印 local plus 的函数定义");
-    smoke_test::require(
-        printed_ir.find("define @uminus(%slot0 @x) -> (%slot1 @y) {") != std::string::npos,
-        "应打印 local uminus 的函数定义");
 }
 
 } // namespace
@@ -148,8 +121,6 @@ int main() {
             baltam::smoke_test::build_ir(TEST1_1_MFILE_PATH);
         baltam::verify_complete_ir(artifacts.result);
         baltam::verify_core_focus(artifacts.result);
-        baltam::verify_printed_ir(artifacts.printed_ir);
-        std::cout << artifacts.printed_ir << '\n';
     } catch (const std::exception& ex) {
         std::cerr << "test1_1_smoke 失败: " << ex.what() << '\n';
         return 1;

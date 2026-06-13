@@ -2,7 +2,6 @@
 
 #include <cstddef>
 #include <iostream>
-#include <sstream>
 #include <string_view>
 #include <variant>
 #include <vector>
@@ -71,10 +70,10 @@ std::size_t count_internal_calls(const CodeUnit& unit, std::string_view callee) 
 
 std::size_t count_internal_iter_index_slots(const CodeUnit& unit) {
     std::size_t count = 0;
-    for (const Slot& slot : unit.slot_table.slots) {
-        if (slot.name == "__foreach_iter_index" &&
-            slot.type == Slot::InternalLocal &&
-            slot.attrs.fixed_type == SlotAttrs::Int64Scalar) {
+    for (const SlotInfo& slot : unit.slot_table.slots) {
+        if (slot.name == "__for_idx" &&
+            slot.slot.tag == SlotTag::InternalLocal &&
+            slot.value_type == SlotValueType::Int64Scalar) {
             ++count;
         }
     }
@@ -100,22 +99,6 @@ std::size_t count_user_gotos_to(const CodeUnit& unit, const BasicBlock* target) 
     return count;
 }
 
-std::string find_line_containing_all(
-    std::string_view text,
-    std::string_view first,
-    std::string_view second) {
-    std::istringstream input{std::string(text)};
-    std::string line;
-    while (std::getline(input, line)) {
-        if (line.find(first) != std::string::npos &&
-            line.find(second) != std::string::npos) {
-            return line;
-        }
-    }
-
-    return {};
-}
-
 void verify_complete_ir(const IRBuildResult& result) {
     smoke_test::require_ir_is_complete(result);
     smoke_test::require(result.mfile->is_script_file(), "test3_3 应构造成脚本文件");
@@ -138,25 +121,23 @@ void verify_loop_shape(const CodeUnit& unit) {
                         "应生成两套 while.header");
     smoke_test::require(count_blocks_by_label(unit, "while.body") == 2,
                         "应生成两套 while.body");
-    smoke_test::require(count_blocks_by_label(unit, "while.latch") == 2,
-                        "应生成两套 while.latch");
     smoke_test::require(count_blocks_by_label(unit, "while.end") == 2,
                         "应生成两套 while.end");
 }
 
 void verify_break_continue_targets(const CodeUnit& unit) {
     const std::vector<const BasicBlock*> for_ends = find_blocks_by_label(unit, "for.end");
-    const std::vector<const BasicBlock*> while_latches =
-        find_blocks_by_label(unit, "while.latch");
+    const std::vector<const BasicBlock*> while_headers =
+        find_blocks_by_label(unit, "while.header");
     smoke_test::require(for_ends.size() == 2, "应能区分外层和内层 for.end");
-    smoke_test::require(while_latches.size() == 2, "应能区分内外两层 while.latch");
+    smoke_test::require(while_headers.size() == 2, "应能区分内外两层 while.header");
 
     smoke_test::require(count_user_gotos_to(unit, for_ends[0]) == 1,
                         "外层 for 的 break 应跳到第一套 for.end");
-    smoke_test::require(count_user_gotos_to(unit, while_latches[0]) == 1,
-                        "内层 while 的 continue 应跳到第一套 while.latch");
-    smoke_test::require(count_user_gotos_to(unit, while_latches[1]) == 1,
-                        "外层 while 的 continue 应跳到第二套 while.latch");
+    smoke_test::require(count_user_gotos_to(unit, while_headers[0]) == 1,
+                        "内层 while 的 continue 应跳到第一套 while.header");
+    smoke_test::require(count_user_gotos_to(unit, while_headers[1]) == 1,
+                        "外层 while 的 continue 应跳到第二套 while.header");
     smoke_test::require(count_user_gotos_to(unit, for_ends[1]) == 1,
                         "内层 for 的 break 应跳到第二套 for.end");
 }
@@ -180,39 +161,6 @@ void verify_core_focus(const IRBuildResult& result) {
                         "test3_3 应包含两层 for、两层 while 和四个 if 的条件分支");
 }
 
-void verify_printed_ir(const std::string& printed_ir) {
-    smoke_test::require(
-        printed_ir.find("; mfile \"" TEST3_3_MFILE_PATH "\"") != std::string::npos,
-        "应打印 test3_3 文件头");
-    smoke_test::require(
-        printed_ir.find("script @test3_3 {") != std::string::npos,
-        "应打印 test3_3 脚本头");
-    smoke_test::require(
-        printed_ir.find("for.preheader:") != std::string::npos &&
-            printed_ir.find("for.preheader.1:") != std::string::npos,
-        "两套 for preheader 应通过标签后缀区分");
-    smoke_test::require(
-        printed_ir.find("while.header:") != std::string::npos &&
-            printed_ir.find("while.header.1:") != std::string::npos,
-        "两套 while header 应通过标签后缀区分");
-
-    smoke_test::require(
-        !find_line_containing_all(printed_ir, "br label %for.end ", "break;").empty(),
-        "外层 for 的 break 应打印源码注释并指向 for.end");
-    smoke_test::require(
-        !find_line_containing_all(
-             printed_ir,
-             "br label %while.latch ",
-             "continue;").empty(),
-        "内层 while 的 continue 应打印源码注释并指向 while.latch");
-    smoke_test::require(
-        !find_line_containing_all(printed_ir, "br label %while.latch.1", "continue;").empty(),
-        "外层 while 的 continue 应打印源码注释并指向 while.latch.1");
-    smoke_test::require(
-        !find_line_containing_all(printed_ir, "br label %for.end.1", "break;").empty(),
-        "内层 for 的 break 应打印源码注释并指向 for.end.1");
-}
-
 } // namespace
 } // namespace baltam
 
@@ -222,8 +170,6 @@ int main() {
             baltam::smoke_test::build_ir(TEST3_3_MFILE_PATH);
         baltam::verify_complete_ir(artifacts.result);
         baltam::verify_core_focus(artifacts.result);
-        baltam::verify_printed_ir(artifacts.printed_ir);
-        std::cout << artifacts.printed_ir << '\n';
     } catch (const std::exception& ex) {
         std::cerr << "test3_3_smoke 失败: " << ex.what() << '\n';
         return 1;

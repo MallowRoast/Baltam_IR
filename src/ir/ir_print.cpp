@@ -51,6 +51,13 @@ std::string escape_text(std::string_view text, char quote = '"') {
     return escaped;
 }
 
+std::string pad_right(std::string text, std::size_t width) {
+    if (text.size() < width) {
+        text.append(width - text.size(), ' ');
+    }
+    return text;
+}
+
 bool is_simple_identifier(std::string_view text) {
     if (text.empty()) {
         return false;
@@ -247,48 +254,46 @@ const char* function_handle_dispatch_name(DispatchType dispatch_type) noexcept {
     return "dynamic";
 }
 
-const char* slot_type_name(Slot::Type type) noexcept {
-    switch (type) {
-        case Slot::Arg:
-            return "arg";
-        case Slot::Local:
+const char* slot_tag_name(SlotTag tag) noexcept {
+    switch (tag) {
+        case SlotTag::BaseVar:
+            return "base";
+        case SlotTag::ScriptVar:
+            return "script";
+        case SlotTag::Local:
             return "local";
-        case Slot::InternalLocal:
-            return "internal_local";
-        case Slot::Capture:
-            return "capture";
-        case Slot::Ret:
+        case SlotTag::Arg:
+            return "arg";
+        case SlotTag::Ret:
             return "ret";
-        case Slot::Hidden:
-            return "hidden";
+        case SlotTag::Capture:
+            return "capture";
+        case SlotTag::InternalLocal:
+            return "internal_local";
+        case SlotTag::Global:
+            return "global";
+        case SlotTag::Persistent:
+            return "persistent";
+        case SlotTag::Nargin:
+            return "nargin";
+        case SlotTag::Nargout:
+            return "nargout";
+        case SlotTag::Varargin:
+            return "varargin";
+        case SlotTag::Varargout:
+            return "varargout";
     }
     return "slot";
 }
 
-const char* hidden_role_name(SlotAttrs::HiddenRole role) noexcept {
-    switch (role) {
-        case SlotAttrs::None:
-            return "none";
-        case SlotAttrs::Nargin:
-            return "nargin";
-        case SlotAttrs::Nargout:
-            return "nargout";
-        case SlotAttrs::Varargin:
-            return "varargin";
-        case SlotAttrs::Varargout:
-            return "varargout";
-        case SlotAttrs::WorkspaceHandle:
-            return "env";
-    }
-    return "hidden";
-}
-
-const char* fixed_slot_type_name(SlotAttrs::FixedType fixed_type) noexcept {
-    switch (fixed_type) {
-        case SlotAttrs::Unknown:
+const char* slot_value_type_name(SlotValueType value_type) noexcept {
+    switch (value_type) {
+        case SlotValueType::Unknown:
             return "";
-        case SlotAttrs::Int64Scalar:
+        case SlotValueType::Int64Scalar:
             return "int64";
+        case SlotValueType::LogicalScalar:
+            return "logical";
     }
     return "";
 }
@@ -386,13 +391,14 @@ public:
             }
         }
 
-        for (std::size_t i = 0; i < mfile.code_units.size(); ++i) {
-            const CodeUnit* unit = mfile.code_units[i].get();
+        const std::vector<const CodeUnit*> units = ordered_code_units(mfile);
+        for (std::size_t i = 0; i < units.size(); ++i) {
+            const CodeUnit* unit = units[i];
             if (unit != nullptr) {
                 render_unit(*unit);
             }
 
-            if (i + 1U < mfile.code_units.size()) {
+            if (i + 1U < units.size()) {
                 lines_.push_back({});
             }
         }
@@ -434,6 +440,33 @@ public:
     }
 
 private:
+    [[nodiscard]] std::vector<const CodeUnit*> ordered_code_units(const MFileUnit& mfile) const {
+        std::vector<const CodeUnit*> units;
+        units.reserve(mfile.code_units.size());
+        for (const auto& unit_ptr : mfile.code_units) {
+            if (unit_ptr != nullptr) {
+                units.push_back(unit_ptr.get());
+            }
+        }
+
+        std::stable_sort(
+            units.begin(),
+            units.end(),
+            [](const CodeUnit* lhs, const CodeUnit* rhs) {
+                const bool lhs_valid = lhs != nullptr && lhs->source_span.is_valid();
+                const bool rhs_valid = rhs != nullptr && rhs->source_span.is_valid();
+                if (lhs_valid != rhs_valid) {
+                    return lhs_valid;
+                }
+                if (!lhs_valid || lhs->source_span.begin_offset == rhs->source_span.begin_offset) {
+                    return false;
+                }
+                return lhs->source_span.begin_offset < rhs->source_span.begin_offset;
+            });
+
+        return units;
+    }
+
     void render_anonymous_functions(const AnonymousFunctionTable& anonymous_functions) {
         if (anonymous_functions.empty()) {
             return;
@@ -489,10 +522,7 @@ private:
         }
 
         if (options_.print_slot_table && !unit.slot_table.empty()) {
-            emit_raw("  ; slots:");
-            for (const Slot& slot : unit.slot_table.slots) {
-                emit_raw("  " + format_slot_decl(slot));
-            }
+            emit_slot_table(unit.slot_table);
             if (!unit.basic_blocks.empty()) {
                 emit_raw({});
             }
@@ -506,7 +536,7 @@ private:
                 continue;
             }
 
-            emit_raw(block_labels_[block] + ':');
+            emit_raw(format_block_label(*block));
             for (const std::unique_ptr<Instruction>& instruction : block->instructions) {
                 if (instruction != nullptr) {
                     emit_instruction(unit, *instruction);
@@ -523,18 +553,18 @@ private:
 
     [[nodiscard]] std::string join_signature_slots(
         const SlotTable& slot_table,
-        const std::vector<SlotId>& slot_ids) const {
+        const std::vector<Slot>& slots) const {
         std::string text;
-        for (std::size_t i = 0; i < slot_ids.size(); ++i) {
-            const SlotId slot_id = slot_ids[i];
+        for (std::size_t i = 0; i < slots.size(); ++i) {
+            const Slot slot = slots[i];
             if (i != 0) {
                 text += ", ";
             }
 
-            text += format_slot_ref(slot_id);
-            if (const Slot* slot = slot_table.find_slot(slot_id);
-                slot != nullptr && !slot->name.empty()) {
-                text += " " + format_symbol(slot->name);
+            text += format_slot_ref(slot);
+            if (const SlotInfo* info = slot_table.find_slot(slot);
+                info != nullptr && !info->name.empty()) {
+                text += " " + format_symbol(info->name);
             }
         }
         return text;
@@ -542,6 +572,22 @@ private:
 
     void emit_raw(std::string text) {
         lines_.push_back({std::move(text), {}});
+    }
+
+    void emit_slot_table(const SlotTable& slot_table) {
+        std::size_t slot_ref_width = 0;
+        std::size_t slot_tag_width = 0;
+        for (const SlotInfo& slot : slot_table.slots) {
+            slot_ref_width = std::max(slot_ref_width, format_slot_ref(slot.slot).size());
+            slot_tag_width = std::max(
+                slot_tag_width,
+                std::string_view(slot_tag_name(slot.slot.tag)).size());
+        }
+
+        emit_raw("  ; slots:");
+        for (const SlotInfo& slot : slot_table.slots) {
+            emit_raw(format_slot_decl(slot, slot_ref_width, slot_tag_width));
+        }
     }
 
     void emit_instruction(const CodeUnit& unit, const Instruction& instruction) {
@@ -566,9 +612,9 @@ private:
             for (const BasicBlock* successor : layout_successors(*start)) {
                 if (should_defer_layout_successor(*start, successor)) {
                     if (is_return_block(successor)) {
-                        deferred_returns.push_back(successor);
+                        enqueue_deferred_block(deferred_returns, successor);
                     } else {
-                        deferred.push_back(successor);
+                        enqueue_deferred_block(deferred, successor);
                     }
                     continue;
                 }
@@ -578,12 +624,16 @@ private:
 
         visit(unit.entry_block, visit);
 
-        for (std::size_t i = 0; i < deferred.size(); ++i) {
-            visit(deferred[i], visit);
+        while (!deferred.empty()) {
+            const BasicBlock* block = deferred.front();
+            deferred.erase(deferred.begin());
+            visit(block, visit);
         }
 
-        for (std::size_t i = 0; i < deferred_returns.size(); ++i) {
-            visit(deferred_returns[i], visit);
+        while (!deferred_returns.empty()) {
+            const BasicBlock* block = deferred_returns.front();
+            deferred_returns.erase(deferred_returns.begin());
+            visit(block, visit);
         }
 
         for (const auto& block_ptr : unit.basic_blocks) {
@@ -591,6 +641,31 @@ private:
         }
 
         return ordered;
+    }
+
+    void enqueue_deferred_block(
+        std::vector<const BasicBlock*>& deferred,
+        const BasicBlock* block) const {
+        if (block == nullptr ||
+            std::find(deferred.begin(), deferred.end(), block) != deferred.end()) {
+            return;
+        }
+
+        const auto position = std::find_if(
+            deferred.begin(),
+            deferred.end(),
+            [block](const BasicBlock* existing) {
+                return block_source_order_key(block) > block_source_order_key(existing);
+            });
+        deferred.insert(position, block);
+    }
+
+    [[nodiscard]] static SourceSpan::offset_type block_source_order_key(
+        const BasicBlock* block) noexcept {
+        if (block == nullptr || !block->source_span.is_valid()) {
+            return 0;
+        }
+        return block->source_span.begin_offset;
     }
 
     [[nodiscard]] std::vector<const BasicBlock*> layout_successors(
@@ -641,15 +716,63 @@ private:
         }
 
         if (is_loop_latch_block(successor) &&
-            !is_loop_latch_block(&block)) {
+            !is_loop_latch_block(&block) &&
+            is_if_branch_block(&block)) {
             return true;
         }
 
-        if (is_loop_exit_block(successor)) {
+        if (is_loop_exit_block(successor) &&
+            !is_loop_header_natural_exit(block, *successor)) {
+            return true;
+        }
+
+        if (is_switch_exit_block(successor)) {
+            return true;
+        }
+
+        if (is_if_branch_block(&block) &&
+            successor->label == "if.exit" &&
+            successor->predecessors.size() > 1U) {
             return true;
         }
 
         return false;
+    }
+
+    [[nodiscard]] bool is_if_branch_block(const BasicBlock* block) const {
+        return block != nullptr &&
+            (block->label == "if.then" || block->label == "if.else");
+    }
+
+    [[nodiscard]] bool is_loop_header_natural_exit(
+        const BasicBlock& block,
+        const BasicBlock& successor) const {
+        return (block.label == "for.header" && successor.label == "for.end") ||
+            (block.label == "while.header" && successor.label == "while.end");
+    }
+
+    [[nodiscard]] bool is_switch_exit_block(const BasicBlock* block) const {
+        return is_switch_block_kind(block, "end");
+    }
+
+    [[nodiscard]] bool is_switch_block_kind(
+        const BasicBlock* block,
+        std::string_view kind) const {
+        if (block == nullptr) {
+            return false;
+        }
+
+        const std::string& label = block->label;
+        const std::string first_switch_label = "switch." + std::string(kind);
+        if (label == first_switch_label) {
+            return true;
+        }
+
+        constexpr std::string_view prefix = "switch.";
+        const std::string suffix = "." + std::string(kind);
+        return label.rfind(prefix, 0) == 0 &&
+            label.size() > prefix.size() + suffix.size() &&
+            label.compare(label.size() - suffix.size(), suffix.size(), suffix) == 0;
     }
 
     [[nodiscard]] bool is_loop_latch_block(const BasicBlock* block) const {
@@ -657,7 +780,8 @@ private:
     }
 
     [[nodiscard]] bool is_loop_exit_block(const BasicBlock* block) const {
-        return block != nullptr && block->label == "for.end";
+        return block != nullptr &&
+            (block->label == "for.end" || block->label == "while.end");
     }
 
     [[nodiscard]] bool is_return_block(const BasicBlock* block) const {
@@ -674,21 +798,44 @@ private:
             return {};
         }
 
-        std::string excerpt = collapse_source_excerpt(
-            source_text_.substr(
-                source_span.begin_offset,
-                source_span.end_offset - source_span.begin_offset));
-        if (excerpt.empty()) {
-            return {};
-        }
-
         if (!options_.print_source_line_numbers) {
+            if (!options_.print_source_excerpt) {
+                return {};
+            }
+
+            std::string excerpt = collapse_source_excerpt(
+                source_text_.substr(
+                    source_span.begin_offset,
+                    source_span.end_offset - source_span.begin_offset));
+            if (excerpt.empty()) {
+                return {};
+            }
             return excerpt;
         }
 
         const std::string line_tag = format_source_line_tag(source_span);
         if (line_tag.empty()) {
+            if (!options_.print_source_excerpt) {
+                return {};
+            }
+
+            std::string excerpt = collapse_source_excerpt(
+                source_text_.substr(
+                    source_span.begin_offset,
+                    source_span.end_offset - source_span.begin_offset));
             return excerpt;
+        }
+
+        if (!options_.print_source_excerpt) {
+            return line_tag;
+        }
+
+        std::string excerpt = collapse_source_excerpt(
+            source_text_.substr(
+                source_span.begin_offset,
+                source_span.end_offset - source_span.begin_offset));
+        if (excerpt.empty()) {
+            return line_tag;
         }
 
         return line_tag + ": " + excerpt;
@@ -698,7 +845,6 @@ private:
         const Instruction& instruction) const {
         switch (instruction.type()) {
             case Instruction::StoreSlot:
-            case Instruction::StoreWorkspace:
             case Instruction::Branch:
                 return true;
             case Instruction::Goto:
@@ -836,23 +982,8 @@ private:
     void assign_slot_refs(const SlotTable& slot_table) {
         slot_refs_.clear();
 
-        for (const Slot& slot : slot_table.slots) {
-            if (slot.is_hidden() && slot.attrs.hidden_role != SlotAttrs::None) {
-                if (slot.attrs.hidden_role == SlotAttrs::WorkspaceHandle &&
-                    !slot.name.empty() &&
-                    is_simple_identifier(slot.name)) {
-                    slot_refs_.emplace(slot.slot_id, "%" + std::string(slot.name));
-                    continue;
-                }
-
-                slot_refs_.emplace(
-                    slot.slot_id,
-                    "%" + std::string(hidden_role_name(
-                        static_cast<SlotAttrs::HiddenRole>(slot.attrs.hidden_role))));
-                continue;
-            }
-
-            slot_refs_.emplace(slot.slot_id, format_slot_id(slot.slot_id));
+        for (const SlotInfo& info : slot_table.slots) {
+            slot_refs_.emplace(info.slot.id, format_slot_id(info.slot.id));
         }
     }
 
@@ -869,13 +1000,33 @@ private:
         return '%' + it->second;
     }
 
-    [[nodiscard]] std::string format_slot_ref(SlotId slot_id) const {
-        const auto it = slot_refs_.find(slot_id);
+    [[nodiscard]] std::string format_block_label(const BasicBlock& block) const {
+        const auto it = block_labels_.find(&block);
+        std::string text = (it == block_labels_.end() ? "<unknown-block>" : it->second);
+        text += ':';
+
+        if (!options_.print_block_predecessors || block.predecessors.empty()) {
+            return text;
+        }
+
+        text += " ; preds = [";
+        for (std::size_t i = 0; i < block.predecessors.size(); ++i) {
+            if (i != 0) {
+                text += ", ";
+            }
+            text += format_block_ref(block.predecessors[i]);
+        }
+        text += ']';
+        return text;
+    }
+
+    [[nodiscard]] std::string format_slot_ref(Slot slot) const {
+        const auto it = slot_refs_.find(slot.id);
         if (it != slot_refs_.end()) {
             return it->second;
         }
 
-        return format_slot_id(slot_id);
+        return format_slot_id(slot.id);
     }
 
     [[nodiscard]] std::string format_operand(const Operand& operand) const {
@@ -884,7 +1035,7 @@ private:
                 using T = std::decay_t<decltype(value)>;
                 if constexpr (std::is_same_v<T, ValueId>) {
                     return format_value_id(value);
-                } else if constexpr (std::is_same_v<T, SlotId>) {
+                } else if constexpr (std::is_same_v<T, Slot>) {
                     return format_slot_ref(value);
                 } else {
                     return format_symbol(value);
@@ -970,6 +1121,17 @@ private:
         return text;
     }
 
+    [[nodiscard]] std::string format_value_list(const std::vector<ValueId>& values) const {
+        std::string text;
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            if (i != 0) {
+                text += ", ";
+            }
+            text += format_value_id(values[i]);
+        }
+        return text;
+    }
+
     [[nodiscard]] std::string format_call_like(
         const CodeUnit& unit,
         std::string_view opcode,
@@ -997,6 +1159,20 @@ private:
         return text;
     }
 
+    [[nodiscard]] std::string format_value_apply(
+        const CodeUnit& unit,
+        const ValueApplyInst& inst) const {
+        std::string text = format_result_prefix(unit, inst.results);
+        text += "value_apply(";
+        text += format_value_id(inst.base);
+        if (!inst.arguments.empty()) {
+            text += ", ";
+            text += format_operand_list(inst.arguments);
+        }
+        text += ')';
+        return text;
+    }
+
     [[nodiscard]] std::string format_local_function_symbol(const FunctionUnit* function) const {
         if (function == nullptr || function->file == nullptr) {
             return "@<local>";
@@ -1014,11 +1190,11 @@ private:
         text += format_symbol(inst.name);
 
         switch (inst.resolution_mode) {
-            case CreateNamedFunctionHandleInst::RuntimeLookup:
-                text += " lookup";
+            case CreateNamedFunctionHandleInst::Runtime:
+                text += " runtime";
                 break;
-            case CreateNamedFunctionHandleInst::Prebound:
-                text += " prebound ";
+            case CreateNamedFunctionHandleInst::Static:
+                text += " static ";
                 text += function_handle_dispatch_name(inst.bound_dispatch_type);
                 if (inst.bound_dispatch_type == MFunction) {
                     text += " ";
@@ -1059,24 +1235,21 @@ private:
         return text;
     }
 
-    [[nodiscard]] std::string format_slot_decl(const Slot& slot) const {
-        std::string text = format_slot_ref(slot.slot_id);
+    [[nodiscard]] std::string format_slot_decl(
+        const SlotInfo& slot,
+        std::size_t slot_ref_width,
+        std::size_t slot_tag_width) const {
+        std::string text = "  ; ";
+        text += pad_right(format_slot_ref(slot.slot), slot_ref_width);
         text += " = ";
-        text += slot_type_name(slot.type);
-
-        if (slot.is_hidden() && slot.attrs.hidden_role != SlotAttrs::None) {
-            text += '(';
-            text += hidden_role_name(static_cast<SlotAttrs::HiddenRole>(slot.attrs.hidden_role));
-            text += ')';
-        }
+        text += pad_right(slot_tag_name(slot.slot.tag), slot_tag_width);
 
         if (!slot.name.empty()) {
             text += ' ';
             text += format_symbol(slot.name);
         }
 
-        const char* fixed_type =
-            fixed_slot_type_name(static_cast<SlotAttrs::FixedType>(slot.attrs.fixed_type));
+        const char* fixed_type = slot_value_type_name(slot.value_type);
         if (fixed_type[0] != '\0') {
             text += " : ";
             text += fixed_type;
@@ -1097,23 +1270,11 @@ private:
             case Instruction::LoadSlot: {
                 const auto& inst = static_cast<const LoadSlotInst&>(instruction);
                 return format_value_result(unit, inst.result) +
-                    " = load_slot " + format_slot_ref(inst.slot_id);
+                    " = load " + format_slot_ref(inst.slot);
             }
             case Instruction::StoreSlot: {
                 const auto& inst = static_cast<const StoreSlotInst&>(instruction);
-                return "store_slot " + format_slot_ref(inst.slot_id) + ", " + format_operand(inst.value);
-            }
-            case Instruction::LoadWorkspace: {
-                const auto& inst = static_cast<const LoadWorkspaceInst&>(instruction);
-                return format_value_result(unit, inst.result) + " = load_env " +
-                    format_slot_ref(inst.workspace_handle_slot) + ", " +
-                    format_symbol(inst.symbol);
-            }
-            case Instruction::StoreWorkspace: {
-                const auto& inst = static_cast<const StoreWorkspaceInst&>(instruction);
-                return "store_env " + format_slot_ref(inst.workspace_handle_slot) +
-                    ", " + format_symbol(inst.symbol) +
-                    ", " + format_operand(inst.value);
+                return "store " + format_slot_ref(inst.slot) + ", " + format_operand(inst.value);
             }
             case Instruction::CreateNamedFunctionHandle: {
                 const auto& inst = static_cast<const CreateNamedFunctionHandleInst&>(instruction);
@@ -1136,13 +1297,7 @@ private:
             }
             case Instruction::ValueApply: {
                 const auto& inst = static_cast<const ValueApplyInst&>(instruction);
-                return format_call_like(
-                    unit,
-                    "value_apply",
-                    inst.results,
-                    inst.base,
-                    inst.arguments,
-                    false);
+                return format_value_apply(unit, inst);
             }
             case Instruction::Call: {
                 const auto& inst = static_cast<const CallInst&>(instruction);
@@ -1194,12 +1349,12 @@ private:
 
                 std::string text = "ret ";
                 if (inst.values.size() == 1U) {
-                    text += format_operand(inst.values.front());
+                    text += format_value_id(inst.values.front());
                     return text;
                 }
 
                 text += '(';
-                text += format_operand_list(inst.values);
+                text += format_value_list(inst.values);
                 text += ')';
                 return text;
             }

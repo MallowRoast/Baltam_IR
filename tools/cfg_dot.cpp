@@ -102,7 +102,7 @@ std::string edge_source_label(const GotoInst& inst, const CFGDotOptions& options
         return "break";
     }
     if (inst.target != nullptr &&
-        (inst.target->label == "for.latch" || inst.target->label == "while.latch")) {
+        (inst.target->label == "for.latch" || inst.target->label == "while.header")) {
         return "continue";
     }
 
@@ -249,9 +249,10 @@ private:
             case Instruction::Const:
             case Instruction::LoadSlot:
             case Instruction::StoreSlot:
-            case Instruction::LoadWorkspace:
-            case Instruction::StoreWorkspace:
+            case Instruction::CreateNamedFunctionHandle:
+            case Instruction::CreateAnonymousFunctionHandle:
             case Instruction::Apply:
+            case Instruction::ValueApply:
             case Instruction::Call:
             case Instruction::Copy:
             case Instruction::Unary:

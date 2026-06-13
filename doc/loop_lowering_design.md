@@ -151,8 +151,11 @@ iter_index : loop-carried internal int64 scalar
 `internal_local` slot：
 
 ```text
-%slot1 = internal_local @__foreach_iter_index : int64
+%slot1 = internal_local @__for_idx : int64
 ```
+
+打印名只用于可读性，真正区分内部状态的是 `SlotId + SlotTag::InternalLocal`，不是这个
+调试名；嵌套循环即使打印同名，也会拥有不同的静态 slot id。
 
 `state` 和 `max_iter` 来自 `foreach_init`，在当前循环生命周期内值不变，后续 block
 可以直接使用这两个 `ValueId`。如果某个后端暂时只能从 slot 读取跨 block 内部值，
@@ -160,22 +163,20 @@ iter_index : loop-carried internal int64 scalar
 约束，不是 Matlab `for` 语义上的必要条件。
 
 `iter_index` 虽然需要内部可变存储来跨 `for.latch -> for.header` 传递下一轮值，
-但它不是动态 Matlab 变量。它的 slot 应通过 `SlotAttrs::fixed_type` 声明为固定
+但它不是动态 Matlab 变量。它的 slot metadata 应通过 `value_type` 声明为固定
 `int64 scalar`：
 
 ```text
-slot type = InternalLocal
-is_mutable = true
-fixed_type = Int64Scalar
+slot tag   = InternalLocal
+value_type = Int64Scalar
 ```
 
-因此每次 `load_slot %iter_index_slot` 的结果类型都稳定为 `int64`，不会被写成
-`unknown`，也不会被循环体中的用户代码收窄或污染。`store_slot` 写回该 slot 的值
+因此每次 `load %iter_index_slot` 的结果类型都稳定为 `int64`，不会被写成
+`unknown`，也不会被循环体中的用户代码收窄或污染。`store` 写回该 slot 的值
 也应满足这个固定类型约束。
 
-这里不使用 `hidden slot`，因为当前 `HiddenRole` 有唯一性约束，适合 `WorkspaceHandle`
-这类单例角色，不适合每个循环都创建多份的状态槽。当前做法是
-`internal_local slot`，直接通过 `Slot::InternalLocal` 表示 lowering 内部状态。
+这里使用 `InternalLocal` slot 表示 lowering 内部状态。它和源码中的 Matlab 变量一样有
+静态 `SlotId`，但通过 `SlotTag::InternalLocal` 与用户可见变量区分。
 
 ### 6. 内部 index 运算
 
@@ -224,7 +225,7 @@ plus(iter_index, 1)
 %range = call @colon(...)
 ([%state, extern], [%max_iter, int64]) = call @internal.foreach_init(%range)
 [%initial_index, int64] = const 1
-store_slot %iter_index_slot, %initial_index
+store %iter_index_slot, %initial_index
 br label %for.header
 ```
 
@@ -247,7 +248,7 @@ done = max_iter < iter_index
 形态：
 
 ```text
-[%iter_index, int64] = load_slot %iter_index_slot
+[%iter_index, int64] = load %iter_index_slot
 [%done, logical] = internal.cmp_gt %iter_index, %max_iter
 br %done, label %for.end, label %for.body
 ```
@@ -268,24 +269,24 @@ br %done, label %for.end, label %for.body
 形态：
 
 ```text
-[%iter_index, int64] = load_slot %iter_index_slot
+[%iter_index, int64] = load %iter_index_slot
 [%current_value, unknown] = call @internal.foreach_iterate(%state, %iter_index)
-store_env %env, @i, %current_value
+store %slot_i, %current_value
 ```
 
-脚本中循环变量 `i` 仍然是 workspace 名字，因此写回为：
+脚本中循环变量 `i` 是 `ScriptVar` slot，因此写回为：
 
 ```text
-store_env %env, @i, %current_value
+store %slot_i, %current_value
 ```
 
 示例循环体 `s = s + i` lower 为：
 
 ```text
-%s = load_env %env, @s
-%i = load_env %env, @i
+%s = load %slot_s
+%i = load %slot_i
 %sum = add %s, %i
-store_env %env, @s, %sum
+store %slot_s, %sum
 ```
 
 这里 `s + i` 是用户程序中的 Matlab 加法，仍然可以按表面语义动态分派或等待后续类型
@@ -303,9 +304,9 @@ store_env %env, @s, %sum
 形态：
 
 ```text
-[%iter_index, int64] = load_slot %iter_index_slot
+[%iter_index, int64] = load %iter_index_slot
 [%next_index, int64] = internal.add %iter_index, 1
-store_slot %iter_index_slot, %next_index
+store %iter_index_slot, %next_index
 br label %for.header
 ```
 
@@ -321,51 +322,52 @@ br label %for.header
 
 ### 8. `test2.m` 的目标 IR 形态
 
-省略源码注释后，`test/m/test2/test2.m` 的核心 IR 应收敛为：
+使用当前默认 `ir_print` 选项时，`test/m/test2/test2.m` 的核心 IR 应收敛为：
 
 ```text
 script @test2 {
   ; slots:
-  %test2_env = hidden(env) @test2_env
-  %slot1 = internal_local @__foreach_iter_index : int64
+    %slot0 = script @s
+    %slot1 = internal_local @__for_idx : int64
+    %slot2 = script @i
 
 entry:
   [%0, double] = const 0
-  store_env %test2_env, @s, %0
+  store %slot0, %0                                      ; line 10
   br label %for.preheader
 
-for.preheader:
+for.preheader: ; preds = [%entry]
   [%2, double] = const 1
   [%3, double] = const 10
   [%1, unknown] = call @colon(%2, %3)
   ([%4, extern], [%5, int64]) = call @internal.foreach_init(%1)
   [%6, int64] = const 1
-  store_slot %slot1, %6
+  store %slot1, %6                                      ; line 11-13
   br label %for.header
 
-for.header:
-  [%7, int64] = load_slot %slot1
+for.header: ; preds = [%for.preheader, %for.latch]
+  [%7, int64] = load %slot1
   [%8, logical] = internal.cmp_gt %7, %5
-  br %8, label %for.end, label %for.body
+  br %8, label %for.end, label %for.body                ; line 11-13
 
-for.body:
-  [%9, int64] = load_slot %slot1
+for.body: ; preds = [%for.header]
+  [%9, int64] = load %slot1
   [%10, unknown] = call @internal.foreach_iterate(%4, %9)
-  store_env %test2_env, @i, %10
-  [%12, unknown] = load_env %test2_env, @s
-  [%13, unknown] = load_env %test2_env, @i
-  [%14, unknown] = add %12, %13
-  store_env %test2_env, @s, %14
+  store %slot2, %10                                     ; line 11
+  [%11, unknown] = load %slot0
+  [%12, unknown] = load %slot2
+  [%13, unknown] = add %11, %12
+  store %slot0, %13                                     ; line 12
   br label %for.latch
 
-for.latch:
-  [%15, int64] = load_slot %slot1
-  [%16, int64] = const 1
-  [%17, int64] = internal.add %15, %16
-  store_slot %slot1, %17
+for.latch: ; preds = [%for.body]
+  [%14, int64] = load %slot1
+  [%15, int64] = const 1
+  [%16, int64] = internal.add %14, %15
+  store %slot1, %16                                     ; line 11-13
   br label %for.header
 
-for.end:
+for.end: ; preds = [%for.header]
   ret
 }
 ```
@@ -380,7 +382,7 @@ for.end:
   - `continue` 通过当前 loop context 跳转到 `for.latch`
 - `node_colon` 当前统一 lower 为普通 `call @colon(...)`，不做常量折叠，也不标记为 `internal`。
 - 当前实现已经只把 `iter_index` 落到 internal local slot，并通过
-  `SlotAttrs::fixed_type = Int64Scalar` 声明固定类型。
+  `value_type = Int64Scalar` 声明固定类型。
 - 当前实现已经把 `foreach_iterate` 调整为显式接收 `state, iter_index`。
 - `foreach_iterate` 已负责按 Matlab 规则返回当前迭代值，包括矩阵输入时返回当前列。
 - 当前实现已经把 header 比较和 latch 自增 lowering 为 `internal.cmp_gt` /
@@ -407,10 +409,11 @@ for.end:
 
 - `test2` 是脚本单元。
 - 生成 `entry + 5` 个 basic block。
-- 打印包含 `for.preheader / for.header / for.body / for.latch / for.end`。
+- CFG 中包含 `for.preheader / for.header / for.body / for.latch / for.end`，并验证各 block
+  terminator 和 target。
 - `1:10` 生成一次非 internal 的 `colon` call。
 - `for` 协议生成一次 `internal.foreach_init` 和一次 `internal.foreach_iterate`。
-- 循环体 `s = s + i` 通过 `load_env / add / store_env` 表达。
+- 循环体 `s = s + i` 通过 `load / add / store` 表达。
 - `test2_1` 覆盖 `continue -> for.latch` 和 `break -> for.end`。
 - `test2_2` 覆盖嵌套 `for`，要求内外两层各自生成独立的五块 loop CFG、
   `foreach_init / foreach_iterate` 协议和 internal iter_index slot。
@@ -424,7 +427,7 @@ for.end:
 
 ### 1. 基本 CFG 形状
 
-当前采用四块结构：
+当前采用三块结构：
 
 ```text
 current
@@ -435,20 +438,15 @@ while.header
   -> while.end   // cond false
 
 while.body
-  -> while.latch
-
-while.latch
   -> while.header
 
 while.end
   -> 后续 continuation
 ```
 
-相比只使用 `while.header / while.body / while.end` 三块，单独保留 `while.latch`
-有两个好处：
-
-- `continue` 和循环体普通 fallthrough 可以统一汇合到 latch，再回到 header 重新求值条件。
-- 后续如果需要插入循环计数、profile hook、debug hook 或 cleanup，latch 有稳定落点。
+`while` 没有类似 `for` 的内部迭代下标更新，因此当前基础 lowering 不单独创建
+`while.latch`。循环体普通 fallthrough 和 `continue` 都直接回到 `while.header`，
+在那里重新求值条件。
 
 ### 2. 各 block 语义
 
@@ -477,31 +475,17 @@ while.header:
 职责：
 
 - lower 用户循环体
-- 普通 fallthrough 跳转到 `while.latch`
+- 普通 fallthrough 跳转到 `while.header`
 
 形态：
 
 ```text
 while.body:
   ...
-  br label %while.latch
-```
-
-#### 2.3 `while.latch`
-
-职责：
-
-- 作为普通 fallthrough 和 `continue` 的汇合点
-- 回跳 `while.header`，让条件在下一轮重新求值
-
-形态：
-
-```text
-while.latch:
   br label %while.header
 ```
 
-#### 2.4 `while.end`
+#### 2.3 `while.end`
 
 职责：
 
@@ -515,17 +499,16 @@ while.latch:
 
 ```text
 break_target    = while.end
-continue_target = while.latch
+continue_target = while.header
 ```
 
 因此：
 
 - `break` 跳到 `while.end`
-- `continue` 跳到 `while.latch`，再统一回到 `while.header` 重新求值条件
+- `continue` 跳到 `while.header`，直接重新求值条件
 
 这里和 `for` 的区别是：`for.continue` 跳到 `for.latch` 是为了执行内部迭代下标自增；
-`while.continue` 跳到 `while.latch` 则是为了保持 CFG 形状一致，并为后续 latch hook
-保留稳定插入点。
+`while` 没有这一阶段，所以 continue 的自然目标就是 `while.header`。
 
 ### 4. lowering 伪代码
 
@@ -533,7 +516,6 @@ continue_target = while.latch
 void IRLowerer::lower_while_stmt(const std::shared_ptr<if_flow>& while_node) {
     BasicBlock* header = unit->create_block("while.header", source_span_from(while_node));
     BasicBlock* body = unit->create_block("while.body", source_span_from(while_node->tl()));
-    BasicBlock* latch = unit->create_block("while.latch", source_span_from(while_node));
     BasicBlock* end = unit->create_block("while.end", source_span_from(while_node));
 
     append_goto_from_current_block_to(header);
@@ -543,12 +525,9 @@ void IRLowerer::lower_while_stmt(const std::shared_ptr<if_flow>& while_node) {
     append_branch(condition, body, end);
 
     builder_.set_insert_point(body);
-    const ScopedLoopContext loop_context(*this, {end, latch});
+    const ScopedLoopContext loop_context(*this, {end, header});
     lower_stmt(while_node->tl());
-    append_goto_to_latch_if_current_block_is_open();
-
-    builder_.set_insert_point(latch);
-    append_goto(latch, header);
+    append_goto_to_header_if_current_block_is_open();
 
     builder_.set_insert_point(end);
 }
@@ -579,13 +558,12 @@ end
 
 测试重点：
 
-- 生成 `entry + while.header / while.body / while.latch / while.end`
+- 生成 `entry + while.header / while.body / while.end`
 - 条件表达式在 `while.header` 中求值
-- `while.body` 普通 fallthrough 跳到 `while.latch`
-- `while.latch` 回跳 `while.header`
+- `while.body` 普通 fallthrough 跳到 `while.header`
 - `while.end` 接后续 continuation 或隐式 `ret`
-- `continue` 生成用户级跳转到 `while.latch`
+- `continue` 生成用户级跳转到 `while.header`
 - `break` 生成用户级跳转到 `while.end`
 - `for` 内嵌 `while` 时，内层 `while.end` 回到外层 `for.latch`
-- `while` 内嵌 `for` 时，内层 `for.end` 回到外层 `while.latch`
+- `while` 内嵌 `for` 时，内层 `for.end` 回到外层 `while.header`
 - 混合嵌套中 `break / continue` 始终选择最近一层循环的目标块

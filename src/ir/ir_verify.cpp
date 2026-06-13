@@ -118,8 +118,8 @@ private:
             block.predecessors.end();
     }
 
-    [[nodiscard]] bool has_slot(const CodeUnit& unit, SlotId slot_id) const {
-        return slot_id.is_valid() && unit.slot_table.find_slot(slot_id) != nullptr;
+    [[nodiscard]] bool has_slot(const CodeUnit& unit, Slot slot) const {
+        return slot.is_valid() && unit.slot_table.find_slot(slot) != nullptr;
     }
 
     [[nodiscard]] bool has_value(ValueId value_id) const {
@@ -307,55 +307,45 @@ private:
 
     void verify_slots(const CodeUnit& unit) {
         std::unordered_set<SlotId> seen_slots;
-        std::unordered_map<std::uint8_t, SlotId> hidden_roles;
+        std::unordered_map<SlotTag, SlotId> unique_tags;
 
         for (std::size_t index = 0; index < unit.slot_table.slots.size(); ++index) {
-            const Slot& slot = unit.slot_table.slots[index];
-            if (!slot.slot_id.is_valid()) {
-                error("slot_id 不能为空", slot.source_span);
+            const SlotInfo& slot = unit.slot_table.slots[index];
+            if (!slot.slot.is_valid()) {
+                error("slot 不能为空", slot.source_span);
                 continue;
             }
-            if (!seen_slots.insert(slot.slot_id).second) {
+            if (!seen_slots.insert(slot.slot.id).second) {
                 error("同一个代码单元内 slot_id 不能重复", slot.source_span);
             }
-            if (options_.require_dense_slot_ids && slot.slot_id.value() != index) {
+            if (options_.require_dense_slot_ids && slot.slot.id.value() != index) {
                 warning("slot_id 不符合当前 builder 的递增分配顺序", slot.source_span);
             }
 
-            if (slot.is_hidden()) {
-                if (slot.attrs.hidden_role == SlotAttrs::None) {
-                    error("Hidden slot 必须设置非 None 的 hidden_role", slot.source_span);
-                } else {
-                    const auto [it, inserted] = hidden_roles.emplace(
-                        slot.attrs.hidden_role,
-                        slot.slot_id);
-                    if (!inserted) {
-                        error("同一个代码单元中同一 hidden_role 至多出现一次", slot.source_span);
-                    }
-                }
-            } else if (slot.attrs.hidden_role != SlotAttrs::None) {
-                error("非 Hidden slot 的 hidden_role 必须为 None", slot.source_span);
+            if (slot.slot.tag == SlotTag::ScriptVar && !unit.is_script()) {
+                error("ScriptVar slot 只能出现在脚本代码单元中", slot.source_span);
             }
 
-            if (slot.attrs.hidden_role == SlotAttrs::WorkspaceHandle && !unit.is_script()) {
-                error("WorkspaceHandle hidden slot 只能出现在脚本代码单元中", slot.source_span);
-            }
-
-            if ((slot.attrs.hidden_role == SlotAttrs::Nargin ||
-                 slot.attrs.hidden_role == SlotAttrs::Nargout ||
-                 slot.attrs.hidden_role == SlotAttrs::Varargin ||
-                 slot.attrs.hidden_role == SlotAttrs::Varargout) &&
+            if ((slot.slot.tag == SlotTag::Nargin ||
+                 slot.slot.tag == SlotTag::Nargout ||
+                 slot.slot.tag == SlotTag::Varargin ||
+                 slot.slot.tag == SlotTag::Varargout) &&
                 !unit.is_function()) {
-                error("函数调用约定 hidden slot 只能出现在函数代码单元中", slot.source_span);
+                error("函数调用约定 slot 只能出现在函数代码单元中", slot.source_span);
             }
 
-            if (slot.is_capture() && !unit.is_anonymous_function()) {
+            if (slot.slot.tag == SlotTag::Capture && !unit.is_anonymous_function()) {
                 error("Capture slot 只能出现在匿名函数体单元中", slot.source_span);
             }
 
-            if (slot.attrs.fixed_type != SlotAttrs::Unknown &&
-                slot.attrs.fixed_type != SlotAttrs::Int64Scalar) {
-                error("slot fixed_type 不合法", slot.source_span);
+            if (slot.slot.tag == SlotTag::Nargin ||
+                slot.slot.tag == SlotTag::Nargout ||
+                slot.slot.tag == SlotTag::Varargin ||
+                slot.slot.tag == SlotTag::Varargout) {
+                const auto [it, inserted] = unique_tags.emplace(slot.slot.tag, slot.slot.id);
+                if (!inserted) {
+                    error("同一个代码单元中同一 ABI slot tag 至多出现一次", slot.source_span);
+                }
             }
         }
     }
@@ -391,8 +381,6 @@ private:
                 return static_cast<const ConstInst&>(instruction).result == value_id && result_index == 0;
             case Instruction::LoadSlot:
                 return static_cast<const LoadSlotInst&>(instruction).result == value_id && result_index == 0;
-            case Instruction::LoadWorkspace:
-                return static_cast<const LoadWorkspaceInst&>(instruction).result == value_id && result_index == 0;
             case Instruction::CreateNamedFunctionHandle:
                 return static_cast<const CreateNamedFunctionHandleInst&>(instruction).result == value_id && result_index == 0;
             case Instruction::CreateAnonymousFunctionHandle:
@@ -416,7 +404,6 @@ private:
                 return result_index < inst.results.size() && inst.results[result_index] == value_id;
             }
             case Instruction::StoreSlot:
-            case Instruction::StoreWorkspace:
             case Instruction::Goto:
             case Instruction::Branch:
             case Instruction::Return:
@@ -427,32 +414,32 @@ private:
 
     void verify_function_unit(const FunctionUnit& function) {
         std::unordered_set<SlotId> seen_params;
-        for (SlotId slot_id : function.param_slots) {
-            const Slot* slot = function.slot_table.find_slot(slot_id);
-            if (slot == nullptr) {
+        for (Slot slot : function.param_slots) {
+            const SlotInfo* info = function.slot_table.find_slot(slot);
+            if (info == nullptr) {
                 error("函数参数列表引用了不存在的 slot", function.source_span);
                 continue;
             }
-            if (!slot->is_arg()) {
-                error("函数参数列表只能引用 Arg slot", slot->source_span);
+            if (info->slot.tag != SlotTag::Arg) {
+                error("函数参数列表只能引用 Arg slot", info->source_span);
             }
-            if (!seen_params.insert(slot_id).second) {
-                error("函数参数列表不能重复引用同一个 slot", slot->source_span);
+            if (!seen_params.insert(slot.id).second) {
+                error("函数参数列表不能重复引用同一个 slot", info->source_span);
             }
         }
 
         std::unordered_set<SlotId> seen_returns;
-        for (SlotId slot_id : function.return_slots) {
-            const Slot* slot = function.slot_table.find_slot(slot_id);
-            if (slot == nullptr) {
+        for (Slot slot : function.return_slots) {
+            const SlotInfo* info = function.slot_table.find_slot(slot);
+            if (info == nullptr) {
                 error("函数返回值列表引用了不存在的 slot", function.source_span);
                 continue;
             }
-            if (!slot->is_ret()) {
-                error("函数返回值列表只能引用 Ret slot", slot->source_span);
+            if (info->slot.tag != SlotTag::Ret) {
+                error("函数返回值列表只能引用 Ret slot", info->source_span);
             }
-            if (!seen_returns.insert(slot_id).second) {
-                error("函数返回值列表不能重复引用同一个 slot", slot->source_span);
+            if (!seen_returns.insert(slot.id).second) {
+                error("函数返回值列表不能重复引用同一个 slot", info->source_span);
             }
         }
     }
@@ -463,32 +450,32 @@ private:
         }
 
         std::unordered_set<SlotId> seen_params;
-        for (SlotId slot_id : function.param_slots) {
-            const Slot* slot = function.slot_table.find_slot(slot_id);
-            if (slot == nullptr) {
+        for (Slot slot : function.param_slots) {
+            const SlotInfo* info = function.slot_table.find_slot(slot);
+            if (info == nullptr) {
                 error("匿名函数参数列表引用了不存在的 slot", function.source_span);
                 continue;
             }
-            if (!slot->is_arg()) {
-                error("匿名函数参数列表只能引用 Arg slot", slot->source_span);
+            if (info->slot.tag != SlotTag::Arg) {
+                error("匿名函数参数列表只能引用 Arg slot", info->source_span);
             }
-            if (!seen_params.insert(slot_id).second) {
-                error("匿名函数参数列表不能重复引用同一个 slot", slot->source_span);
+            if (!seen_params.insert(slot.id).second) {
+                error("匿名函数参数列表不能重复引用同一个 slot", info->source_span);
             }
         }
 
         std::unordered_set<SlotId> seen_captures;
-        for (SlotId slot_id : function.capture_slots) {
-            const Slot* slot = function.slot_table.find_slot(slot_id);
-            if (slot == nullptr) {
+        for (Slot slot : function.capture_slots) {
+            const SlotInfo* info = function.slot_table.find_slot(slot);
+            if (info == nullptr) {
                 error("匿名函数捕获列表引用了不存在的 slot", function.source_span);
                 continue;
             }
-            if (!slot->is_capture()) {
-                error("匿名函数捕获列表只能引用 Capture slot", slot->source_span);
+            if (info->slot.tag != SlotTag::Capture) {
+                error("匿名函数捕获列表只能引用 Capture slot", info->source_span);
             }
-            if (!seen_captures.insert(slot_id).second) {
-                error("匿名函数捕获列表不能重复引用同一个 slot", slot->source_span);
+            if (!seen_captures.insert(slot.id).second) {
+                error("匿名函数捕获列表不能重复引用同一个 slot", info->source_span);
             }
         }
     }
@@ -604,37 +591,19 @@ private:
             case Instruction::LoadSlot: {
                 const auto& inst = static_cast<const LoadSlotInst&>(instruction);
                 define_value(inst.result, inst.source_span);
-                verify_slot_ref(inst.slot_id, "load_slot 引用了不存在的 slot", inst.source_span);
+                verify_slot_ref(inst.slot, "load_slot 引用了不存在的 slot", inst.source_span);
                 break;
             }
             case Instruction::StoreSlot: {
                 const auto& inst = static_cast<const StoreSlotInst&>(instruction);
-                verify_slot_ref(inst.slot_id, "store_slot 引用了不存在的 slot", inst.source_span);
+                verify_slot_ref(inst.slot, "store_slot 引用了不存在的 slot", inst.source_span);
                 if (current_unit_ != nullptr) {
-                    const Slot* slot = current_unit_->slot_table.find_slot(inst.slot_id);
-                    if (slot != nullptr && slot->is_capture()) {
+                    const SlotInfo* slot = current_unit_->slot_table.find_slot(inst.slot);
+                    if (slot != nullptr && slot->slot.tag == SlotTag::Capture) {
                         error("匿名函数 capture slot 是只读的，不能 store_slot", inst.source_span);
                     }
                 }
                 verify_operand(inst.value, "store_slot value", inst.source_span);
-                break;
-            }
-            case Instruction::LoadWorkspace: {
-                const auto& inst = static_cast<const LoadWorkspaceInst&>(instruction);
-                define_value(inst.result, inst.source_span);
-                verify_workspace_handle(inst.workspace_handle_slot, inst.source_span);
-                if (inst.symbol.empty()) {
-                    error("load_workspace 的 symbol 不能为空", inst.source_span);
-                }
-                break;
-            }
-            case Instruction::StoreWorkspace: {
-                const auto& inst = static_cast<const StoreWorkspaceInst&>(instruction);
-                verify_workspace_handle(inst.workspace_handle_slot, inst.source_span);
-                if (inst.symbol.empty()) {
-                    error("store_workspace 的 symbol 不能为空", inst.source_span);
-                }
-                verify_operand(inst.value, "store_workspace value", inst.source_span);
                 break;
             }
             case Instruction::CreateNamedFunctionHandle: {
@@ -704,7 +673,9 @@ private:
             }
             case Instruction::Return: {
                 const auto& inst = static_cast<const ReturnInst&>(instruction);
-                verify_operands(inst.values, "return value", inst.source_span);
+                for (ValueId value : inst.values) {
+                    verify_value_ref(value, "return value", inst.source_span);
+                }
                 if (!block.successors.empty()) {
                     error("return 所在基本块不能有 successors", inst.source_span);
                 }
@@ -739,25 +710,9 @@ private:
         }
     }
 
-    void verify_slot_ref(SlotId slot_id, const char* message, SourceSpan source_span) {
-        if (current_unit_ == nullptr || !has_slot(*current_unit_, slot_id)) {
+    void verify_slot_ref(Slot slot, const char* message, SourceSpan source_span) {
+        if (current_unit_ == nullptr || !has_slot(*current_unit_, slot)) {
             error(message, source_span);
-        }
-    }
-
-    void verify_workspace_handle(SlotId slot_id, SourceSpan source_span) {
-        if (current_unit_ == nullptr) {
-            error("workspace handle slot 缺少当前代码单元上下文", source_span);
-            return;
-        }
-
-        const Slot* slot = current_unit_->slot_table.find_slot(slot_id);
-        if (slot == nullptr) {
-            error("workspace 指令引用了不存在的 workspace handle slot", source_span);
-            return;
-        }
-        if (!slot->is_hidden() || slot->attrs.hidden_role != SlotAttrs::WorkspaceHandle) {
-            error("workspace 指令必须引用 WorkspaceHandle hidden slot", source_span);
         }
     }
 
@@ -782,10 +737,10 @@ private:
             return;
         }
 
-        if (std::holds_alternative<SlotId>(operand)) {
-            const SlotId slot_id = std::get<SlotId>(operand);
-            if (current_unit_ == nullptr || !has_slot(*current_unit_, slot_id)) {
-                error(std::string(label) + " 引用了不存在的 SlotId", source_span);
+        if (std::holds_alternative<Slot>(operand)) {
+            const Slot slot = std::get<Slot>(operand);
+            if (current_unit_ == nullptr || !has_slot(*current_unit_, slot)) {
+                error(std::string(label) + " 引用了不存在的 Slot", source_span);
             }
             return;
         }
@@ -873,33 +828,33 @@ private:
         }
 
         switch (inst.resolution_mode) {
-            case CreateNamedFunctionHandleInst::RuntimeLookup:
+            case CreateNamedFunctionHandleInst::Runtime:
                 if (inst.bound_dispatch_type != Dynamic) {
-                    error("lookup function handle 不能携带静态 dispatch type", inst.source_span);
+                    error("runtime function handle 不能携带静态 dispatch type", inst.source_span);
                 }
                 if (inst.m_function_target != nullptr) {
-                    error("lookup function handle 的 m_function_target 必须为空", inst.source_span);
+                    error("runtime function handle 的 m_function_target 必须为空", inst.source_span);
                 }
                 break;
-            case CreateNamedFunctionHandleInst::Prebound:
+            case CreateNamedFunctionHandleInst::Static:
                 if (inst.bound_dispatch_type == Builtin) {
                     if (inst.m_function_target != nullptr) {
-                        error("prebound builtin function handle 的 m_function_target 必须为空",
+                        error("static builtin function handle 的 m_function_target 必须为空",
                               inst.source_span);
                     }
                 } else if (inst.bound_dispatch_type == MFunction) {
                     if (inst.m_function_target == nullptr) {
-                        error("prebound mfunc function handle 必须记录 m_function_target",
+                        error("static mfunc function handle 必须记录 m_function_target",
                               inst.source_span);
                     } else if (mfile == nullptr) {
-                        error("prebound mfunc function handle 需要文件上下文",
+                        error("static mfunc function handle 需要文件上下文",
                               inst.source_span);
                     } else if (!contains_non_anonymous_unit(*mfile, inst.m_function_target)) {
-                        error("prebound mfunc function handle 的 target 必须属于同一个文件",
+                        error("static mfunc function handle 的 target 必须属于同一个文件",
                               inst.source_span);
                     }
                 } else {
-                    error("prebound function handle 只能绑定到 Builtin 或 MFunction",
+                    error("static function handle 只能绑定到 Builtin 或 MFunction",
                           inst.source_span);
                 }
                 break;
@@ -937,8 +892,6 @@ private:
 
             if (!capture.source_slot.is_valid()) {
                 error("create_anon_func 的 source_slot 不能为空", inst.source_span);
-            } else if (unit.is_script()) {
-                verify_workspace_handle(capture.source_slot, inst.source_span);
             } else if (!has_slot(unit, capture.source_slot)) {
                 error("create_anon_func 的 source_slot 必须属于当前代码单元",
                       inst.source_span);

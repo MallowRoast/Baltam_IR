@@ -206,20 +206,17 @@ void verify_load_slot_uses_fixed_slot_type() {
     builder.set_current_unit(&unit);
     builder.set_insert_point(entry);
 
-    SlotAttrs attrs;
-    attrs.is_mutable = 1;
-    attrs.fixed_type = SlotAttrs::Int64Scalar;
-    const SlotId slot = builder.create_slot(
-        Slot::InternalLocal,
+    const Slot slot = builder.create_slot(
+        SlotTag::InternalLocal,
         "__fixed_int64_slot",
         SourceSpan::invalid(),
-        attrs);
+        SlotValueType::Int64Scalar);
     smoke_test::require(slot.is_valid(), "应成功创建 fixed int64 slot");
 
     const ValueId loaded = builder.create_value();
     auto load_inst = std::make_unique<LoadSlotInst>();
     load_inst->result = loaded;
-    load_inst->slot_id = slot;
+    load_inst->slot = slot;
     builder.append_instruction(std::move(load_inst));
 
     const ValueInfo* loaded_info = unit.value_table.find(loaded);
@@ -352,7 +349,7 @@ void verify_create_named_function_handle_type_fact() {
     auto handle_inst = std::make_unique<CreateNamedFunctionHandleInst>();
     handle_inst->result = handle;
     handle_inst->name = "sin";
-    handle_inst->resolution_mode = CreateNamedFunctionHandleInst::RuntimeLookup;
+    handle_inst->resolution_mode = CreateNamedFunctionHandleInst::Runtime;
     builder.append_instruction(std::move(handle_inst));
 
     auto ret = std::make_unique<ReturnInst>();
@@ -371,7 +368,7 @@ void verify_create_named_function_handle_type_fact() {
     const IRVerifyResult verify_result = verify_ir(mfile);
     if (!verify_result.ok()) {
         std::ostringstream message;
-        message << "lookup function handle IR 应通过 verifier";
+        message << "runtime function handle IR 应通过 verifier";
         for (const IRVerifyDiagnostic& diagnostic : verify_result.diagnostics) {
             message << "\n  - " << diagnostic.message;
         }

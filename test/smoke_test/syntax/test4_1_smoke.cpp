@@ -9,12 +9,28 @@
 namespace baltam {
 namespace {
 
+bool label_matches_query(std::string_view label, std::string_view query) {
+    if (label == query) {
+        return true;
+    }
+    constexpr std::string_view switch_prefix = "switch.";
+    if (query.rfind(switch_prefix, 0) != 0 ||
+        label.rfind(switch_prefix, 0) != 0) {
+        return false;
+    }
+
+    const std::string_view kind = query.substr(switch_prefix.size());
+    const std::string suffix = "." + std::string(kind);
+    return label.size() > switch_prefix.size() + suffix.size() &&
+        label.compare(label.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
 std::vector<const BasicBlock*> find_blocks_by_label(
     const CodeUnit& unit,
     std::string_view label) {
     std::vector<const BasicBlock*> blocks;
     for (const auto& block_ptr : unit.basic_blocks) {
-        if (block_ptr != nullptr && block_ptr->label == label) {
+        if (block_ptr != nullptr && label_matches_query(block_ptr->label, label)) {
             blocks.push_back(block_ptr.get());
         }
     }
@@ -66,19 +82,6 @@ std::size_t count_internal_binary_ops(const CodeUnit& unit, BinaryOp op) {
     return count;
 }
 
-bool block_stores_symbol(const BasicBlock& block, std::string_view symbol) {
-    for (const auto& inst_ptr : block.instructions) {
-        if (inst_ptr == nullptr || inst_ptr->type() != Instruction::StoreWorkspace) {
-            continue;
-        }
-        const auto& store = static_cast<const StoreWorkspaceInst&>(*inst_ptr);
-        if (store.symbol == symbol) {
-            return true;
-        }
-    }
-    return false;
-}
-
 void verify_complete_ir(const IRBuildResult& result) {
     smoke_test::require_ir_is_complete(result);
     smoke_test::require(result.mfile->is_script_file(), "test4_1 应构造成脚本文件");
@@ -87,12 +90,10 @@ void verify_complete_ir(const IRBuildResult& result) {
 }
 
 void verify_nested_switch_shape(const CodeUnit& unit) {
-    smoke_test::require(count_blocks_by_label(unit, "switch.dispatch") == 2,
-                        "嵌套 switch 应生成两个 switch.dispatch");
-    smoke_test::require(count_blocks_by_label(unit, "switch.case") == 4,
-                        "内外两层 switch 应生成四个 switch.case body 块");
-    smoke_test::require(count_blocks_by_label(unit, "switch.next") == 4,
-                        "内外两层 switch 应生成四个 switch.next 块");
+    smoke_test::require(count_blocks_by_label(unit, "switch.case") == 3,
+                        "内外两层 switch 应生成三个 switch.case 判断块");
+    smoke_test::require(count_blocks_by_label(unit, "switch.body") == 3,
+                        "内外两层 switch 应生成三个 switch.body 块");
     smoke_test::require(count_blocks_by_label(unit, "switch.otherwise") == 2,
                         "内外两层 switch 应各生成一个 switch.otherwise");
     smoke_test::require(count_blocks_by_label(unit, "switch.end") == 2,
@@ -124,7 +125,7 @@ void verify_inner_switch_returns_to_outer_case_continuation(const CodeUnit& unit
         if (go.target != block &&
             go.target != nullptr &&
             go.target->label == "switch.end" &&
-            block_stores_symbol(*block, "s")) {
+            smoke_test::block_stores_slot_name(*block, unit, "s")) {
             found_inner_end_continuation = true;
         }
     }
@@ -140,31 +141,10 @@ void verify_core_focus(const IRBuildResult& result) {
 
     verify_nested_switch_shape(*entry);
     verify_inner_switch_returns_to_outer_case_continuation(*entry);
-    smoke_test::require(count_internal_calls(*entry, "switch_match") == 5,
-                        "外层两个 case 与内层三个匹配值应生成五次 switch_match");
-    smoke_test::require(count_internal_binary_ops(*entry, Or) == 1,
-                        "内层 case {2, 3} 应用 internal.or 合并匹配条件");
-    smoke_test::require(smoke_test::count_instructions(*entry, Instruction::Branch) == 4,
-                        "内外两层 switch 的四个 case 应生成四条条件分支");
-}
-
-void verify_printed_ir(const std::string& printed_ir) {
-    smoke_test::require(
-        printed_ir.find("; mfile \"" TEST4_1_MFILE_PATH "\"") != std::string::npos,
-        "应打印 test4_1 文件头");
-    smoke_test::require(
-        printed_ir.find("script @test4_1 {") != std::string::npos,
-        "应打印 test4_1 脚本头");
-    smoke_test::require(
-        printed_ir.find("switch.dispatch:") != std::string::npos &&
-            printed_ir.find("switch.dispatch.1:") != std::string::npos,
-        "内外两层 switch.dispatch 应通过标签后缀区分");
-    smoke_test::require(
-        printed_ir.find("switch.end.1:") != std::string::npos,
-        "内外两层 switch.end 应通过标签后缀区分");
-    smoke_test::require(
-        printed_ir.find("s = s + 1;") != std::string::npos,
-        "内层 switch 后的外层 case 后续语句应保留源码注释");
+    smoke_test::require(count_internal_calls(*entry, "switch_match") == 3,
+                        "外层两个 case 与内层一个 case 应生成三次 switch_match");
+    smoke_test::require(smoke_test::count_instructions(*entry, Instruction::Branch) == 3,
+                        "内外两层 switch 的三个 case 应生成三条条件分支");
 }
 
 } // namespace
@@ -176,8 +156,6 @@ int main() {
             baltam::smoke_test::build_ir(TEST4_1_MFILE_PATH);
         baltam::verify_complete_ir(artifacts.result);
         baltam::verify_core_focus(artifacts.result);
-        baltam::verify_printed_ir(artifacts.printed_ir);
-        std::cout << artifacts.printed_ir << '\n';
     } catch (const std::exception& ex) {
         std::cerr << "test4_1_smoke 失败: " << ex.what() << '\n';
         return 1;

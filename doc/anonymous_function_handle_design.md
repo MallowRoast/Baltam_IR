@@ -52,36 +52,27 @@ z = f(2);
 
 ```text
 外层名字
-  -> 外层 load_slot / load_env
+  -> 外层 load
   -> 外层 ValueId
   -> create_anon_func 捕获运行时值
   -> closure capture value
   -> 调用时填入匿名函数 frame 的 Capture slot
-  -> body 内 load_slot
+  -> body 内 load
   -> body-local ValueId
 ```
 
 ## 函数与脚本捕获来源
 
-函数或匿名函数体中的变量已经静态绑定到 slot：
+函数、匿名函数和脚本中的静态变量都已经绑定到 slot：
 
 ```ir
-%1 = load_slot %slot_y
+%1 = load %slot_y
 %2 = create_anon_func #anon0 captures { %slot_y }
 ```
 
-此时 `CaptureValue::source_slot` 是被捕获变量自己的静态 slot，`captured_value` 是构造点
-`load_slot` 的结果。
-
-脚本变量来自 workspace：
-
-```ir
-%1 = load_env %slot_env, @y
-%2 = create_anon_func #anon0 captures { %slot_env }
-```
-
-此时 `source_slot` 是脚本的 `WorkspaceHandle` hidden slot，`name` 是 workspace symbol。
-真正被 closure 捕获的仍是 `captured_value` 对应的运行时值。
+此时 `CaptureValue::source_slot` 是被捕获变量自己的静态 slot。若捕获来源在脚本中，该 slot
+的 tag 是 `ScriptVar`；若捕获来源在函数中，则通常是 `Local`、`Arg` 或 `Ret`。
+真正被 closure 捕获的是构造点 `load` 得到的运行时值。
 
 ## 调用语义
 
@@ -94,9 +85,9 @@ z = f(2);
 在函数中 lower 为：
 
 ```ir
-%f = load_slot %slot_f
+%f = load %slot_f
 %arg = const 2
-%z = value_apply %f(%arg)
+%z = value_apply(%f, %arg)
 ```
 
 `value_apply` 不静态假设 `%f` 一定是匿名函数句柄。运行时再根据 `%f` 的实际值分派：
@@ -118,7 +109,7 @@ z = f(2);
 
 ## 后续优化边界
 
-语义 IR 中保留 capture slot 的 `load_slot`，是为了表达 body-local 数据来源。这不要求最终
+语义 IR 中保留 capture slot 的 `load`，是为了表达 body-local 数据来源。这不要求最终
 执行时一定保留昂贵的 slot 读取。
 
 后续可以在语义保持不变的前提下做：
@@ -129,7 +120,7 @@ z = f(2);
 - capture-to-SSA：执行层把 capture slot 转成隐式参数或 SSA 输入
 - specialized closure call：证明调用目标后，把 captures 作为已知值传入并继续内联
 
-`store_slot + load_slot` forwarding 和保守 DSE 应作为通用 slot canonicalization pass，而不是
+`store + load` forwarding 和保守 DSE 应作为通用 slot canonicalization pass，而不是
 塞进匿名函数 lowering。
 
 ## 待定问题

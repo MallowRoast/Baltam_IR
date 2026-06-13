@@ -131,10 +131,10 @@ verifier 会检查：
 verifier 会检查：
 
 - `param_slots` 引用的 slot 必须存在
-- `param_slots` 引用的 slot 必须是 `Slot::Arg`
+- `param_slots` 引用的 slot 必须是 `SlotTag::Arg`
 - `param_slots` 内部不能重复引用同一个 slot
 - `return_slots` 引用的 slot 必须存在
-- `return_slots` 引用的 slot 必须是 `Slot::Ret`
+- `return_slots` 引用的 slot 必须是 `SlotTag::Ret`
 - `return_slots` 内部不能重复引用同一个 slot
 - 匿名函数体 `id` 必须有效
 - 匿名函数体 `param_slots` 只能引用 `Arg` slot
@@ -145,16 +145,12 @@ verifier 会检查：
 
 verifier 会检查：
 
-- 每个 `slot_id` 必须有效
-- 同一个 `CodeUnit` 内 `slot_id` 不能重复
-- `Slot::Hidden` 必须设置非 `None` 的 `hidden_role`
-- 非 `Hidden` slot 的 `hidden_role` 必须为 `None`
-- 除 `None` 外，同一个 `HiddenRole` 在同一 `CodeUnit` 中最多出现一次
-- `Slot::InternalLocal` 可用于 lowering/runtime 内部普通状态，但不能设置
-  `hidden_role`
-- `Slot::Capture` 只能出现在匿名函数体单元中
-- `WorkspaceHandle` 只能出现在 `ScriptUnit`
+- 每个 `Slot::id` 必须有效
+- 同一个 `CodeUnit` 内 `Slot::id` 不能重复
+- `SlotTag::ScriptVar` 只能出现在脚本单元中
+- `SlotTag::Capture` 只能出现在匿名函数体单元中
 - `Nargin / Nargout / Varargin / Varargout` 只能出现在 `FunctionUnit`
+- `Nargin / Nargout / Varargin / Varargout` 在同一个 `CodeUnit` 中同一 tag 至多出现一次
 
 ### 5. `BasicBlock`
 
@@ -201,31 +197,27 @@ use-before-def。
 verifier 会检查：
 
 - `Operand(ValueId)` 必须引用已定义值
-- `Operand(SlotId)` 必须引用当前 `CodeUnit` 中存在的 slot
+- `Operand(Slot)` 必须引用当前 `CodeUnit` 中存在的 slot
 - `Operand(InternedString)` 不能为空
 
 这些检查覆盖：
 
 - `StoreSlotInst::value`
-- `StoreWorkspaceInst::value`
 - `ApplyInst::callee_or_base / arguments`
 - `CallInst::callee / arguments`
 - `CopyInst::value`
 - `UnaryInst::operand`
 - `BinaryInst::lhs / rhs`
 - `BranchInst::condition`
-- `ReturnInst::values`
+- `ReturnInst::values` 逐项检查为已定义 `ValueId`
 
 ### 9. 具体指令约束
 
 verifier 会检查：
 
-- `LoadSlotInst::slot_id` 必须存在
-- `StoreSlotInst::slot_id` 必须存在
-- `LoadWorkspaceInst::workspace_handle_slot` 必须引用 `WorkspaceHandle` hidden slot
-- `StoreWorkspaceInst::workspace_handle_slot` 必须引用 `WorkspaceHandle` hidden slot
-- `LoadWorkspaceInst::symbol` 不能为空
-- `StoreWorkspaceInst::symbol` 不能为空
+- `LoadSlotInst::slot` 必须存在
+- `StoreSlotInst::slot` 必须存在
+- `StoreSlotInst` 不能写入匿名函数体的 `Capture` slot
 - `CreateAnonymousFunctionHandleInst::function_id` 必须能在所属 module 的匿名函数表中找到
 - `CreateAnonymousFunctionHandleInst::captures` 的 `captured_value` 必须引用当前外层 unit
   中已定义的值
@@ -240,7 +232,7 @@ verifier 会检查：
 - `Indirect`
   - 不能使用 `Internal / MFunction` 静态分派
   - `callee` 不能是 `InternedString`
-  - `callee` 如果是 `ValueId` 或 `SlotId`，必须满足普通 operand 引用规则
+  - `callee` 如果是 `ValueId` 或 `Slot`，必须满足普通 operand 引用规则
 - `dispatch_type = Internal`
   - `callee_kind` 必须是 `Direct`
 - `dispatch_type = MFunction`
@@ -275,9 +267,11 @@ verifier 会检查：
 这意味着 smoke test 会同时覆盖：
 
 - lowering 是否成功
-- IR 是否能打印
-- 关键文本输出是否符合预期
 - verifier 是否接受当前 lowering 产物
+- 各语法样例的核心 IR 结构、CFG target、slot/value 引用是否符合预期
+
+syntax smoke test 不再检查文本 IR 显示格式。`ir_print` 的 CLI 可用性由单独的
+`ir_print_cli_smoke` 覆盖，具体排版约定归 printer 自身维护。
 
 ## 后续演进方向
 

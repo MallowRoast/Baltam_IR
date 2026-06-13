@@ -25,12 +25,14 @@ TypeFact scalar_type_fact(TypeSet types) noexcept {
     return type_fact(types, true);
 }
 
-TypeFact fixed_slot_type_fact(SlotAttrs::FixedType fixed_type) noexcept {
-    switch (fixed_type) {
-        case SlotAttrs::Unknown:
+TypeFact fixed_slot_type_fact(SlotValueType value_type) noexcept {
+    switch (value_type) {
+        case SlotValueType::Unknown:
             return unknown_type_fact();
-        case SlotAttrs::Int64Scalar:
+        case SlotValueType::Int64Scalar:
             return scalar_type_fact(TypeSet::int64());
+        case SlotValueType::LogicalScalar:
+            return scalar_type_fact(TypeSet::logical());
     }
 
     return unknown_type_fact();
@@ -180,12 +182,11 @@ TypeFact instruction_result_type_fact(
                 return unknown_type_fact();
             }
             const auto* inst = static_cast<const LoadSlotInst*>(instruction);
-            const Slot* slot = unit->slot_table.find_slot(inst->slot_id);
+            const SlotInfo* slot = unit->slot_table.find_slot(inst->slot);
             return slot != nullptr
-                ? fixed_slot_type_fact(static_cast<SlotAttrs::FixedType>(slot->attrs.fixed_type))
+                ? fixed_slot_type_fact(slot->value_type)
                 : unknown_type_fact();
         }
-        case Instruction::LoadWorkspace:
         case Instruction::Apply:
         case Instruction::ValueApply:
         case Instruction::Call:
@@ -204,7 +205,6 @@ TypeFact instruction_result_type_fact(
                 value_table,
                 static_cast<const BinaryInst&>(*instruction));
         case Instruction::StoreSlot:
-        case Instruction::StoreWorkspace:
         case Instruction::Goto:
         case Instruction::Branch:
         case Instruction::Return:
@@ -253,11 +253,6 @@ void bind_instruction_results(CodeUnit* unit, Instruction* instruction) {
         }
         case Instruction::LoadSlot: {
             const auto* inst = static_cast<const LoadSlotInst*>(instruction);
-            bind_value_def(value_table, inst->result, 0, instruction, result_type_fact);
-            break;
-        }
-        case Instruction::LoadWorkspace: {
-            const auto* inst = static_cast<const LoadWorkspaceInst*>(instruction);
             bind_value_def(value_table, inst->result, 0, instruction, result_type_fact);
             break;
         }
@@ -321,7 +316,6 @@ void bind_instruction_results(CodeUnit* unit, Instruction* instruction) {
             break;
         }
         case Instruction::StoreSlot:
-        case Instruction::StoreWorkspace:
         case Instruction::Goto:
         case Instruction::Branch:
         case Instruction::Return:
@@ -505,94 +499,45 @@ const BasicBlock* IRBuilder::current_block() const noexcept {
     return current_unit_state_ != nullptr ? current_unit_state_->current_block : nullptr;
 }
 
-SlotId IRBuilder::create_slot(
-    Slot::Type type,
+Slot IRBuilder::create_slot(
+    SlotTag tag,
     std::string_view name,
     SourceSpan source_span,
-    SlotAttrs attrs) {
+    SlotValueType value_type) {
     if (current_unit_state_ == nullptr || current_unit_state_->unit == nullptr) {
         report(
             IRBuildDiagnostic::Error,
             "没有活动代码单元，无法创建槽位",
             source_span);
-        return InvalidSlotId;
+        return InvalidSlot;
     }
 
-    Slot slot;
-    slot.slot_id = current_unit_state_->ids.allocate_slot();
-    slot.type = type;
-    slot.name = InternedString(name);
-    slot.source_span = source_span;
-    slot.attrs = attrs;
+    SlotInfo info;
+    info.slot.id = current_unit_state_->ids.allocate_slot();
+    info.slot.tag = tag;
+    info.name = InternedString(name);
+    info.source_span = source_span;
+    info.value_type = value_type;
 
-    current_unit_state_->unit->slot_table.slots.push_back(slot);
+    current_unit_state_->unit->slot_table.slots.push_back(info);
 
     if (current_unit_state_->unit->is_function()) {
         auto* function = static_cast<FunctionUnit*>(current_unit_state_->unit);
-        if (type == Slot::Arg) {
-            function->param_slots.push_back(slot.slot_id);
-        } else if (type == Slot::Ret) {
-            function->return_slots.push_back(slot.slot_id);
+        if (tag == SlotTag::Arg) {
+            function->param_slots.push_back(info.slot);
+        } else if (tag == SlotTag::Ret) {
+            function->return_slots.push_back(info.slot);
         }
     } else if (current_unit_state_->unit->is_anonymous_function()) {
         auto* function = static_cast<AnonymousFunctionUnit*>(current_unit_state_->unit);
-        if (type == Slot::Arg) {
-            function->param_slots.push_back(slot.slot_id);
-        } else if (type == Slot::Capture) {
-            function->capture_slots.push_back(slot.slot_id);
+        if (tag == SlotTag::Arg) {
+            function->param_slots.push_back(info.slot);
+        } else if (tag == SlotTag::Capture) {
+            function->capture_slots.push_back(info.slot);
         }
     }
 
-    return slot.slot_id;
-}
-
-SlotId IRBuilder::create_hidden_slot(
-    std::string_view name,
-    SlotAttrs::HiddenRole role,
-    SourceSpan source_span) {
-    if (current_unit_state_ == nullptr || current_unit_state_->unit == nullptr) {
-        report(
-            IRBuildDiagnostic::Error,
-            "没有活动代码单元，无法创建隐藏槽位",
-            source_span);
-        return InvalidSlotId;
-    }
-
-    if (role != SlotAttrs::None) {
-        if (const Slot* existing = current_unit_state_->unit->find_hidden_slot(role)) {
-            report(
-                IRBuildDiagnostic::Error,
-                "同一个代码单元中出现了重复的隐藏槽位角色",
-                source_span);
-            return existing->slot_id;
-        }
-    }
-
-    if (role == SlotAttrs::WorkspaceHandle && !current_unit_state_->unit->is_script()) {
-        report(
-            IRBuildDiagnostic::Error,
-            "工作区句柄隐藏槽位只能出现在脚本代码单元中",
-            source_span);
-        return InvalidSlotId;
-    }
-
-    if ((role == SlotAttrs::Nargin ||
-         role == SlotAttrs::Nargout ||
-         role == SlotAttrs::Varargin ||
-         role == SlotAttrs::Varargout) &&
-        !current_unit_state_->unit->is_function()) {
-        report(
-            IRBuildDiagnostic::Error,
-            "函数专用的隐藏槽位角色不能出现在脚本代码单元中",
-            source_span);
-        return InvalidSlotId;
-    }
-
-    SlotAttrs attrs;
-    attrs.hidden_role = role;
-    attrs.is_mutable = 0;
-
-    return create_slot(Slot::Hidden, name, source_span, attrs);
+    return info.slot;
 }
 
 ValueId IRBuilder::create_value() {

@@ -63,14 +63,36 @@ std::size_t count_internal_calls(const CodeUnit& unit, std::string_view callee) 
 
 std::size_t count_internal_iter_index_slots(const CodeUnit& unit) {
     std::size_t count = 0;
-    for (const Slot& slot : unit.slot_table.slots) {
-        if (slot.name == "__foreach_iter_index" &&
-            slot.type == Slot::InternalLocal &&
-            slot.attrs.fixed_type == SlotAttrs::Int64Scalar) {
+    for (const SlotInfo& slot : unit.slot_table.slots) {
+        if (slot.name == "__for_idx" &&
+            slot.slot.tag == SlotTag::InternalLocal &&
+            slot.value_type == SlotValueType::Int64Scalar) {
             ++count;
         }
     }
     return count;
+}
+
+bool has_synthetic_goto_between_labels(
+    const CodeUnit& unit,
+    std::string_view source_label,
+    std::string_view target_label) {
+    for (const auto& block_ptr : unit.basic_blocks) {
+        if (block_ptr == nullptr || block_ptr->label != source_label) {
+            continue;
+        }
+        const Instruction* terminator = block_ptr->terminator();
+        if (terminator == nullptr || terminator->type() != Instruction::Goto) {
+            continue;
+        }
+        const auto& go = static_cast<const GotoInst&>(*terminator);
+        if (go.attrs.is_synthetic != 0 &&
+            go.target != nullptr &&
+            go.target->label == target_label) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void verify_complete_ir(const IRBuildResult& result) {
@@ -84,8 +106,8 @@ void verify_core_focus(const IRBuildResult& result) {
     const CodeUnit* entry = result.mfile->entry_unit;
     smoke_test::require(entry != nullptr && entry->is_script(), "入口应为脚本单元");
 
-    smoke_test::require(entry->basic_blocks.size() == 19,
-                        "test3_2 应生成 entry + 两套 for 五块 CFG + 两套 while 四块 CFG");
+    smoke_test::require(entry->basic_blocks.size() == 17,
+                        "test3_2 应生成 entry + 两套 for 五块 CFG + 两套 while 三块 CFG");
     smoke_test::require(count_blocks_by_label(*entry, "for.preheader") == 2,
                         "应生成两套 for.preheader");
     smoke_test::require(count_blocks_by_label(*entry, "for.header") == 2,
@@ -100,8 +122,6 @@ void verify_core_focus(const IRBuildResult& result) {
                         "应生成两套 while.header");
     smoke_test::require(count_blocks_by_label(*entry, "while.body") == 2,
                         "应生成两套 while.body");
-    smoke_test::require(count_blocks_by_label(*entry, "while.latch") == 2,
-                        "应生成两套 while.latch");
     smoke_test::require(count_blocks_by_label(*entry, "while.end") == 2,
                         "应生成两套 while.end");
 
@@ -115,32 +135,12 @@ void verify_core_focus(const IRBuildResult& result) {
                         "两层 for 应创建两个独立的 internal iter_index slot");
     smoke_test::require(smoke_test::count_instructions(*entry, Instruction::Branch) == 4,
                         "test3_2 应包含两个 for header 分支和两个 while header 分支");
-}
-
-void verify_printed_ir(const std::string& printed_ir) {
     smoke_test::require(
-        printed_ir.find("; mfile \"" TEST3_2_MFILE_PATH "\"") != std::string::npos,
-        "应打印 test3_2 文件头");
-    smoke_test::require(
-        printed_ir.find("script @test3_2 {") != std::string::npos,
-        "应打印 test3_2 脚本头");
-    smoke_test::require(
-        printed_ir.find("for.preheader:") != std::string::npos &&
-            printed_ir.find("for.preheader.1:") != std::string::npos,
-        "两套 for preheader 应通过标签后缀区分");
-    smoke_test::require(
-        printed_ir.find("while.header:") != std::string::npos &&
-            printed_ir.find("while.header.1:") != std::string::npos,
-        "两套 while header 应通过标签后缀区分");
-    smoke_test::require(
-        printed_ir.find("while.end:\n  br label %for.latch") != std::string::npos,
+        has_synthetic_goto_between_labels(*entry, "while.end", "for.latch"),
         "内层 while 正常结束后应回到外层 for.latch");
     smoke_test::require(
-        printed_ir.find("for.end.1:\n  br label %while.latch.1") != std::string::npos,
-        "内层 for 正常结束后应回到外层 while.latch.1");
-    smoke_test::require(
-        printed_ir.find("store_env %test3_2_env, @s") != std::string::npos,
-        "两段混合嵌套循环都应写回 workspace 变量 s");
+        has_synthetic_goto_between_labels(*entry, "for.end", "while.header"),
+        "内层 for 正常结束后应回到外层 while.header");
 }
 
 } // namespace
@@ -152,8 +152,6 @@ int main() {
             baltam::smoke_test::build_ir(TEST3_2_MFILE_PATH);
         baltam::verify_complete_ir(artifacts.result);
         baltam::verify_core_focus(artifacts.result);
-        baltam::verify_printed_ir(artifacts.printed_ir);
-        std::cout << artifacts.printed_ir << '\n';
     } catch (const std::exception& ex) {
         std::cerr << "test3_2_smoke 失败: " << ex.what() << '\n';
         return 1;

@@ -7,10 +7,10 @@
 
 目前支持：
 
-- 脚本变量的 `load_workspace` / `store_workspace`
+- 脚本变量的 `ScriptVar` slot 和 `load` / `store`
 - 脚本中的 `Apply` 节点
 - `if / else / end` 语句的 lowering
-- 函数中变量的 `load_slot` / `store_slot`
+- 函数中变量的 `load` / `store`
 - 函数中 `Apply` 节点到 `Call` 节点的降级
 
 3. 增加对 local 函数的最小支持，见 `test1` 和 `test1_1`。
@@ -18,9 +18,9 @@
 具体包括：
 
 - 脚本中的 local 函数调用目前仍保留为 `apply`
-- 函数中的 local 函数调用可以静态分派
-- 支持一元 / 二元运算符对 local 函数的分派
-- 验证了函数中局部变量对 local 函数的遮蔽作用
+- 函数中的未绑定名字调用先保留为动态 direct `call`
+- 一元 / 二元运算符在基础 lowering 中保留为 `UnaryInst` / `BinaryInst`
+- 验证了函数中局部变量对同名调用的遮蔽作用
 - MATLAB 不允许脚本变量与同文件 local 函数同名；因此不保留这类脚本遮蔽测试输入
 
 4. 增加第一版 IR verifier，见 [ir_verifier_design.md](./ir_verifier_design.md)。
@@ -28,7 +28,7 @@
 当前 verifier 覆盖：
 
 - `IRModule / MFileUnit / CodeUnit / FunctionUnit / AnonymousFunctionUnit` 的所有权与入口引用
-- slot 表和 hidden slot 约束
+- slot 表和 `SlotTag` 约束
 - block terminator 约束
 - CFG predecessor / successor 与 terminator 目标的一致性
 - `ValueId / SlotId / Operand` 引用合法性
@@ -81,10 +81,10 @@
 当前支持：
 
 - 新增 `CreateNamedFunctionHandleInst`，用于表达源码层 `@name` 的具名函数句柄构造
-- 具名函数句柄构造区分运行时 lookup 和静态 prebound，结果类型固定为 `function_handle`
+- 具名函数句柄构造默认 runtime 解析；static 绑定留给后续名字解析 pass
 - 新增 `ValueApplyInst`，将已知 base 为运行时值的圆括号应用统一表达为 `value_apply`
-- 函数中已绑定变量的 `f(...)` 会 lower 为 `load_slot f` + `value_apply`
-- 矩阵变量下标读取 `A(...)` 同样 lower 为 `load_slot A` + `value_apply`
+- 函数中已绑定变量的 `f(...)` 会 lower 为 `load f` + `value_apply`
+- 矩阵变量下标读取 `A(...)` 同样 lower 为 `load A` + `value_apply`
 - `ApplyInst` 继续保留脚本名字应用等尚未消歧的 `A(...)`
 - 新增 `CreateAnonymousFunctionHandleInst` 和 `AnonymousFunctionUnit`
 - 匿名函数体由 `IRModule::anonymous_functions` 拥有，普通 IR 通过 `AnonymousFunctionId`

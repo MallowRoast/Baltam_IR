@@ -72,8 +72,11 @@ void print_usage(std::ostream& os) {
        << "options:\n"
        << "  -o, --output <path>       write text IR to path; use '-' for stdout\n"
        << "  --no-source               do not append source comments\n"
+       << "  --source-full             include collapsed source excerpts in comments\n"
        << "  --no-line-numbers         omit source line numbers in comments\n"
        << "  --no-slots                do not print the slot table\n"
+       << "  --show-cfg                print basic block predecessor lists\n"
+       << "  --no-cfg                  do not print basic block predecessor lists\n"
        << "  --no-types                do not print ValueTable type facts\n"
        << "  --no-file-header          do not print the file header comment\n"
        << "  --comment-column <n>      minimum source comment column\n"
@@ -138,12 +141,24 @@ bool parse_args(int argc, char** argv, Options& options) {
             options.print_options.print_source_comments = false;
             continue;
         }
+        if (arg == "--source-full") {
+            options.print_options.print_source_excerpt = true;
+            continue;
+        }
         if (arg == "--no-line-numbers") {
             options.print_options.print_source_line_numbers = false;
             continue;
         }
         if (arg == "--no-slots") {
             options.print_options.print_slot_table = false;
+            continue;
+        }
+        if (arg == "--show-cfg") {
+            options.print_options.print_block_predecessors = true;
+            continue;
+        }
+        if (arg == "--no-cfg") {
+            options.print_options.print_block_predecessors = false;
             continue;
         }
         if (arg == "--no-types") {

@@ -2,8 +2,8 @@
 %
 % 这个用例验证混合嵌套循环中最近一层 loop context 的选择：
 % 1. 外层 for 的 `break` 应跳到外层 for.end
-% 2. 内层 while 的 `continue` 应跳到内层 while.latch
-% 3. 外层 while 的 `continue` 应跳到外层 while.latch
+% 2. 内层 while 的 `continue` 应跳到内层 while.header
+% 3. 外层 while 的 `continue` 应跳到外层 while.header
 % 4. 内层 for 的 `break` 应跳到内层 for.end
 
 s = 0;

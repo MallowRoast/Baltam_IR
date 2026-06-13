@@ -83,32 +83,6 @@ struct CodeUnit {
     }
 
     /**
-     * @brief 查找指定隐藏角色对应的 slot。
-     *
-     * 该接口依赖一个 schema 前提：在同一个 `CodeUnit` 中，除 `None` 外的同一
-     * `HiddenRole` 至多出现一个对应 slot。这个唯一性约束应由 verifier 保证。
-     *
-     * @param role 待查找的隐藏角色。
-     * @return 找到时返回对应 slot 指针，否则返回 `nullptr`。
-     */
-    [[nodiscard]] Slot* find_hidden_slot(SlotAttrs::HiddenRole role) noexcept {
-        return slot_table.find_hidden_slot(role);
-    }
-
-    /**
-     * @brief 查找指定隐藏角色对应的 slot。
-     *
-     * 该接口依赖一个 schema 前提：在同一个 `CodeUnit` 中，除 `None` 外的同一
-     * `HiddenRole` 至多出现一个对应 slot。这个唯一性约束应由 verifier 保证。
-     *
-     * @param role 待查找的隐藏角色。
-     * @return 找到时返回对应 slot 指针，否则返回 `nullptr`。
-     */
-    [[nodiscard]] const Slot* find_hidden_slot(SlotAttrs::HiddenRole role) const noexcept {
-        return slot_table.find_hidden_slot(role);
-    }
-
-    /**
      * @brief 为当前 unit 创建一个基本块。
      */
     [[nodiscard]] BasicBlock* create_block(std::string_view label, SourceSpan source_span) {
@@ -166,7 +140,7 @@ struct ScriptUnit : CodeUnit {
  * 第一版 `FunctionUnit` 在 `CodeUnit` 之上增加函数专属接口描述，并显式固定函数语义约束：
  * - `type()` 固定返回 `Function`
  * - 参数与返回值接口由 `param_slots` / `return_slots` 描述
- * - `nargin`、`nargout`、`varargin`、`varargout` 通过 `hidden slot` 表达
+ * - `nargin`、`nargout`、`varargin`、`varargout` 通过对应 `SlotTag` 表达
  */
 struct FunctionUnit : CodeUnit {
     /**
@@ -190,14 +164,14 @@ struct FunctionUnit : CodeUnit {
      *
      * 参数名字、源码位置等信息统一由对应 `Slot` 提供，不再重复保存一份描述结构。
      */
-    std::vector<SlotId> param_slots;
+    std::vector<Slot> param_slots;
 
     /**
      * @brief 按声明顺序保存函数返回值对应的 slot。
      *
      * 返回值名字、源码位置等信息统一由对应 `Slot` 提供，不再重复保存一份描述结构。
      */
-    std::vector<SlotId> return_slots;
+    std::vector<Slot> return_slots;
 };
 
 /**
@@ -247,8 +221,8 @@ struct AnonymousFunctionUnit : CodeUnit {
 
     AnonymousFunctionId id = InvalidAnonymousFunctionId;
     CodeUnit* lexical_parent = nullptr;
-    std::vector<SlotId> param_slots;
-    std::vector<SlotId> capture_slots;
+    std::vector<Slot> param_slots;
+    std::vector<Slot> capture_slots;
 };
 
 /**

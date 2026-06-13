@@ -82,35 +82,6 @@ static const std::unordered_map<nodeType, UnaryOp> kUnaryOpMap = {
     {node_ctranspose, Ctranspose},
 };
 
-static const std::unordered_map<nodeType, std::string_view> kUnaryOperatorFunctionNameMap = {
-    {node_uplus, "uplus"},
-    {node_negative, "uminus"},
-    {node_logic_not, "not"},
-    {node_transpose, "transpose"},
-    {node_ctranspose, "ctranspose"},
-};
-
-static const std::unordered_map<nodeType, std::string_view> kBinaryOperatorFunctionNameMap = {
-    {node_add, "plus"},
-    {node_subtract, "minus"},
-    {node_multiply, "mtimes"},
-    {node_right_divide, "mrdivide"},
-    {node_left_divide, "mldivide"},
-    {node_power, "mpower"},
-    {node_element_mul, "times"},
-    {node_element_rdiv, "rdivide"},
-    {node_element_ldiv, "ldivide"},
-    {node_element_power, "power"},
-    {node_logic_and, "and"},
-    {node_logic_or, "or"},
-    {node_less_than, "lt"},
-    {node_leq, "le"},
-    {node_greater_than, "gt"},
-    {node_geq, "ge"},
-    {node_eq, "eq"},
-    {node_noteq, "ne"},
-};
-
 bool try_parse_number_constant(const numval& number_node, Constant& out_constant) {
     std::string text = number_node.str;
     text.erase(
@@ -214,6 +185,29 @@ std::vector<std::string> collect_anonymous_free_names(
     }
 
     return std::vector<std::string>(free_names.begin(), free_names.end());
+}
+
+bool is_empty_stmt_node(const ast_ptr& node) {
+    if (node == nullptr) {
+        return true;
+    }
+
+    switch (node->nodetype) {
+        case node_nop:
+        case node_empty:
+        case node_comment:
+        case node_andy_end_of_string:
+            return true;
+        case node_runlist:
+        case node_cmdlist:
+        case node_list:
+            return std::all_of(
+                node->branch.begin(),
+                node->branch.end(),
+                [](const ast_ptr& branch) { return is_empty_stmt_node(branch); });
+        default:
+            return false;
+    }
 }
 
 } // namespace
@@ -361,6 +355,7 @@ IRBuildResult IRLowerer::lower_parsed_units(
                 std::string("创建代码单元失败: ") + parsed_unit->funname);
             continue;
         }
+        unit->source_span = source_span_from(parsed_unit->ast);
         unit_name_bindings_.try_emplace(unit);
 
         const bool is_main_unit =
@@ -425,10 +420,7 @@ IRBuildResult IRLowerer::lower_parsed_units(
             inst->source_span = SourceSpan::invalid();
 
             if (unit->is_function()) {
-                const auto* function = static_cast<const FunctionUnit*>(unit);
-                for (SlotId slot_id : function->return_slots) {
-                    inst->values.push_back(slot_id);
-                }
+                inst->values = load_function_return_values(SourceSpan::invalid());
             }
 
             builder_.append_instruction(std::move(inst));
@@ -480,10 +472,7 @@ void IRLowerer::lower_stmt(const ast_ptr& node) {
 
             const CodeUnit* unit = builder_.current_unit();
             if (unit != nullptr && unit->is_function()) {
-                const auto* function = static_cast<const FunctionUnit*>(unit);
-                for (SlotId slot_id : function->return_slots) {
-                    inst->values.push_back(slot_id);
-                }
+                inst->values = load_function_return_values(inst->source_span);
             }
 
             builder_.append_instruction(std::move(inst));
@@ -554,29 +543,13 @@ void IRLowerer::lower_assign_stmt(const std::shared_ptr<symasgn>& assign) {
     }
 
     const SourceSpan source_span = source_span_from(assign);
-    if (builder_.current_unit() != nullptr &&
-        builder_.current_unit()->is_script()) {
-        const SlotId workspace_handle_slot = ensure_workspace_handle_slot(source_span);
-        if (!workspace_handle_slot.is_valid()) {
-            return;
-        }
-
-        std::unique_ptr<StoreWorkspaceInst> inst = std::make_unique<StoreWorkspaceInst>();
-        inst->workspace_handle_slot = workspace_handle_slot;
-        inst->symbol = InternedString(name);
-        inst->value = value;
-        inst->source_span = source_span;
-        builder_.append_instruction(std::move(inst));
-        return;
-    }
-
-    const SlotId slot_id = ensure_slot_binding(name, source_span);
-    if (!slot_id.is_valid()) {
+    const Slot slot = ensure_slot_binding(name, source_span);
+    if (!slot.is_valid()) {
         return;
     }
 
     std::unique_ptr<StoreSlotInst> inst = std::make_unique<StoreSlotInst>();
-    inst->slot_id = slot_id;
+    inst->slot = slot;
     inst->value = value;
     inst->source_span = source_span;
     builder_.append_instruction(std::move(inst));
@@ -712,14 +685,15 @@ void IRLowerer::lower_if_stmt(const std::shared_ptr<if_flow>& if_node) {
     }
 
     BasicBlock* then_block = unit->create_block("if.then", source_span_from(if_node->tl()));
+    const bool has_else_body = !is_empty_stmt_node(if_node->el());
     BasicBlock* else_block = nullptr;
-    if (if_node->el() != nullptr) {
+    if (has_else_body) {
         else_block = unit->create_block("if.else", source_span_from(if_node->el()));
     }
     BasicBlock* exit_block = unit->create_block("if.exit", source_span_from(if_node));
 
     if (then_block == nullptr || exit_block == nullptr ||
-        (if_node->el() != nullptr && else_block == nullptr)) {
+        (has_else_body && else_block == nullptr)) {
         return;
     }
 
@@ -775,31 +749,31 @@ void IRLowerer::lower_switch_stmt(const std::shared_ptr<switch_flow>& switch_nod
         return;
     }
 
-    BasicBlock* dispatch_block =
-        unit->create_block("switch.dispatch", source_span_from(switch_node->expr()));
+    std::size_t switch_index = 0;
+    for (const auto& block_ptr : unit->basic_blocks) {
+        if (block_ptr == nullptr) {
+            continue;
+        }
+        const std::string& label = block_ptr->label;
+        if (label == "switch.end" ||
+            (label.rfind("switch.", 0) == 0 &&
+             label.size() > 4U &&
+             label.compare(label.size() - 4U, 4U, ".end") == 0)) {
+            ++switch_index;
+        }
+    }
+    const std::string switch_prefix = switch_index == 0
+        ? std::string("switch")
+        : "switch." + std::to_string(switch_index);
+
     BasicBlock* exit_block =
-        unit->create_block("switch.end", source_span_from(switch_node));
-    if (dispatch_block == nullptr || exit_block == nullptr) {
+        unit->create_block(switch_prefix + ".end", source_span_from(switch_node));
+    if (exit_block == nullptr) {
         return;
     }
 
-    if (builder_.current_block() != nullptr &&
-        !builder_.current_block()->has_terminator()) {
-        std::unique_ptr<GotoInst> go = std::make_unique<GotoInst>();
-        go->target = dispatch_block;
-        go->source_span = source_span_from(switch_node);
-        builder_.append_instruction(std::move(go));
-    }
-
-    builder_.set_insert_point(dispatch_block);
-    const ValueId switch_value = lower_expr(switch_node->expr());
-    if (!switch_value.is_valid()) {
-        return;
-    }
-
-    BasicBlock* current_check_block = dispatch_block;
+    std::vector<ast_ptr> case_nodes;
     ast_ptr otherwise_node;
-
     for (const ast_ptr& case_node : switch_node->cases()->branch) {
         if (case_node == nullptr) {
             continue;
@@ -815,16 +789,72 @@ void IRLowerer::lower_switch_stmt(const std::shared_ptr<switch_flow>& switch_nod
                 source_span_from(case_node));
             return;
         }
+        case_nodes.push_back(case_node);
+    }
 
+    std::vector<BasicBlock*> check_blocks;
+    std::vector<BasicBlock*> body_blocks;
+    check_blocks.reserve(case_nodes.size());
+    body_blocks.reserve(case_nodes.size());
+    for (const ast_ptr& case_node : case_nodes) {
+        BasicBlock* check_block =
+            unit->create_block(switch_prefix + ".case", source_span_from(case_node->branch[0]));
         BasicBlock* body_block =
-            unit->create_block("switch.case", source_span_from(case_node->branch[1]));
-        BasicBlock* next_block =
-            unit->create_block("switch.next", source_span_from(case_node));
-        if (body_block == nullptr || next_block == nullptr) {
+            unit->create_block(switch_prefix + ".body", source_span_from(case_node->branch[1]));
+        if (check_block == nullptr || body_block == nullptr) {
             return;
         }
+        check_blocks.push_back(check_block);
+        body_blocks.push_back(body_block);
+    }
 
-        builder_.set_insert_point(current_check_block);
+    BasicBlock* otherwise_block = nullptr;
+    if (otherwise_node != nullptr && !otherwise_node->branch.empty()) {
+        otherwise_block =
+            unit->create_block(switch_prefix + ".otherwise", source_span_from(otherwise_node));
+        if (otherwise_block == nullptr) {
+            return;
+        }
+    }
+
+    BasicBlock* first_block = nullptr;
+    if (!check_blocks.empty()) {
+        first_block = check_blocks.front();
+    } else if (otherwise_block != nullptr) {
+        first_block = otherwise_block;
+    } else {
+        first_block = exit_block;
+    }
+
+    if (builder_.current_block() != nullptr &&
+        !builder_.current_block()->has_terminator()) {
+        std::unique_ptr<GotoInst> go = std::make_unique<GotoInst>();
+        go->target = first_block;
+        go->source_span = source_span_from(switch_node);
+        go->attrs.is_synthetic = 1;
+        builder_.append_instruction(std::move(go));
+    }
+
+    builder_.set_insert_point(first_block);
+    const ValueId switch_value = lower_expr(switch_node->expr());
+    if (!switch_value.is_valid()) {
+        return;
+    }
+
+    for (std::size_t i = 0; i < case_nodes.size(); ++i) {
+        const ast_ptr& case_node = case_nodes[i];
+        BasicBlock* check_block = check_blocks[i];
+        BasicBlock* body_block = body_blocks[i];
+        BasicBlock* next_block = nullptr;
+        if (i + 1U < check_blocks.size()) {
+            next_block = check_blocks[i + 1U];
+        } else if (otherwise_block != nullptr) {
+            next_block = otherwise_block;
+        } else {
+            next_block = exit_block;
+        }
+
+        builder_.set_insert_point(check_block);
         const ValueId condition =
             build_switch_match_condition(switch_value, case_node->branch[0]);
         if (!condition.is_valid()) {
@@ -848,24 +878,9 @@ void IRLowerer::lower_switch_stmt(const std::shared_ptr<switch_flow>& switch_nod
             go->attrs.is_synthetic = 1;
             builder_.append_instruction(std::move(go));
         }
-
-        current_check_block = next_block;
     }
 
-    builder_.set_insert_point(current_check_block);
-    if (otherwise_node != nullptr && !otherwise_node->branch.empty()) {
-        BasicBlock* otherwise_block =
-            unit->create_block("switch.otherwise", source_span_from(otherwise_node));
-        if (otherwise_block == nullptr) {
-            return;
-        }
-
-        std::unique_ptr<GotoInst> go = std::make_unique<GotoInst>();
-        go->target = otherwise_block;
-        go->source_span = source_span_from(otherwise_node);
-        go->attrs.is_synthetic = 1;
-        builder_.append_instruction(std::move(go));
-
+    if (otherwise_block != nullptr) {
         builder_.set_insert_point(otherwise_block);
         lower_stmt(otherwise_node->branch.back());
         if (builder_.current_block() != nullptr &&
@@ -876,12 +891,6 @@ void IRLowerer::lower_switch_stmt(const std::shared_ptr<switch_flow>& switch_nod
             otherwise_go->attrs.is_synthetic = 1;
             builder_.append_instruction(std::move(otherwise_go));
         }
-    } else {
-        std::unique_ptr<GotoInst> go = std::make_unique<GotoInst>();
-        go->target = exit_block;
-        go->source_span = source_span_from(switch_node);
-        go->attrs.is_synthetic = 1;
-        builder_.append_instruction(std::move(go));
     }
 
     builder_.set_insert_point(exit_block);
@@ -943,6 +952,7 @@ void IRLowerer::lower_for_stmt(const std::shared_ptr<flow>& for_node) {
         std::unique_ptr<GotoInst> go = std::make_unique<GotoInst>();
         go->target = preheader_block;
         go->source_span = source_span_from(for_node);
+        go->attrs.is_synthetic = 1;
         builder_.append_instruction(std::move(go));
     }
 
@@ -958,16 +968,11 @@ void IRLowerer::lower_for_stmt(const std::shared_ptr<flow>& for_node) {
     }
 
     // iter_index 是唯一的循环携带内部状态；类型固定为 int64，不参与用户名字查找。
-    const SlotId iter_index_slot = builder_.create_slot(
-        Slot::InternalLocal,
-        "__foreach_iter_index",
+    const Slot iter_index_slot = builder_.create_slot(
+        SlotTag::InternalLocal,
+        "__for_idx",
         source_span,
-        [&] {
-            SlotAttrs attrs;
-            attrs.is_mutable = 1;
-            attrs.fixed_type = SlotAttrs::Int64Scalar;
-            return attrs;
-        }());
+        SlotValueType::Int64Scalar);
     if (!iter_index_slot.is_valid()) {
         return;
     }
@@ -1001,7 +1006,7 @@ void IRLowerer::lower_for_stmt(const std::shared_ptr<flow>& for_node) {
     builder_.append_instruction(std::move(initial_index));
 
     std::unique_ptr<StoreSlotInst> store_initial_index = std::make_unique<StoreSlotInst>();
-    store_initial_index->slot_id = iter_index_slot;
+    store_initial_index->slot = iter_index_slot;
     store_initial_index->value = iter_index;
     store_initial_index->source_span = source_span;
     store_initial_index->attrs.is_synthetic = 1;
@@ -1017,7 +1022,7 @@ void IRLowerer::lower_for_stmt(const std::shared_ptr<flow>& for_node) {
     builder_.set_insert_point(header_block);
     std::unique_ptr<LoadSlotInst> load_iter_index = std::make_unique<LoadSlotInst>();
     load_iter_index->result = builder_.create_value();
-    load_iter_index->slot_id = iter_index_slot;
+    load_iter_index->slot = iter_index_slot;
     load_iter_index->source_span = source_span;
     load_iter_index->attrs.is_synthetic = 1;
     const ValueId current_iter_index = load_iter_index->result;
@@ -1046,7 +1051,7 @@ void IRLowerer::lower_for_stmt(const std::shared_ptr<flow>& for_node) {
     builder_.set_insert_point(body_block);
     std::unique_ptr<LoadSlotInst> load_body_index = std::make_unique<LoadSlotInst>();
     load_body_index->result = builder_.create_value();
-    load_body_index->slot_id = iter_index_slot;
+    load_body_index->slot = iter_index_slot;
     load_body_index->source_span = source_span;
     load_body_index->attrs.is_synthetic = 1;
     const ValueId body_iter_index = load_body_index->result;
@@ -1088,7 +1093,7 @@ void IRLowerer::lower_for_stmt(const std::shared_ptr<flow>& for_node) {
     builder_.set_insert_point(latch_block);
     std::unique_ptr<LoadSlotInst> load_latch_index = std::make_unique<LoadSlotInst>();
     load_latch_index->result = builder_.create_value();
-    load_latch_index->slot_id = iter_index_slot;
+    load_latch_index->slot = iter_index_slot;
     load_latch_index->source_span = source_span;
     load_latch_index->attrs.is_synthetic = 1;
     const ValueId latch_iter_index = load_latch_index->result;
@@ -1115,7 +1120,7 @@ void IRLowerer::lower_for_stmt(const std::shared_ptr<flow>& for_node) {
     builder_.append_instruction(std::move(next_index));
 
     std::unique_ptr<StoreSlotInst> store_next_index = std::make_unique<StoreSlotInst>();
-    store_next_index->slot_id = iter_index_slot;
+    store_next_index->slot = iter_index_slot;
     store_next_index->value = next_index_value;
     store_next_index->source_span = source_span;
     store_next_index->attrs.is_synthetic = 1;
@@ -1151,20 +1156,17 @@ void IRLowerer::lower_while_stmt(const std::shared_ptr<if_flow>& while_node) {
         return;
     }
 
-    // while 使用四块 CFG：header 每轮重新求值条件，body 执行用户循环体，
-    // latch 作为普通 fallthrough 和 continue 的汇合点，end 接后续语句。
+    // while 使用三块 CFG：header 每轮重新求值条件，body 执行用户循环体，
+    // end 接后续语句。while 没有循环携带更新块，普通路径和 continue 直接回 header。
     BasicBlock* header_block =
         unit->create_block("while.header", source_span_from(while_node));
     BasicBlock* body_block =
         unit->create_block("while.body", source_span_from(while_node->tl()));
-    BasicBlock* latch_block =
-        unit->create_block("while.latch", source_span_from(while_node));
     BasicBlock* exit_block =
         unit->create_block("while.end", source_span_from(while_node));
 
     if (header_block == nullptr ||
         body_block == nullptr ||
-        latch_block == nullptr ||
         exit_block == nullptr) {
         return;
     }
@@ -1174,6 +1176,7 @@ void IRLowerer::lower_while_stmt(const std::shared_ptr<if_flow>& while_node) {
         std::unique_ptr<GotoInst> go = std::make_unique<GotoInst>();
         go->target = header_block;
         go->source_span = source_span_from(while_node);
+        go->attrs.is_synthetic = 1;
         builder_.append_instruction(std::move(go));
     }
 
@@ -1191,23 +1194,16 @@ void IRLowerer::lower_while_stmt(const std::shared_ptr<if_flow>& while_node) {
     builder_.append_instruction(std::move(branch));
 
     builder_.set_insert_point(body_block);
-    const ScopedLoopContext loop_context(*this, {exit_block, latch_block});
+    const ScopedLoopContext loop_context(*this, {exit_block, header_block});
     lower_stmt(while_node->tl());
     if (builder_.current_block() != nullptr &&
         !builder_.current_block()->has_terminator()) {
         std::unique_ptr<GotoInst> body_go = std::make_unique<GotoInst>();
-        body_go->target = latch_block;
+        body_go->target = header_block;
         body_go->source_span = source_span_from(while_node->tl());
         body_go->attrs.is_synthetic = 1;
         builder_.append_instruction(std::move(body_go));
     }
-
-    builder_.set_insert_point(latch_block);
-    std::unique_ptr<GotoInst> latch_go = std::make_unique<GotoInst>();
-    latch_go->target = header_block;
-    latch_go->source_span = source_span_from(while_node);
-    latch_go->attrs.is_synthetic = 1;
-    builder_.append_instruction(std::move(latch_go));
 
     builder_.set_insert_point(exit_block);
 }
@@ -1318,14 +1314,14 @@ bool IRLowerer::collect_call_result_names(
 ValueId IRLowerer::build_switch_match_condition(
     ValueId switch_value,
     const ast_ptr& case_value) {
-    std::vector<ast_ptr> case_values;
     if (case_value != nullptr && case_value->nodetype == node_cell) {
-        collect_cell_elements(case_value, case_values);
-    } else if (case_value != nullptr) {
-        case_values.push_back(case_value);
+        builder_.report(
+            IRBuildDiagnostic::Error,
+            "当前 lowering 暂不支持 cell 形式的 switch case",
+            source_span_from(case_value));
+        return InvalidValueId;
     }
-
-    if (case_values.empty()) {
+    if (case_value == nullptr) {
         builder_.report(
             IRBuildDiagnostic::Error,
             "switch case 缺少匹配值",
@@ -1333,49 +1329,26 @@ ValueId IRLowerer::build_switch_match_condition(
         return InvalidValueId;
     }
 
-    ValueId combined = InvalidValueId;
-    for (const ast_ptr& value_node : case_values) {
-        const ValueId rhs = lower_expr(value_node);
-        if (!rhs.is_valid()) {
-            return InvalidValueId;
-        }
-
-        std::unique_ptr<CallInst> match = std::make_unique<CallInst>();
-        match->callee_kind = CallInst::Direct;
-        match->dispatch_type = Internal;
-        match->callee = InternedString("switch_match");
-        match->results.push_back(builder_.create_value());
-        match->arguments.push_back(switch_value);
-        match->arguments.push_back(rhs);
-        match->source_span = source_span_from(value_node);
-        match->attrs.is_synthetic = 1;
-        const ValueId match_value = match->results.front();
-        if (!match_value.is_valid()) {
-            return InvalidValueId;
-        }
-        builder_.append_instruction(std::move(match));
-
-        if (!combined.is_valid()) {
-            combined = match_value;
-            continue;
-        }
-
-        std::unique_ptr<BinaryInst> merged = std::make_unique<BinaryInst>();
-        merged->result = builder_.create_value();
-        merged->op = Or;
-        merged->dispatch_type = Internal;
-        merged->lhs = combined;
-        merged->rhs = match_value;
-        merged->source_span = source_span_from(value_node);
-        merged->attrs.is_synthetic = 1;
-        combined = merged->result;
-        if (!combined.is_valid()) {
-            return InvalidValueId;
-        }
-        builder_.append_instruction(std::move(merged));
+    const ValueId rhs = lower_expr(case_value);
+    if (!rhs.is_valid()) {
+        return InvalidValueId;
     }
 
-    return combined;
+    std::unique_ptr<CallInst> match = std::make_unique<CallInst>();
+    match->callee_kind = CallInst::Direct;
+    match->dispatch_type = Internal;
+    match->callee = InternedString("switch_match");
+    match->results.push_back(builder_.create_value());
+    match->arguments.push_back(switch_value);
+    match->arguments.push_back(rhs);
+    match->source_span = source_span_from(case_value);
+    match->attrs.is_synthetic = 1;
+    const ValueId match_value = match->results.front();
+    if (!match_value.is_valid()) {
+        return InvalidValueId;
+    }
+    builder_.append_instruction(std::move(match));
+    return match_value;
 }
 
 bool IRLowerer::lower_named_invoke(
@@ -1403,31 +1376,6 @@ bool IRLowerer::lower_named_invoke(
         return true;
     };
 
-    if (!lookup_var(call->name()).is_valid()) {
-        const FunctionUnit* method = lookup_method(call->name());
-        if (method != nullptr) {
-            std::unique_ptr<CallInst> inst = std::make_unique<CallInst>();
-            inst->callee_kind = CallInst::Direct;
-            inst->dispatch_type = MFunction;
-            inst->callee = InternedString(call->name());
-            inst->m_function_target = const_cast<FunctionUnit*>(method);
-            inst->source_span = source_span;
-
-            for (std::size_t i = 0; i < result_names.size(); ++i) {
-                if (!append_result_slot(inst->results)) {
-                    return false;
-                }
-            }
-
-            if (!append_call_arguments(inst->arguments, call->in_args())) {
-                return false;
-            }
-
-            builder_.append_instruction(std::move(inst));
-            return true;
-        }
-    }
-
     if (should_lower_direct_call(call->name())) {
         std::unique_ptr<CallInst> inst = std::make_unique<CallInst>();
         inst->callee_kind = CallInst::Direct;
@@ -1451,7 +1399,7 @@ bool IRLowerer::lower_named_invoke(
     if (builder_.current_unit() != nullptr &&
         (builder_.current_unit()->is_function() ||
          builder_.current_unit()->is_anonymous_function())) {
-        const SlotId callee_slot = lookup_slot_binding(call->name(), source_span);
+        const Slot callee_slot = lookup_slot_binding(call->name(), source_span);
         if (!callee_slot.is_valid()) {
             return false;
         }
@@ -1461,7 +1409,7 @@ bool IRLowerer::lower_named_invoke(
         if (!load->result.is_valid()) {
             return false;
         }
-        load->slot_id = callee_slot;
+        load->slot = callee_slot;
         load->source_span = source_span;
         const ValueId base = load->result;
         builder_.append_instruction(std::move(load));
@@ -1502,28 +1450,11 @@ bool IRLowerer::lower_named_invoke(
     return true;
 }
 
-SlotId IRLowerer::lookup_var(std::string_view name) const noexcept {
-    if (const SlotId* slot_id = find_name(name)) {
-        return *slot_id;
+Slot IRLowerer::lookup_var(std::string_view name) const noexcept {
+    if (const Slot* slot = find_name(name)) {
+        return *slot;
     }
-    return InvalidSlotId;
-}
-
-const FunctionUnit* IRLowerer::lookup_method(
-    std::string_view name) const noexcept {
-    // TODO: 等 AST/import 表把 `import A.a` 信息暴露给 lowering 后，纳入导入函数查询。
-    // TODO: 等 bt_ast_interface 表达嵌套函数节点后，纳入嵌套函数查询。
-    const CodeUnit* unit = builder_.current_unit();
-    if (unit == nullptr || !unit->is_function()) {
-        return nullptr;
-    }
-
-    const auto* function = static_cast<const FunctionUnit*>(unit);
-    if (function->file == nullptr) {
-        return nullptr;
-    }
-
-    return function->file->find_local_function(name);
+    return InvalidSlot;
 }
 
 bool IRLowerer::should_lower_direct_call(std::string_view name) const noexcept {
@@ -1533,37 +1464,20 @@ bool IRLowerer::should_lower_direct_call(std::string_view name) const noexcept {
         return false;
     }
 
-    return !lookup_var(name).is_valid() &&
-        lookup_method(name) == nullptr;
+    return !lookup_var(name).is_valid();
 }
 
 bool IRLowerer::store_named_result(
     std::string_view name,
     ValueId value,
     SourceSpan source_span) {
-    if (builder_.current_unit() != nullptr &&
-        builder_.current_unit()->is_script()) {
-        const SlotId workspace_handle_slot = ensure_workspace_handle_slot(source_span);
-        if (!workspace_handle_slot.is_valid()) {
-            return false;
-        }
-
-        std::unique_ptr<StoreWorkspaceInst> inst = std::make_unique<StoreWorkspaceInst>();
-        inst->workspace_handle_slot = workspace_handle_slot;
-        inst->symbol = InternedString(name);
-        inst->value = value;
-        inst->source_span = source_span;
-        builder_.append_instruction(std::move(inst));
-        return true;
-    }
-
-    const SlotId slot_id = ensure_slot_binding(name, source_span);
-    if (!slot_id.is_valid()) {
+    const Slot slot = ensure_slot_binding(name, source_span);
+    if (!slot.is_valid()) {
         return false;
     }
 
     std::unique_ptr<StoreSlotInst> inst = std::make_unique<StoreSlotInst>();
-    inst->slot_id = slot_id;
+    inst->slot = slot;
     inst->value = value;
     inst->source_span = source_span;
     builder_.append_instruction(std::move(inst));
@@ -1571,31 +1485,14 @@ bool IRLowerer::store_named_result(
 }
 
 ValueId IRLowerer::lower_named_value(std::string_view name, SourceSpan source_span) {
-    if (builder_.current_unit() != nullptr &&
-        builder_.current_unit()->is_script()) {
-        const SlotId workspace_handle_slot = ensure_workspace_handle_slot(source_span);
-        if (!workspace_handle_slot.is_valid()) {
-            return InvalidValueId;
-        }
-
-        std::unique_ptr<LoadWorkspaceInst> inst = std::make_unique<LoadWorkspaceInst>();
-        inst->result = builder_.create_value();
-        inst->workspace_handle_slot = workspace_handle_slot;
-        inst->symbol = InternedString(name);
-        inst->source_span = source_span;
-        const ValueId result = inst->result;
-        builder_.append_instruction(std::move(inst));
-        return result;
-    }
-
-    const SlotId slot_id = lookup_slot_binding(name, source_span);
-    if (!slot_id.is_valid()) {
+    const Slot slot = lookup_slot_binding(name, source_span);
+    if (!slot.is_valid()) {
         return InvalidValueId;
     }
 
     std::unique_ptr<LoadSlotInst> inst = std::make_unique<LoadSlotInst>();
     inst->result = builder_.create_value();
-    inst->slot_id = slot_id;
+    inst->slot = slot;
     inst->source_span = source_span;
     const ValueId result = inst->result;
     builder_.append_instruction(std::move(inst));
@@ -1624,12 +1521,6 @@ ValueId IRLowerer::lower_named_function_handle(const ast_ptr& node) {
     }
     inst->name = InternedString(name);
     inst->source_span = source_span_from(node);
-
-    if (const FunctionUnit* method = lookup_method(name)) {
-        inst->resolution_mode = CreateNamedFunctionHandleInst::Prebound;
-        inst->bound_dispatch_type = MFunction;
-        inst->m_function_target = const_cast<FunctionUnit*>(method);
-    }
 
     const ValueId result = inst->result;
     builder_.append_instruction(std::move(inst));
@@ -1666,40 +1557,20 @@ ValueId IRLowerer::lower_anonymous_function_handle(const ast_ptr& node) {
     std::vector<CreateAnonymousFunctionHandleInst::CaptureValue> captures;
     captures.reserve(free_names.size());
     for (const std::string& name : free_names) {
-        SlotId source_slot = InvalidSlotId;
-        ValueId captured_value = InvalidValueId;
-        if (outer_unit->is_script()) {
-            source_slot = ensure_workspace_handle_slot(source_span_from(body_node));
-            if (!source_slot.is_valid()) {
-                return InvalidValueId;
-            }
-
-            std::unique_ptr<LoadWorkspaceInst> load = std::make_unique<LoadWorkspaceInst>();
-            load->result = builder_.create_value();
-            if (!load->result.is_valid()) {
-                return InvalidValueId;
-            }
-            load->workspace_handle_slot = source_slot;
-            load->symbol = InternedString(name);
-            load->source_span = source_span_from(node);
-            captured_value = load->result;
-            builder_.append_instruction(std::move(load));
-        } else {
-            source_slot = lookup_slot_binding(name, source_span_from(body_node));
-            if (!source_slot.is_valid()) {
-                return InvalidValueId;
-            }
-
-            std::unique_ptr<LoadSlotInst> load = std::make_unique<LoadSlotInst>();
-            load->result = builder_.create_value();
-            if (!load->result.is_valid()) {
-                return InvalidValueId;
-            }
-            load->slot_id = source_slot;
-            load->source_span = source_span_from(node);
-            captured_value = load->result;
-            builder_.append_instruction(std::move(load));
+        const Slot source_slot = lookup_slot_binding(name, source_span_from(body_node));
+        if (!source_slot.is_valid()) {
+            return InvalidValueId;
         }
+
+        std::unique_ptr<LoadSlotInst> load = std::make_unique<LoadSlotInst>();
+        load->result = builder_.create_value();
+        if (!load->result.is_valid()) {
+            return InvalidValueId;
+        }
+        load->slot = source_slot;
+        load->source_span = source_span_from(node);
+        const ValueId captured_value = load->result;
+        builder_.append_instruction(std::move(load));
 
         captures.push_back({
             InternedString(name),
@@ -1719,36 +1590,30 @@ ValueId IRLowerer::lower_anonymous_function_handle(const ast_ptr& node) {
     builder_.set_current_unit(&anonymous_unit);
     builder_.set_insert_point(entry_block);
 
-    SlotAttrs attrs;
-    attrs.is_mutable = 1;
     for (const std::string& name : param_names) {
-        const SlotId slot_id = builder_.create_slot(
-            Slot::Arg,
+        const Slot slot = builder_.create_slot(
+            SlotTag::Arg,
             name,
-            source_span_from(param_node),
-            attrs);
-        if (!slot_id.is_valid()) {
+            source_span_from(param_node));
+        if (!slot.is_valid()) {
             builder_.set_current_unit(outer_unit);
             builder_.set_insert_point(outer_block);
             return InvalidValueId;
         }
-        bind_name(name, slot_id, source_span_from(param_node));
+        bind_name(name, slot, source_span_from(param_node));
     }
 
-    SlotAttrs capture_attrs;
-    capture_attrs.is_mutable = 0;
     for (const auto& capture : captures) {
-        const SlotId slot_id = builder_.create_slot(
-            Slot::Capture,
+        const Slot slot = builder_.create_slot(
+            SlotTag::Capture,
             capture.name,
-            source_span_from(body_node),
-            capture_attrs);
-        if (!slot_id.is_valid()) {
+            source_span_from(body_node));
+        if (!slot.is_valid()) {
             builder_.set_current_unit(outer_unit);
             builder_.set_insert_point(outer_block);
             return InvalidValueId;
         }
-        bind_name(capture.name, slot_id, source_span_from(body_node));
+        bind_name(capture.name, slot, source_span_from(body_node));
     }
 
     const ValueId body_value = lower_expr(body_node);
@@ -1893,31 +1758,6 @@ ValueId IRLowerer::lower_expr(const ast_ptr& node) {
             }
 
             const SourceSpan source_span = source_span_from(node);
-            const auto function_name_it = kUnaryOperatorFunctionNameMap.find(node->nodetype);
-            if (function_name_it != kUnaryOperatorFunctionNameMap.end()) {
-                const std::string_view function_name = function_name_it->second;
-                if (!lookup_var(function_name).is_valid()) {
-                    if (const FunctionUnit* method = lookup_method(function_name)) {
-                        std::unique_ptr<CallInst> inst = std::make_unique<CallInst>();
-                        inst->callee_kind = CallInst::Direct;
-                        inst->dispatch_type = MFunction;
-                        inst->callee = InternedString(function_name);
-                        inst->m_function_target = const_cast<FunctionUnit*>(method);
-                        inst->source_span = source_span;
-
-                        const ValueId result = builder_.create_value();
-                        if (!result.is_valid()) {
-                            return InvalidValueId;
-                        }
-
-                        inst->results.push_back(result);
-                        inst->arguments.push_back(operand);
-                        builder_.append_instruction(std::move(inst));
-                        return result;
-                    }
-                }
-            }
-
             const auto op_it = kUnaryOpMap.find(node->nodetype);
             if (op_it == kUnaryOpMap.end()) {
                 builder_.report(
@@ -1988,32 +1828,6 @@ ValueId IRLowerer::lower_expr(const ast_ptr& node) {
             const ValueId rhs = lower_expr(node->r());
             if (!lhs.is_valid() || !rhs.is_valid()) {
                 return InvalidValueId;
-            }
-
-            const auto function_name_it = kBinaryOperatorFunctionNameMap.find(node->nodetype);
-            if (function_name_it != kBinaryOperatorFunctionNameMap.end()) {
-                const std::string_view function_name = function_name_it->second;
-                if (!lookup_var(function_name).is_valid()) {
-                    if (const FunctionUnit* method = lookup_method(function_name)) {
-                        std::unique_ptr<CallInst> inst = std::make_unique<CallInst>();
-                        inst->callee_kind = CallInst::Direct;
-                        inst->dispatch_type = MFunction;
-                        inst->callee = InternedString(function_name);
-                        inst->m_function_target = const_cast<FunctionUnit*>(method);
-                        inst->source_span = source_span;
-
-                        const ValueId result = builder_.create_value();
-                        if (!result.is_valid()) {
-                            return InvalidValueId;
-                        }
-
-                        inst->results.push_back(result);
-                        inst->arguments.push_back(lhs);
-                        inst->arguments.push_back(rhs);
-                        builder_.append_instruction(std::move(inst));
-                        return result;
-                    }
-                }
             }
 
             std::unique_ptr<BinaryInst> inst = std::make_unique<BinaryInst>();
@@ -2099,9 +1913,6 @@ ValueId IRLowerer::lower_expr(const ast_ptr& node) {
 }
 
 void IRLowerer::predeclare_function_signature(const pcdata& parsed_unit) {
-    SlotAttrs attrs;
-    attrs.is_mutable = 1;
-
     if (parsed_unit.ast != nullptr && parsed_unit.ast->nodetype == node_mfile_func) {
         const auto& function_ast = std::static_pointer_cast<mFileFunc>(parsed_unit.ast);
 
@@ -2110,24 +1921,22 @@ void IRLowerer::predeclare_function_signature(const pcdata& parsed_unit) {
                 function_ast->in_args()->nodetype == node_horz_list) {
                 for (const ast_ptr& arg_node : function_ast->in_args()->branch) {
                     const std::string& arg_name = std::static_pointer_cast<symref>(arg_node)->name();
-                    const SlotId slot_id = builder_.create_slot(
-                        Slot::Arg,
+                    const Slot slot = builder_.create_slot(
+                        SlotTag::Arg,
                         arg_name,
-                        SourceSpan::invalid(),
-                        attrs);
+                        SourceSpan::invalid());
 
-                    bind_name(arg_name, slot_id, SourceSpan::invalid());
+                    bind_name(arg_name, slot, SourceSpan::invalid());
                 }
             } else if (function_ast->in_args()->nodetype == node_name) {
                 const std::string& arg_name =
                     std::static_pointer_cast<symref>(function_ast->in_args())->name();
-                const SlotId slot_id = builder_.create_slot(
-                    Slot::Arg,
+                const Slot slot = builder_.create_slot(
+                    SlotTag::Arg,
                     arg_name,
-                    SourceSpan::invalid(),
-                    attrs);
+                    SourceSpan::invalid());
 
-                bind_name(arg_name, slot_id, SourceSpan::invalid());
+                bind_name(arg_name, slot, SourceSpan::invalid());
             }
         }
 
@@ -2136,92 +1945,90 @@ void IRLowerer::predeclare_function_signature(const pcdata& parsed_unit) {
                 function_ast->out_args()->nodetype == node_horz_list) {
                 for (const ast_ptr& ret_node : function_ast->out_args()->branch) {
                     const std::string& ret_name = std::static_pointer_cast<symref>(ret_node)->name();
-                    const SlotId slot_id = builder_.create_slot(
-                        Slot::Ret,
+                    const Slot slot = builder_.create_slot(
+                        SlotTag::Ret,
                         ret_name,
-                        SourceSpan::invalid(),
-                        attrs);
+                        SourceSpan::invalid());
 
-                    bind_name(ret_name, slot_id, SourceSpan::invalid());
+                    bind_name(ret_name, slot, SourceSpan::invalid());
                 }
             } else if (function_ast->out_args()->nodetype == node_name) {
                 const std::string& ret_name =
                     std::static_pointer_cast<symref>(function_ast->out_args())->name();
-                const SlotId slot_id = builder_.create_slot(
-                    Slot::Ret,
+                const Slot slot = builder_.create_slot(
+                    SlotTag::Ret,
                     ret_name,
-                    SourceSpan::invalid(),
-                    attrs);
+                    SourceSpan::invalid());
 
-                bind_name(ret_name, slot_id, SourceSpan::invalid());
+                bind_name(ret_name, slot, SourceSpan::invalid());
             }
         }
         return;
     }
 }
 
-SlotId IRLowerer::ensure_slot_binding(std::string_view name, SourceSpan source_span) {
-    const SlotId slot_id = lookup_var(name);
-    if (slot_id.is_valid()) {
-        return slot_id;
+Slot IRLowerer::ensure_slot_binding(std::string_view name, SourceSpan source_span) {
+    const Slot slot = lookup_var(name);
+    if (slot.is_valid()) {
+        return slot;
     }
 
-    SlotAttrs attrs;
-    attrs.is_mutable = 1;
-
-    const SlotId new_slot_id = builder_.create_slot(
-        Slot::Local,
-        name,
-        source_span,
-        attrs);
-    if (!new_slot_id.is_valid()) {
-        return InvalidSlotId;
+    const CodeUnit* unit = builder_.current_unit();
+    const SlotTag tag = unit != nullptr && unit->is_script()
+        ? SlotTag::ScriptVar
+        : SlotTag::Local;
+    const Slot new_slot = builder_.create_slot(tag, name, source_span);
+    if (!new_slot.is_valid()) {
+        return InvalidSlot;
     }
 
-    bind_name(name, new_slot_id, source_span);
-    return new_slot_id;
+    bind_name(name, new_slot, source_span);
+    return new_slot;
 }
 
-SlotId IRLowerer::lookup_slot_binding(std::string_view name, SourceSpan source_span) {
-    const SlotId slot_id = lookup_var(name);
-    if (!slot_id.is_valid()) {
+Slot IRLowerer::lookup_slot_binding(std::string_view name, SourceSpan source_span) {
+    const Slot slot = lookup_var(name);
+    if (!slot.is_valid()) {
         builder_.report(
             IRBuildDiagnostic::Error,
             std::string("读取了尚未绑定到槽位的名字: ") + std::string(name),
             source_span);
-        return InvalidSlotId;
+        return InvalidSlot;
     }
 
-    return slot_id;
+    return slot;
 }
 
-SlotId IRLowerer::ensure_workspace_handle_slot(SourceSpan source_span) {
+std::vector<ValueId> IRLowerer::load_function_return_values(SourceSpan source_span) {
+    std::vector<ValueId> values;
+
     const CodeUnit* unit = builder_.current_unit();
-    if (unit == nullptr || !unit->is_script()) {
-        builder_.report(
-            IRBuildDiagnostic::Error,
-            "只有脚本代码单元才能访问工作区句柄槽位",
-            source_span);
-        return InvalidSlotId;
+    if (unit == nullptr || !unit->is_function()) {
+        return values;
     }
 
-    if (const Slot* existing = unit->find_hidden_slot(SlotAttrs::WorkspaceHandle)) {
-        return existing->slot_id;
+    const auto* function = static_cast<const FunctionUnit*>(unit);
+    values.reserve(function->return_slots.size());
+
+    for (Slot slot : function->return_slots) {
+        auto inst = std::make_unique<LoadSlotInst>();
+        inst->result = builder_.create_value();
+        if (!inst->result.is_valid()) {
+            continue;
+        }
+        inst->slot = slot;
+        inst->source_span = source_span;
+        const ValueId result = inst->result;
+        builder_.append_instruction(std::move(inst));
+        values.push_back(result);
     }
 
-    const std::string slot_name = unit->name.empty()
-        ? "env"
-        : (std::string(unit->name) + "_env");
-
-    return builder_.create_hidden_slot(
-        slot_name,
-        SlotAttrs::WorkspaceHandle,
-        source_span);
+    return values;
 }
 
 void IRLowerer::bind_name(
     std::string_view name,
-    SlotId slot_id,
+    Slot slot,
     SourceSpan source_span) {
     const CodeUnit* unit = builder_.current_unit();
     if (unit == nullptr) {
@@ -2232,7 +2039,7 @@ void IRLowerer::bind_name(
         return;
     }
 
-    if (!slot_id.is_valid()) {
+    if (!slot.is_valid()) {
         builder_.report(
             IRBuildDiagnostic::Error,
             "当前名字绑定缺少有效槽位",
@@ -2240,10 +2047,10 @@ void IRLowerer::bind_name(
         return;
     }
 
-    unit_name_bindings_[unit][InternedString(name)] = slot_id;
+    unit_name_bindings_[unit][InternedString(name)] = slot;
 }
 
-const SlotId* IRLowerer::find_name(std::string_view name) const noexcept {
+const Slot* IRLowerer::find_name(std::string_view name) const noexcept {
     const CodeUnit* unit = builder_.current_unit();
     if (unit == nullptr) {
         return nullptr;

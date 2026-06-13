@@ -37,9 +37,21 @@ struct IRPrintOptions {
     bool print_source_line_numbers = true;
 
     /**
+     * @brief 是否在源码注释中追加源码片段。
+     *
+     * 默认只打印 `line N` / `line N-M`，保持大型 IR 输出紧凑。
+     */
+    bool print_source_excerpt = false;
+
+    /**
      * @brief 是否打印 slot 表。
      */
     bool print_slot_table = true;
+
+    /**
+     * @brief 是否在基本块标签后打印 CFG 前驱列表。
+     */
+    bool print_block_predecessors = true;
 
     /**
      * @brief 是否在结果值指令后打印 `ValueTable` 中记录的类型事实。
