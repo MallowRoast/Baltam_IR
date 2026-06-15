@@ -56,6 +56,12 @@ private:
     void lower_stmt_list(const ast_ptr& node);
     void lower_assign_stmt(const std::shared_ptr<symasgn>& assign);
     void lower_global_decl(const ast_ptr& node);
+    void lower_persistent_decl(const ast_ptr& node);
+    [[nodiscard]] std::vector<Slot> lower_decl_slots(
+        const ast_ptr& node,
+        nodeType expected_node_type,
+        SlotTag slot_tag,
+        std::string_view decl_keyword);
     [[nodiscard]] bool lower_indexed_assign_stmt(const std::shared_ptr<symasgn>& assign);
     void lower_call_stmt(const std::shared_ptr<multipleFuncCall>& call);
     void lower_if_stmt(const std::shared_ptr<if_flow>& if_node);

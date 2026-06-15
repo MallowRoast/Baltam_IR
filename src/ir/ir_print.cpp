@@ -845,6 +845,7 @@ private:
         const Instruction& instruction) const {
         switch (instruction.type()) {
             case Instruction::GlobalDecl:
+            case Instruction::PersistentDecl:
             case Instruction::StoreSlot:
             case Instruction::Branch:
                 return true;
@@ -1334,6 +1335,10 @@ private:
             case Instruction::GlobalDecl: {
                 const auto& inst = static_cast<const GlobalDeclInst&>(instruction);
                 return "global " + format_slot_list(inst.slots);
+            }
+            case Instruction::PersistentDecl: {
+                const auto& inst = static_cast<const PersistentDeclInst&>(instruction);
+                return "persistent " + format_slot_list(inst.slots);
             }
             case Instruction::CreateNamedFunctionHandle: {
                 const auto& inst = static_cast<const CreateNamedFunctionHandleInst&>(instruction);

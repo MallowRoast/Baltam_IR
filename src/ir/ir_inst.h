@@ -194,6 +194,7 @@ public:
         LoadSlot,
         StoreSlot,
         GlobalDecl,
+        PersistentDecl,
         CreateNamedFunctionHandle,
         CreateAnonymousFunctionHandle,
         Apply,
@@ -312,6 +313,24 @@ public:
      * @brief 构造 `global` 声明指令。
      */
     GlobalDeclInst() noexcept : Instruction(Instruction::GlobalDecl) {
+        effect = Env;
+    }
+
+    std::vector<Slot> slots;
+};
+
+/**
+ * @brief `persistent` 声明指令。
+ *
+ * 该指令保留源码层的持久变量声明语义。声明本身不产生数据流结果，但会把当前
+ * `CodeUnit` 中对应名字绑定到 `Persistent` slot。
+ */
+class PersistentDeclInst final : public Instruction {
+public:
+    /**
+     * @brief 构造 `persistent` 声明指令。
+     */
+    PersistentDeclInst() noexcept : Instruction(Instruction::PersistentDecl) {
         effect = Env;
     }
 

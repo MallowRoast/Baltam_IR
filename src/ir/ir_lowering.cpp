@@ -16,6 +16,7 @@
 #include <iterator>
 #include <set>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -478,6 +479,9 @@ void IRLowerer::lower_stmt(const ast_ptr& node) {
         case node_global:
             lower_global_decl(node);
             return;
+        case node_persistent:
+            lower_persistent_decl(node);
+            return;
         case node_flow_if:
             lower_if_stmt(std::static_pointer_cast<if_flow>(node));
             return;
@@ -589,14 +593,45 @@ void IRLowerer::lower_assign_stmt(const std::shared_ptr<symasgn>& assign) {
 }
 
 void IRLowerer::lower_global_decl(const ast_ptr& node) {
-    if (node == nullptr || node->nodetype != node_global) {
-        builder_.report(
-            IRBuildDiagnostic::Error,
-            "global 声明节点非法",
-            source_span_from(node));
+    std::vector<Slot> slots =
+        lower_decl_slots(node, node_global, SlotTag::Global, "global");
+    if (slots.empty()) {
         return;
     }
 
+    std::unique_ptr<GlobalDeclInst> inst = std::make_unique<GlobalDeclInst>();
+    inst->source_span = source_span_from(node);
+    inst->slots = std::move(slots);
+    builder_.append_instruction(std::move(inst));
+}
+
+void IRLowerer::lower_persistent_decl(const ast_ptr& node) {
+    std::vector<Slot> slots =
+        lower_decl_slots(node, node_persistent, SlotTag::Persistent, "persistent");
+    if (slots.empty()) {
+        return;
+    }
+
+    std::unique_ptr<PersistentDeclInst> inst = std::make_unique<PersistentDeclInst>();
+    inst->source_span = source_span_from(node);
+    inst->slots = std::move(slots);
+    builder_.append_instruction(std::move(inst));
+}
+
+std::vector<Slot> IRLowerer::lower_decl_slots(
+    const ast_ptr& node,
+    nodeType expected_node_type,
+    SlotTag slot_tag,
+    std::string_view decl_keyword) {
+    if (node == nullptr || node->nodetype != expected_node_type) {
+        builder_.report(
+            IRBuildDiagnostic::Error,
+            std::string(decl_keyword) + " 声明节点非法",
+            source_span_from(node));
+        return {};
+    }
+
+    const SourceSpan source_span = source_span_from(node);
     std::vector<std::pair<std::string, SourceSpan>> names;
     const auto collect_names = [&](const ast_ptr& current, const auto& collect_ref) -> void {
         if (current == nullptr) {
@@ -615,27 +650,25 @@ void IRLowerer::lower_global_decl(const ast_ptr& node) {
     };
     collect_names(node, collect_names);
 
-    const SourceSpan source_span = source_span_from(node);
     if (names.empty()) {
         builder_.report(
             IRBuildDiagnostic::Error,
-            "global 声明至少需要一个变量名",
+            std::string(decl_keyword) + " 声明至少需要一个变量名",
             source_span);
-        return;
+        return {};
     }
 
     CodeUnit* unit = builder_.current_unit();
     if (unit == nullptr) {
         builder_.report(
             IRBuildDiagnostic::Error,
-            "没有活动代码单元，无法 lower global 声明",
+            std::string("没有活动代码单元，无法 lower ") +
+                std::string(decl_keyword) + " 声明",
             source_span);
-        return;
+        return {};
     }
 
-    std::unique_ptr<GlobalDeclInst> inst = std::make_unique<GlobalDeclInst>();
-    inst->source_span = source_span;
-
+    std::vector<Slot> slots;
     std::unordered_set<std::string> seen_names;
     for (const auto& [name, name_span] : names) {
         if (name.empty() || !seen_names.insert(name).second) {
@@ -645,29 +678,25 @@ void IRLowerer::lower_global_decl(const ast_ptr& node) {
         Slot slot = lookup_var(name);
         if (slot.is_valid()) {
             const SlotInfo* slot_info = unit->slot_table.find_slot(slot);
-            if (slot_info == nullptr || slot_info->slot.tag != SlotTag::Global) {
+            if (slot_info == nullptr || slot_info->slot.tag != slot_tag) {
                 builder_.report(
                     IRBuildDiagnostic::Error,
-                    std::string("global 声明与已有非 global 名字绑定冲突: ") + name,
+                    std::string(decl_keyword) + " 声明与已有不同类别名字绑定冲突: " + name,
                     name_span);
                 continue;
             }
         } else {
-            slot = builder_.create_slot(SlotTag::Global, name, name_span);
+            slot = builder_.create_slot(slot_tag, name, name_span);
             if (!slot.is_valid()) {
                 continue;
             }
             bind_name(name, slot, name_span);
         }
 
-        inst->slots.push_back(slot);
+        slots.push_back(slot);
     }
 
-    if (inst->slots.empty()) {
-        return;
-    }
-
-    builder_.append_instruction(std::move(inst));
+    return slots;
 }
 
 bool IRLowerer::lower_indexed_assign_stmt(const std::shared_ptr<symasgn>& assign) {

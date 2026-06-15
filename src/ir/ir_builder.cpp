@@ -213,6 +213,7 @@ TypeFact instruction_result_type_fact(
                 static_cast<const BinaryInst&>(*instruction));
         case Instruction::StoreSlot:
         case Instruction::GlobalDecl:
+        case Instruction::PersistentDecl:
         case Instruction::Goto:
         case Instruction::Branch:
         case Instruction::Return:
@@ -335,6 +336,7 @@ void bind_instruction_results(CodeUnit* unit, Instruction* instruction) {
         }
         case Instruction::StoreSlot:
         case Instruction::GlobalDecl:
+        case Instruction::PersistentDecl:
         case Instruction::Goto:
         case Instruction::Branch:
         case Instruction::Return:
