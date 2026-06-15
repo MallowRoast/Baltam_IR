@@ -193,6 +193,7 @@ public:
         Const,
         LoadSlot,
         StoreSlot,
+        GlobalDecl,
         CreateNamedFunctionHandle,
         CreateAnonymousFunctionHandle,
         Apply,
@@ -296,6 +297,25 @@ public:
 
     Slot slot = InvalidSlot;
     Operand value;
+};
+
+/**
+ * @brief `global` 声明指令。
+ *
+ * 该指令保留源码层的全局变量声明语义。声明本身不产生数据流结果，但会把当前
+ * `CodeUnit` 中对应名字绑定到 `Global` slot；后续读写仍通过 `LoadSlotInst` /
+ * `StoreSlotInst` 引用这些 slot。
+ */
+class GlobalDeclInst final : public Instruction {
+public:
+    /**
+     * @brief 构造 `global` 声明指令。
+     */
+    GlobalDeclInst() noexcept : Instruction(Instruction::GlobalDecl) {
+        effect = Env;
+    }
+
+    std::vector<Slot> slots;
 };
 
 /**

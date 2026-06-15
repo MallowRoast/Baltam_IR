@@ -406,6 +406,7 @@ private:
                 return result_index < inst.results.size() && inst.results[result_index] == value_id;
             }
             case Instruction::StoreSlot:
+            case Instruction::GlobalDecl:
             case Instruction::Goto:
             case Instruction::Branch:
             case Instruction::Return:
@@ -606,6 +607,11 @@ private:
                     }
                 }
                 verify_operand(inst.value, "store_slot value", inst.source_span);
+                break;
+            }
+            case Instruction::GlobalDecl: {
+                const auto& inst = static_cast<const GlobalDeclInst&>(instruction);
+                verify_global_decl(inst);
                 break;
             }
             case Instruction::CreateNamedFunctionHandle: {
@@ -867,6 +873,33 @@ private:
             }
             if (context.nindices == 0U) {
                 error("magic_end context 的 nindices 必须大于 0", inst.source_span);
+            }
+        }
+    }
+
+    void verify_global_decl(const GlobalDeclInst& inst) {
+        if (inst.slots.empty()) {
+            error("GlobalDeclInst 必须至少声明一个 slot", inst.source_span);
+            return;
+        }
+
+        std::unordered_set<SlotId> seen_slots;
+        for (Slot slot : inst.slots) {
+            if (!slot.is_valid()) {
+                error("GlobalDeclInst 不能引用无效 slot", inst.source_span);
+                continue;
+            }
+            if (!seen_slots.insert(slot.id).second) {
+                error("GlobalDeclInst 不能重复声明同一个 slot", inst.source_span);
+            }
+            if (current_unit_ == nullptr || !has_slot(*current_unit_, slot)) {
+                error("GlobalDeclInst 引用了不存在的 slot", inst.source_span);
+                continue;
+            }
+
+            const SlotInfo* info = current_unit_->slot_table.find_slot(slot);
+            if (info != nullptr && info->slot.tag != SlotTag::Global) {
+                error("GlobalDeclInst 只能引用 Global slot", inst.source_span);
             }
         }
     }

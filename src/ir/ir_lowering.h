@@ -55,6 +55,7 @@ private:
     void lower_stmt(const ast_ptr& node);
     void lower_stmt_list(const ast_ptr& node);
     void lower_assign_stmt(const std::shared_ptr<symasgn>& assign);
+    void lower_global_decl(const ast_ptr& node);
     [[nodiscard]] bool lower_indexed_assign_stmt(const std::shared_ptr<symasgn>& assign);
     void lower_call_stmt(const std::shared_ptr<multipleFuncCall>& call);
     void lower_if_stmt(const std::shared_ptr<if_flow>& if_node);

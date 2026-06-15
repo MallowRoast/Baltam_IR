@@ -844,6 +844,7 @@ private:
     [[nodiscard]] bool should_print_instruction_source_comment(
         const Instruction& instruction) const {
         switch (instruction.type()) {
+            case Instruction::GlobalDecl:
             case Instruction::StoreSlot:
             case Instruction::Branch:
                 return true;
@@ -1132,6 +1133,17 @@ private:
         return text;
     }
 
+    [[nodiscard]] std::string format_slot_list(const std::vector<Slot>& slots) const {
+        std::string text;
+        for (std::size_t i = 0; i < slots.size(); ++i) {
+            if (i != 0) {
+                text += ", ";
+            }
+            text += format_slot_ref(slots[i]);
+        }
+        return text;
+    }
+
     [[nodiscard]] std::string format_call_like(
         const CodeUnit& unit,
         std::string_view opcode,
@@ -1318,6 +1330,10 @@ private:
             case Instruction::StoreSlot: {
                 const auto& inst = static_cast<const StoreSlotInst&>(instruction);
                 return "store " + format_slot_ref(inst.slot) + ", " + format_operand(inst.value);
+            }
+            case Instruction::GlobalDecl: {
+                const auto& inst = static_cast<const GlobalDeclInst&>(instruction);
+                return "global " + format_slot_list(inst.slots);
             }
             case Instruction::CreateNamedFunctionHandle: {
                 const auto& inst = static_cast<const CreateNamedFunctionHandleInst&>(instruction);

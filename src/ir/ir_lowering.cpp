@@ -475,6 +475,9 @@ void IRLowerer::lower_stmt(const ast_ptr& node) {
         case node_asgn_element:
             lower_assign_stmt(std::static_pointer_cast<symasgn>(node));
             return;
+        case node_global:
+            lower_global_decl(node);
+            return;
         case node_flow_if:
             lower_if_stmt(std::static_pointer_cast<if_flow>(node));
             return;
@@ -582,6 +585,88 @@ void IRLowerer::lower_assign_stmt(const std::shared_ptr<symasgn>& assign) {
     inst->slot = slot;
     inst->value = value;
     inst->source_span = source_span;
+    builder_.append_instruction(std::move(inst));
+}
+
+void IRLowerer::lower_global_decl(const ast_ptr& node) {
+    if (node == nullptr || node->nodetype != node_global) {
+        builder_.report(
+            IRBuildDiagnostic::Error,
+            "global 声明节点非法",
+            source_span_from(node));
+        return;
+    }
+
+    std::vector<std::pair<std::string, SourceSpan>> names;
+    const auto collect_names = [&](const ast_ptr& current, const auto& collect_ref) -> void {
+        if (current == nullptr) {
+            return;
+        }
+        if (current->nodetype == node_name) {
+            names.push_back({
+                std::static_pointer_cast<symref>(current)->name(),
+                source_span_from(current),
+            });
+            return;
+        }
+        for (const ast_ptr& branch : current->branch) {
+            collect_ref(branch, collect_ref);
+        }
+    };
+    collect_names(node, collect_names);
+
+    const SourceSpan source_span = source_span_from(node);
+    if (names.empty()) {
+        builder_.report(
+            IRBuildDiagnostic::Error,
+            "global 声明至少需要一个变量名",
+            source_span);
+        return;
+    }
+
+    CodeUnit* unit = builder_.current_unit();
+    if (unit == nullptr) {
+        builder_.report(
+            IRBuildDiagnostic::Error,
+            "没有活动代码单元，无法 lower global 声明",
+            source_span);
+        return;
+    }
+
+    std::unique_ptr<GlobalDeclInst> inst = std::make_unique<GlobalDeclInst>();
+    inst->source_span = source_span;
+
+    std::unordered_set<std::string> seen_names;
+    for (const auto& [name, name_span] : names) {
+        if (name.empty() || !seen_names.insert(name).second) {
+            continue;
+        }
+
+        Slot slot = lookup_var(name);
+        if (slot.is_valid()) {
+            const SlotInfo* slot_info = unit->slot_table.find_slot(slot);
+            if (slot_info == nullptr || slot_info->slot.tag != SlotTag::Global) {
+                builder_.report(
+                    IRBuildDiagnostic::Error,
+                    std::string("global 声明与已有非 global 名字绑定冲突: ") + name,
+                    name_span);
+                continue;
+            }
+        } else {
+            slot = builder_.create_slot(SlotTag::Global, name, name_span);
+            if (!slot.is_valid()) {
+                continue;
+            }
+            bind_name(name, slot, name_span);
+        }
+
+        inst->slots.push_back(slot);
+    }
+
+    if (inst->slots.empty()) {
+        return;
+    }
+
     builder_.append_instruction(std::move(inst));
 }
 
