@@ -197,6 +197,7 @@ public:
         CreateAnonymousFunctionHandle,
         Apply,
         ValueApply,
+        MagicEnd,
         Call,
         Copy,
         Unary,
@@ -404,6 +405,40 @@ public:
     std::vector<ValueId> results;
     ValueId base = InvalidValueId;
     std::vector<Operand> arguments;
+};
+
+/**
+ * @brief 延迟解析的 magic `end`。
+ *
+ * 候选上下文按内层到外层排列。后续名字解析、专用 pass 或运行时分派选择第一层真正表示
+ * 索引语义的上下文，并负责实现普通数组和类对象 `end` 方法语义；若没有候选能提供索引
+ * 语义，则该 `end` 在运行时应报错。候选 Operand 的种类是语义的一部分：
+ * `InternedString` 表示尚未解析的源码名字，`Slot` / `ValueId` 表示已经绑定到变量上下文。
+ * 已绑定候选遇到 cleared / unbound slot 时应报错，不回退到普通函数名解析；用户自定义
+ * `end.m` 不是合法候选。
+ */
+class MagicEndInst final : public Instruction {
+public:
+    /**
+     * @brief `end` 可能归属的圆括号应用上下文。
+     *
+     * `A(fun(end))` 在脚本中无法仅靠 AST 判断 `end` 属于 `fun(end)` 还是外层
+     * `A(...)`：如果未解析的 `fun` 运行时解析为索引，则使用内层；如果它解析为普通函数
+     * 调用，`end` 应继续向外寻找可用的索引上下文。若 `fun` 已经是函数内变量 slot，则
+     * 该候选不再按名字重新解析；cleared slot 是错误，而不是候选失败。
+     */
+    struct MagicEndContext {
+        Operand callee_or_base;
+        std::uint32_t dim = 0;
+        std::uint32_t nindices = 0;
+    };
+
+    MagicEndInst() noexcept : Instruction(Instruction::MagicEnd) {
+        effect = Opaque;
+    }
+
+    ValueId result = InvalidValueId;
+    std::vector<MagicEndContext> candidate_contexts;
 };
 
 /**

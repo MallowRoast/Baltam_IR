@@ -399,6 +399,8 @@ private:
                 const auto& inst = static_cast<const ValueApplyInst&>(instruction);
                 return result_index < inst.results.size() && inst.results[result_index] == value_id;
             }
+            case Instruction::MagicEnd:
+                return static_cast<const MagicEndInst&>(instruction).result == value_id && result_index == 0;
             case Instruction::Call: {
                 const auto& inst = static_cast<const CallInst&>(instruction);
                 return result_index < inst.results.size() && inst.results[result_index] == value_id;
@@ -633,6 +635,12 @@ private:
                 verify_operands(inst.arguments, "value_apply argument", inst.source_span);
                 break;
             }
+            case Instruction::MagicEnd: {
+                const auto& inst = static_cast<const MagicEndInst&>(instruction);
+                define_value(inst.result, inst.source_span);
+                verify_magic_end(inst);
+                break;
+            }
             case Instruction::Call: {
                 const auto& inst = static_cast<const CallInst&>(instruction);
                 define_values(inst.results, "call results", inst.source_span);
@@ -818,6 +826,49 @@ private:
         }
 
         (void)unit;
+    }
+
+    void verify_magic_end_base(
+        const Operand& base,
+        const char* label,
+        SourceSpan source_span) {
+        if (std::holds_alternative<ValueId>(base)) {
+            const ValueId value_id = std::get<ValueId>(base);
+            if (!has_value(value_id)) {
+                error(std::string(label) + " 引用了未定义的 ValueId", source_span);
+            }
+            return;
+        }
+
+        if (std::holds_alternative<Slot>(base)) {
+            const Slot slot = std::get<Slot>(base);
+            if (current_unit_ == nullptr || !has_slot(*current_unit_, slot)) {
+                error(std::string(label) + " 引用了不存在的 Slot", source_span);
+            }
+            return;
+        }
+
+        const InternedString& name = std::get<InternedString>(base);
+        if (name.empty()) {
+            error(std::string(label) + " 的名字操作数不能为空", source_span);
+        }
+    }
+
+    void verify_magic_end(const MagicEndInst& inst) {
+        if (inst.candidate_contexts.empty()) {
+            error("MagicEndInst 必须至少保留一个候选索引上下文", inst.source_span);
+            return;
+        }
+
+        for (const MagicEndInst::MagicEndContext& context : inst.candidate_contexts) {
+            verify_magic_end_base(context.callee_or_base, "magic_end context", inst.source_span);
+            if (context.dim == 0U) {
+                error("magic_end context 的 dim 必须大于 0", inst.source_span);
+            }
+            if (context.nindices == 0U) {
+                error("magic_end context 的 nindices 必须大于 0", inst.source_span);
+            }
+        }
     }
 
     void verify_create_named_function_handle(

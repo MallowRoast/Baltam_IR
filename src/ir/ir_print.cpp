@@ -1173,6 +1173,49 @@ private:
         return text;
     }
 
+    [[nodiscard]] std::string format_magic_end_candidate(const Operand& candidate) const {
+        return std::visit(
+            [this](const auto& value) -> std::string {
+                using T = std::decay_t<decltype(value)>;
+                if constexpr (std::is_same_v<T, ValueId>) {
+                    return format_value_id(value);
+                } else if constexpr (std::is_same_v<T, Slot>) {
+                    return format_slot_ref(value);
+                } else {
+                    return is_simple_identifier(value)
+                        ? std::string(value)
+                        : '"' + escape_text(value) + '"';
+                }
+            },
+            candidate);
+    }
+
+    [[nodiscard]] std::string format_magic_end_context(const MagicEndInst::MagicEndContext& context) const {
+        std::string text = "(";
+        text += format_magic_end_candidate(context.callee_or_base);
+        text += ", ";
+        text += std::to_string(context.dim);
+        text += ", ";
+        text += std::to_string(context.nindices);
+        text += ')';
+        return text;
+    }
+
+    [[nodiscard]] std::string format_magic_end(
+        const CodeUnit& unit,
+        const MagicEndInst& inst) const {
+        std::string text = format_value_result(unit, inst.result);
+        text += " = magic_end([";
+        for (std::size_t i = 0; i < inst.candidate_contexts.size(); ++i) {
+            if (i != 0) {
+                text += " -> ";
+            }
+            text += format_magic_end_context(inst.candidate_contexts[i]);
+        }
+        text += "])";
+        return text;
+    }
+
     [[nodiscard]] std::string format_local_function_symbol(const FunctionUnit* function) const {
         if (function == nullptr || function->file == nullptr) {
             return "@<local>";
@@ -1298,6 +1341,10 @@ private:
             case Instruction::ValueApply: {
                 const auto& inst = static_cast<const ValueApplyInst&>(instruction);
                 return format_value_apply(unit, inst);
+            }
+            case Instruction::MagicEnd: {
+                const auto& inst = static_cast<const MagicEndInst&>(instruction);
+                return format_magic_end(unit, inst);
             }
             case Instruction::Call: {
                 const auto& inst = static_cast<const CallInst&>(instruction);

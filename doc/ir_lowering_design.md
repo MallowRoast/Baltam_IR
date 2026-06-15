@@ -93,6 +93,7 @@ std::vector<std::shared_ptr<pcdata>>
   - 具名函数句柄 `@name`
   - 匿名函数句柄 `@(args) expr`
   - 值圆括号应用 `value_apply`
+  - 圆括号索引上下文中的基础 `magic_end`
   - 文件内 `local` 函数的最小分派
   - `if / else`
   - `switch / case / otherwise`，当前采用 `switch.case /
@@ -121,6 +122,20 @@ std::vector<std::shared_ptr<pcdata>>
   `ValueApplyInst`。`ValueApplyInst` 表示 base 已经是 `ValueId`，但尚未分派为函数句柄
   调用或圆括号取值。后续接入 `clear A`、`eval('clear A')` 或未知 binding barrier 后，这条
   路径需要先确认 `A -> slot` binding 仍 live；否则应退回名字 / binding 解析。
+- `ValueApplyInst` 和 `internal.paren_assign` 的索引参数会使用索引上下文 lowering。
+  在该路径中，`node_magic_end` 会 lower 成 `MagicEndInst`，并记录当前索引层的 base、
+  维度 `dim` 和总索引数 `nindices`。`end - 1`、`1:end` 这类一元 / 二元 / 冒号索引表达式
+  会递归携带同一层上下文；普通表达式 lowering 不处理 `node_magic_end`，因此独立的
+  `end` 不会被当作普通名字或常量。
+- `ApplyInst` / `ValueApplyInst` 的嵌套参数会把 magic-end 上下文按栈保存，所以
+  `A(fun(end))` 会 lower 成按内层到外层排列的候选链，例如 `fun -> A`。脚本单层
+  `A(end)` 没有多层候选，但仍生成单候选 `MagicEndInst`。后续名字解析、专用 pass 或
+  runtime 选择第一层真正的索引上下文，并实现普通数组和类对象 `end` 方法语义；如果候选链
+  里没有索引上下文，则报错。`end` 不走普通函数名解析，用户自定义 `end.m` 不是合法候选。
+  候选 Operand 的种类保留绑定状态：脚本 unresolved apply 可暂存 `InternedString`，函数内
+  已绑定变量会通过 `ValueId` / `Slot` 锚定到变量上下文。后者遇到 cleared / unbound slot
+  应报变量引用错误，不能回退到同名函数解析或外层候选。
+  详细设计见 [Magic End Lowering 设计](./magic_end_design.md)。
 - `MFileUnit` 当前会记录入口单元之外的 local `FunctionUnit`，但基础 lowering 不会因为
   local 函数存在就把调用静态绑定成 `MFunction`。后续名字解析 pass 需要同时考虑
   `import`、`private`、路径和遮蔽规则，再决定是否把动态 direct call 收敛成 `call mfunc`。
@@ -220,6 +235,9 @@ block 的创建与 `entry` 指定现在由 `CodeUnit` 自身完成，builder 只
   - `test6`：`&& / ||` 不 lower 成普通 `BinaryInst And/Or`，而是生成 rhs / 短路 /
     merge 基本块和内部 logical 结果 slot
   - `test7`：多返回值签名、多结果 `call` 和 `~` 占位输出位
+  - `test8`：索引上下文中的 `magic_end` lower 成 `MagicEndInst`，并保留维度参数
+  - `test8_1`：脚本 `A(end)` / `A(fun(end))` lower 成 unresolved `apply` 和
+    单层 / 多层候选链的 `MagicEndInst`
 
 syntax smoke test 不再校验文本 IR 的显示格式，避免缩进、block 注释、source comment 等
 printer 调整影响 lowering 语义测试。文本 IR 的 CLI 可用性由 `ir_print_cli_smoke` 单独覆盖。

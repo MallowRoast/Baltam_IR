@@ -93,6 +93,12 @@ TypeFact internal_call_result_type_fact(const CallInst& inst, std::size_t result
         }
     }
 
+    if (callee == "end_index") {
+        if (result_index == 0U) {
+            return scalar_type_fact(TypeSet::int64());
+        }
+    }
+
     return unknown_type_fact();
 }
 
@@ -190,6 +196,7 @@ TypeFact instruction_result_type_fact(
         case Instruction::Apply:
         case Instruction::ValueApply:
         case Instruction::Call:
+        case Instruction::MagicEnd:
             return unknown_type_fact();
         case Instruction::CreateNamedFunctionHandle:
         case Instruction::CreateAnonymousFunctionHandle:
@@ -285,6 +292,16 @@ void bind_instruction_results(CodeUnit* unit, Instruction* instruction) {
                 }
                 bind_value_def(value_table, inst->results[i], i, instruction, result_type_fact);
             }
+            break;
+        }
+        case Instruction::MagicEnd: {
+            const auto* inst = static_cast<const MagicEndInst*>(instruction);
+            bind_value_def(
+                value_table,
+                inst->result,
+                0,
+                instruction,
+                unknown_type_fact());
             break;
         }
         case Instruction::Call: {

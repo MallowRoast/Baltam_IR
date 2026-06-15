@@ -195,6 +195,22 @@ add_ir_smoke_test(
 )
 set_smoke_labels(test7_smoke smoke syntax)
 
+add_ir_smoke_test(
+    test8_smoke
+    syntax/test8_smoke.cpp
+    TEST8_MFILE_PATH
+    test/m/test8/test8.m
+)
+set_smoke_labels(test8_smoke smoke syntax)
+
+add_ir_smoke_test(
+    test8_1_smoke
+    syntax/test8_1_smoke.cpp
+    TEST8_1_MFILE_PATH
+    test/m/test8/test8_1.m
+)
+set_smoke_labels(test8_1_smoke smoke syntax)
+
 add_executable(ir_type_smoke
     feature/ir_type_smoke.cpp
 )

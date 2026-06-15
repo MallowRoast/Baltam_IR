@@ -226,7 +226,8 @@ ValueInfo
   `function_handle scalar`。
 - 带 `value_type` 的 slot 被 `LoadSlotInst` 读取时可产生固定类型事实。
 - 部分 internal helper 有手写摘要，例如 `internal.foreach_init` 和
-  `internal.switch_match`。
+  `internal.switch_match`。`internal.end_index` 可作为后续 magic-end 降级策略，但基础
+  lowering 当前不直接生成它。
 
 ## 6. BasicBlock
 
@@ -366,6 +367,9 @@ CaptureValue
   - `results : ValueId[]`
   - `base : ValueId`
   - `arguments : Operand[]`
+- `MagicEndInst`
+  - `result : ValueId`
+  - `candidate_contexts : MagicEndInst::MagicEndContext[]`
 - `CallInst`
   - `results : ValueId[]`
   - `callee_kind : Direct | Indirect`
@@ -376,6 +380,22 @@ CaptureValue
 
 `ApplyInst` 保留尚未消歧的源码层 `A(...)`。`ValueApplyInst` 表示 base 已经是运行时值，
 但尚未分派为函数句柄调用或圆括号索引。`CallInst` 只表达已经确认是调用的语义。
+
+`MagicEndInst` 是 magic `end` 的 canonical high-level IR。`candidate_contexts` 按内层到
+外层排列，每项记录候选 `callee_or_base`、当前维度 `dim` 和总索引数 `nindices`。单层
+`A(end)` 生成一个候选上下文；`A(fun(end))` 会保留 `fun -> A` 两层候选：若
+`fun(end)` 运行时解析为索引，则 `end` 属于 `fun`；若 `fun(end)` 解析为普通函数调用，
+则继续向外尝试 `A(...)`。后续名字解析、专用 pass 或 runtime 可把它收敛为专用 bytecode
+或等价的 `internal.end_index(base, dim, nindices)`。`end` 不参与普通函数名查找，用户
+自定义 `end.m` 不是合法候选；类对象索引中的自定义 `end` 方法由处理 `MagicEndInst` 的
+阶段负责。
+`callee_or_base` 的 Operand 种类保留候选是否已经绑定的信息：`InternedString` 是尚未解析的
+名字候选；`Slot` / `ValueId` 是已绑定变量或数据流候选。已绑定候选遇到 cleared / unbound
+slot 时应报变量引用错误，不能回退到同名函数解析或外层候选。
+文本 IR 将每个候选显示为 `(base, dim, nindices)`，方便和具体索引层对照。
+`MagicEndInst` 的构建期结果类型事实保持 `unknown`，后续只有在候选 base 和对象索引协议
+明确后才能收敛；基础 IR 不假设类自定义 `end` 方法的返回类型。
+更完整的语义说明见 [Magic End Lowering 设计](./magic_end_design.md)。
 
 `results` 允许保留空输出位：当源码写 `[~, b] = f()` 时，第一个输出位为
 `InvalidValueId`，printer 显示为 `[]`，verifier 和 value table 绑定会跳过该位。
@@ -423,6 +443,8 @@ CaptureValue
 - `dispatch_type = MFunction` 的 call 打印为 `call mfunc @name(...)`。
 - `dispatch_type = Internal` 的 direct call 打印为 `call @internal.name(...)`。
 - `ValueApplyInst` 打印为 `value_apply(%base, ...)`。
+- `MagicEndInst` 打印为
+  `[%0, unknown] = magic_end([(inner, 1, 1) -> (outer, 1, 1)])`。
 - 多返回值输出打印为 `([%0, type], [%1, type]) = ...`。
 - 空输出位打印为 `[]`，例如 `([], [%4, unknown]) = call mfunc @pair_ops(...)`。
 - 行尾源码注释默认只显示源码行号，例如 `; line 11-13`。需要折叠后的源码片段时，

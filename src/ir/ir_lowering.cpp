@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cctype>
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
@@ -168,6 +169,20 @@ std::vector<std::string> collect_anonymous_param_names(const ast_ptr& param_node
         names.push_back(std::static_pointer_cast<symref>(param_node)->name());
     }
     return names;
+}
+
+std::size_t count_call_arguments(const ast_ptr& in_args) noexcept {
+    if (in_args == nullptr ||
+        in_args->nodetype == node_nop ||
+        in_args->nodetype == node_empty) {
+        return 0U;
+    }
+
+    if (in_args->nodetype == node_list || in_args->nodetype == node_horz_list) {
+        return in_args->branch.size();
+    }
+
+    return 1U;
 }
 
 std::vector<std::string> collect_anonymous_free_names(
@@ -630,7 +645,7 @@ bool IRLowerer::lower_indexed_assign_stmt(const std::shared_ptr<symasgn>& assign
         return false;
     }
 
-    if (!append_call_arguments(inst->arguments, index_args)) {
+    if (!append_index_arguments(inst->arguments, base, index_args)) {
         return false;
     }
 
@@ -1282,6 +1297,251 @@ bool IRLowerer::append_call_arguments(
     return true;
 }
 
+bool IRLowerer::append_apply_arguments(
+    std::vector<Operand>& arguments,
+    const Operand& callee_or_base,
+    const ast_ptr& in_args) {
+    if (in_args == nullptr ||
+        in_args->nodetype == node_nop ||
+        in_args->nodetype == node_empty) {
+        return true;
+    }
+
+    const std::size_t nindices = count_call_arguments(in_args);
+    auto append_argument = [&](const ast_ptr& arg, std::size_t dim) {
+        MagicEndInst::MagicEndContext context;
+        context.callee_or_base = callee_or_base;
+        context.dim = static_cast<std::uint32_t>(dim);
+        context.nindices = static_cast<std::uint32_t>(nindices);
+        magic_end_context_stack_.push_back(context);
+
+        const ValueId argument = lower_expr(arg);
+        magic_end_context_stack_.pop_back();
+        if (!argument.is_valid()) {
+            return false;
+        }
+        arguments.push_back(argument);
+        return true;
+    };
+
+    if (in_args->nodetype == node_list || in_args->nodetype == node_horz_list) {
+        std::size_t dim = 1U;
+        for (const ast_ptr& arg : in_args->branch) {
+            if (!append_argument(arg, dim)) {
+                return false;
+            }
+            ++dim;
+        }
+        return true;
+    }
+
+    return append_argument(in_args, 1U);
+}
+
+bool IRLowerer::append_index_arguments(
+    std::vector<Operand>& arguments,
+    ValueId base,
+    const ast_ptr& in_args) {
+    if (in_args == nullptr ||
+        in_args->nodetype == node_nop ||
+        in_args->nodetype == node_empty) {
+        return true;
+    }
+
+    const std::size_t nindices = count_call_arguments(in_args);
+    auto append_argument = [&](const ast_ptr& arg, std::size_t dim) {
+        MagicEndInst::MagicEndContext context;
+        context.callee_or_base = base;
+        context.dim = static_cast<std::uint32_t>(dim);
+        context.nindices = static_cast<std::uint32_t>(nindices);
+        magic_end_context_stack_.push_back(context);
+
+        const ValueId argument = lower_index_argument(arg, base, dim, nindices);
+        magic_end_context_stack_.pop_back();
+        if (!argument.is_valid()) {
+            return false;
+        }
+        arguments.push_back(argument);
+        return true;
+    };
+
+    if (in_args->nodetype == node_list || in_args->nodetype == node_horz_list) {
+        std::size_t dim = 1U;
+        for (const ast_ptr& arg : in_args->branch) {
+            if (!append_argument(arg, dim)) {
+                return false;
+            }
+            ++dim;
+        }
+        return true;
+    }
+
+    return append_argument(in_args, 1U);
+}
+
+ValueId IRLowerer::lower_deferred_magic_end(const ast_ptr& node) {
+    if (magic_end_context_stack_.empty()) {
+        builder_.report(
+            IRBuildDiagnostic::Error,
+            "magic end 缺少有效索引上下文",
+            source_span_from(node));
+        return InvalidValueId;
+    }
+
+    std::unique_ptr<MagicEndInst> inst = std::make_unique<MagicEndInst>();
+    inst->result = builder_.create_value();
+    inst->source_span = source_span_from(node);
+    inst->candidate_contexts.assign(
+        magic_end_context_stack_.rbegin(),
+        magic_end_context_stack_.rend());
+
+    const ValueId result = inst->result;
+    if (!result.is_valid()) {
+        return InvalidValueId;
+    }
+
+    builder_.append_instruction(std::move(inst));
+    return result;
+}
+
+ValueId IRLowerer::lower_index_argument(
+    const ast_ptr& node,
+    ValueId base,
+    std::size_t dim,
+    std::size_t nindices) {
+    if (node == nullptr) {
+        builder_.report(
+            IRBuildDiagnostic::Error,
+            "不能 lower 空索引表达式",
+            SourceSpan::invalid());
+        return InvalidValueId;
+    }
+
+    switch (node->nodetype) {
+        case node_magic_end:
+            return lower_deferred_magic_end(node);
+
+        case node_uplus:
+        case node_negative:
+        case node_logic_not:
+        case node_transpose:
+        case node_ctranspose: {
+            const ValueId operand = lower_index_argument(node->l(), base, dim, nindices);
+            if (!operand.is_valid()) {
+                return InvalidValueId;
+            }
+
+            const SourceSpan source_span = source_span_from(node);
+            const auto op_it = kUnaryOpMap.find(node->nodetype);
+            if (op_it == kUnaryOpMap.end()) {
+                builder_.report(
+                    IRBuildDiagnostic::Error,
+                    std::string("当前 lowering 暂不支持一元索引表达式节点: ") +
+                        ast::nodeTypeString()[node->nodetype],
+                    source_span);
+                return InvalidValueId;
+            }
+
+            std::unique_ptr<UnaryInst> inst = std::make_unique<UnaryInst>();
+            inst->result = builder_.create_value();
+            inst->op = op_it->second;
+            inst->operand = operand;
+            inst->source_span = source_span;
+            const ValueId result = inst->result;
+            if (!result.is_valid()) {
+                return InvalidValueId;
+            }
+            builder_.append_instruction(std::move(inst));
+            return result;
+        }
+
+        case node_add:
+        case node_subtract:
+        case node_multiply:
+        case node_right_divide:
+        case node_left_divide:
+        case node_power:
+        case node_element_mul:
+        case node_element_rdiv:
+        case node_element_ldiv:
+        case node_element_power:
+        case node_logic_and:
+        case node_logic_or:
+        case node_less_than:
+        case node_leq:
+        case node_greater_than:
+        case node_geq:
+        case node_eq:
+        case node_noteq: {
+            const SourceSpan source_span = source_span_from(node);
+            const auto op_it = kBinaryOpMap.find(node->nodetype);
+            if (op_it == kBinaryOpMap.end()) {
+                builder_.report(
+                    IRBuildDiagnostic::Error,
+                    std::string("当前 lowering 暂不支持二元索引表达式节点: ") +
+                        ast::nodeTypeString()[node->nodetype],
+                    source_span);
+                return InvalidValueId;
+            }
+
+            const ValueId lhs = lower_index_argument(node->l(), base, dim, nindices);
+            const ValueId rhs = lower_index_argument(node->r(), base, dim, nindices);
+            if (!lhs.is_valid() || !rhs.is_valid()) {
+                return InvalidValueId;
+            }
+
+            std::unique_ptr<BinaryInst> inst = std::make_unique<BinaryInst>();
+            inst->result = builder_.create_value();
+            inst->op = op_it->second;
+            inst->lhs = lhs;
+            inst->rhs = rhs;
+            inst->source_span = source_span;
+            const ValueId result = inst->result;
+            if (!result.is_valid()) {
+                return InvalidValueId;
+            }
+            builder_.append_instruction(std::move(inst));
+            return result;
+        }
+
+        case node_colon: {
+            if (node->branch.size() != 2U && node->branch.size() != 3U) {
+                builder_.report(
+                    IRBuildDiagnostic::Error,
+                    "当前 lowering 暂不支持该索引冒号表达式",
+                    source_span_from(node));
+                return InvalidValueId;
+            }
+
+            std::unique_ptr<CallInst> inst = std::make_unique<CallInst>();
+            inst->callee_kind = CallInst::Direct;
+            inst->callee = InternedString("colon");
+            inst->source_span = source_span_from(node);
+
+            const ValueId result = builder_.create_value();
+            if (!result.is_valid()) {
+                return InvalidValueId;
+            }
+            inst->results.push_back(result);
+
+            for (const ast_ptr& branch : node->branch) {
+                const ValueId argument =
+                    lower_index_argument(branch, base, dim, nindices);
+                if (!argument.is_valid()) {
+                    return InvalidValueId;
+                }
+                inst->arguments.push_back(argument);
+            }
+
+            builder_.append_instruction(std::move(inst));
+            return result;
+        }
+
+        default:
+            return lower_expr(node);
+    }
+}
+
 bool IRLowerer::collect_call_result_names(
     const ast_ptr& out_args,
     std::vector<std::string>& result_names,
@@ -1439,7 +1699,7 @@ bool IRLowerer::lower_named_invoke(
             }
         }
 
-        if (!append_call_arguments(inst->arguments, call->in_args())) {
+        if (!append_index_arguments(inst->arguments, base, call->in_args())) {
             return false;
         }
 
@@ -1449,7 +1709,8 @@ bool IRLowerer::lower_named_invoke(
 
     std::unique_ptr<ApplyInst> inst = std::make_unique<ApplyInst>();
     inst->source_span = source_span;
-    inst->callee_or_base = InternedString(call->name());
+    const Operand callee_or_base = InternedString(call->name());
+    inst->callee_or_base = callee_or_base;
 
     for (std::size_t i = 0; i < result_names.size(); ++i) {
         if (!append_result_slot(inst->results)) {
@@ -1457,7 +1718,7 @@ bool IRLowerer::lower_named_invoke(
         }
     }
 
-    if (!append_call_arguments(inst->arguments, call->in_args())) {
+    if (!append_apply_arguments(inst->arguments, callee_or_base, call->in_args())) {
         return false;
     }
 
@@ -1730,7 +1991,7 @@ ValueId IRLowerer::lower_index_expr(const ast_ptr& node) {
         return InvalidValueId;
     }
 
-    if (!append_call_arguments(inst->arguments, element->index())) {
+    if (!append_index_arguments(inst->arguments, base, element->index())) {
         return InvalidValueId;
     }
 
@@ -1858,6 +2119,8 @@ ValueId IRLowerer::lower_expr(const ast_ptr& node) {
         case node_logic_and_short:
         case node_logic_or_short:
             return lower_short_circuit_expr(node);
+        case node_magic_end:
+            return lower_deferred_magic_end(node);
         case node_multiple_func: {
             const auto call = std::static_pointer_cast<multipleFuncCall>(node);
             if (call == nullptr || call->s() == nullptr || call->s()->nodetype != node_name) {

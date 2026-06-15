@@ -29,6 +29,9 @@ AST -> IR -> bytecode -> interpreter/profile -> typed SSA -> LLVM IR
 - 文件内 local 函数单元收集；调用在基础 lowering 中先保持动态 direct call
 - 具名函数句柄、匿名函数句柄
 - 多返回值调用和 `[~, b] = f(...)` 占位输出位
+- 圆括号索引上下文中的 `MagicEndInst`，例如 `A(end)`、`A(1:end)` 和 `A(end) = ...`
+- unresolved apply / value apply 多层候选中的 `MagicEndInst`，用于延迟表达
+  `A(fun(end))` 的归属层级
 - `if / else`
 - 短路逻辑 `&& / ||`，通过 CFG 表达右侧按需求值
 - `switch / case / otherwise`
@@ -41,7 +44,7 @@ AST -> IR -> bytecode -> interpreter/profile -> typed SSA -> LLVM IR
 - 嵌套函数和完整闭包 runtime
 - `try / catch`
 - `global` / `persistent`
-- 完整索引、成员访问、`magic_end`
+- 完整链式索引和成员访问
 - 完整 Matlab 函数优先级、路径和 import 语义
 
 ## 快速查看
@@ -95,6 +98,8 @@ global/persistent 和 deopt 相关文档视为后续设计约束。
 - [循环 Lowering 设计](./doc/loop_lowering_design.md)：`for` / `while`、循环 CFG 和
   `break` / `continue`。
 - [Switch Lowering 设计](./doc/switch_lowering_design.md)：`switch / case / otherwise` 的 CFG。
+- [Magic End Lowering 设计](./doc/magic_end_design.md)：索引上下文 `end` 和多层候选
+  `MagicEndInst`。
 - `&& / ||` 短路逻辑已在 [IR Lowering 设计](./doc/ir_lowering_design.md) 中记录，当前通过
   CFG 与内部 logical 结果 slot 表达按需求值。
 - [CFG DOT 输出设计](./doc/cfg_dot_design.md)：`ir_cfg_dot` 输出、节点和边的显示约定。

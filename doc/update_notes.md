@@ -155,6 +155,29 @@
 - 暂不默认改变 `ir_print` 输出，避免丢失 canonical lowering 的调试形状
 - 详细设计见 [internal_local_reuse_pass_design.md](./internal_local_reuse_pass_design.md)
 
+15. 增加圆括号索引上下文中的基础 `magic_end` lowering，见 `test8`。
+详细设计见 [magic_end_design.md](./magic_end_design.md)。
+
+当前支持：
+
+- `ValueApplyInst` 和 `internal.paren_assign` 的索引实参使用单独的索引上下文 lowering
+- `node_magic_end` 统一 lower 成 `MagicEndInst`，候选上下文中保留 base、`dim` 和
+  `nindices`
+- `MagicEndInst` 的结果类型事实保持 `unknown`，不在基础 IR 中假设类自定义 `end` 方法的
+  返回类型
+- `end - 1`、`1:end` 这类索引表达式会递归携带同一层 base 与维度上下文
+- `A(fun(end))` 会保留内层到外层的候选上下文链，例如 `fun -> A`
+- 脚本单层 `A(end)` 没有多层候选，但仍生成单候选 `MagicEndInst`
+- `MagicEndContext::callee_or_base` 的 Operand 种类保留绑定语义：`InternedString` 是尚未解析
+  的名字候选，`Slot` / `ValueId` 是已绑定变量或数据流候选；已绑定候选遇到 cleared /
+  unbound slot 应报变量引用错误，不能回退到同名函数或外层候选
+- `end` 不按普通函数名解析，用户自定义 `end.m` 不是合法候选；类对象索引中的自定义
+  `end` 方法由后续处理 `MagicEndInst` 的 pass / runtime 负责
+- 新增 `test/m/test8/test8.m` 和 `test8_smoke` 覆盖单维 `end`、二维第 1/2 维
+  `end`、冒号范围里的 `end`、索引赋值里的 `end` 和嵌套索引 `A(fun(end))`
+- 新增 `test/m/test8/test8_1.m` 和 `test8_1_smoke` 覆盖脚本里 `A(fun(end))`
+  无法静态确定归属层级的场景
+
 TODO：
 
 - 增加 `parent_get` 节点
@@ -163,9 +186,8 @@ TODO：
   迭代值，包括矩阵场景下的当前列。
 - 第一阶段：补齐完整下标语法，包括 `A(:, 2)`、`A(end, :)`、`A{1}`、`S.field`
   和 `A(1).x{2}` 等链式访问
-- 第一阶段：补齐 `magic_end` / `end` 的上下文语义。`end` 不能独立按普通名字 lower；
-  例如 `sin(floor(end))` 中，`end` 属于哪一层索引上下文，取决于 `floor` 和 `sin`
-  在当前位置分别被解析为变量索引还是函数调用。
+- 第一阶段：补齐完整 `magic_end` / `end` 上下文语义。当前只覆盖圆括号索引和索引赋值；
+  更复杂的嵌套名字解析场景仍需结合函数 / 变量分派结果判断。
 - 第一阶段：补齐更多字面量，包括 `[]`、`"abc"`、`'abc'`、`true / false`、
   cell literal 和 struct 相关构造
 - 第二阶段：支持 `global` / `persistent`，并接入变量 lookup 与 slot/env 语义

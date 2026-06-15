@@ -82,6 +82,27 @@ private:
     [[nodiscard]] bool append_call_arguments(
         std::vector<Operand>& arguments,
         const ast_ptr& in_args);
+    [[nodiscard]] bool append_apply_arguments(
+        std::vector<Operand>& arguments,
+        const Operand& callee_or_base,
+        const ast_ptr& in_args);
+    /**
+     * @brief lower 圆括号索引实参列表。
+     *
+     * `end` 只有在索引上下文中才有语义，因此不能通过普通 `lower_expr()` 全局处理。
+     * 这里显式携带 base / 维度信息，把 `A(end)` 这类源码保留为 `MagicEndInst` 的
+     * 候选上下文，后续 pass / runtime 再决定如何处理类 `end` 方法。
+     */
+    [[nodiscard]] bool append_index_arguments(
+        std::vector<Operand>& arguments,
+        ValueId base,
+        const ast_ptr& in_args);
+    [[nodiscard]] ValueId lower_index_argument(
+        const ast_ptr& node,
+        ValueId base,
+        std::size_t dim,
+        std::size_t nindices);
+    [[nodiscard]] ValueId lower_deferred_magic_end(const ast_ptr& node);
     /**
      * @brief 提取调用结果左值名字。
      *
@@ -187,6 +208,7 @@ private:
         unit_name_bindings_;
     // 这里把 vector 当作小型栈使用；相比 std::stack，调试和必要时遍历诊断更直接。
     std::vector<LoopControlContext> loop_stack_;
+    std::vector<MagicEndInst::MagicEndContext> magic_end_context_stack_;
 };
 
 /**
