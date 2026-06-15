@@ -105,9 +105,33 @@ AST -> IR -> bytecode -> interpreter/profile -> typed SSA -> LLVM IR
 
 脚本中静态出现的变量也应进入 slot 表，tag 为 `ScriptVar`。它的 IR 读写仍打印为
 `load` / `store`，但执行层需要根据运行时绑定状态决定直接访问已绑定存储，还是在绑定失效后
-退回动态 lookup。函数中的静态局部变量则使用 `Local/Arg/Ret` 等普通 frame slot。
+退回动态 lookup。函数中的静态局部变量则使用 `Local/Arg/Ret` 等普通 frame slot；对用户
+可见的名字，`SlotId` 只表达静态身份，`clear` / `eval` 等机制仍可能让当前 activation 中的
+live binding 失效，后续 slot 读写需要由执行层或前置分析确认 binding 仍然有效。
 
-### 2. Non-SSA，但允许局部 ValueId
+### 2. 静态事实向下传递，动态边界显式保留
+
+IR 的职责不是把所有语义都提前静态化，而是在当前阶段做清楚两件事：
+
+- 已经确定的静态语义，应显式传递给后续 bytecode、profile、JIT 和分析 pass。
+- 仍然依赖运行时环境的动态语义，应保留为可见的 IR 边界，而不是通过普通变量读写或普通调用
+  暗中表达。
+
+例如：
+
+- 函数入参、出参和普通局部变量的 slot layout 应向下传递；其 use 只有在当前 binding 仍 live
+  时才表达为 `LoadSlotInst` / `StoreSlotInst`。
+- 后续接入的 `global` 应按全局 binding 显式读写；`persistent` 可以使用静态 `SlotId` 定位，
+  但也应有不同于普通 frame slot 的显式读写语义。
+- 脚本名字访问、`eval`、`assignin`、路径变化和仍未消歧的 `A(...)` 应保持 workspace、Env
+  effect 或动态应用边界。
+- 已经解析稳定的调用可以表达为 `call`；仍可能受 workspace 遮蔽或运行时分派影响的应用应保留
+  为 `apply` 或 `value_apply`。
+
+这条原则的目标是让 IR 同时服务两类后续需求：bytecode/interpreter 可以按完整动态语义执行；
+优化层可以只提取已经静态稳定或有 guard 保护的区域。
+
+### 3. Non-SSA，但允许局部 ValueId
 
 IR 不是 SSA IR，但允许用 `ValueId` 表达指令结果，方便表达式级数据流。真正的可变程序状态
 仍然通过 slot 或动态 env 表达。
@@ -119,7 +143,7 @@ IR 不是 SSA IR，但允许用 `ValueId` 表达指令结果，方便表达式�
 - 多结果指令可以产生多个 `ValueId`
 - `~` 占位输出位保留结果位次，但没有真实 `ValueId`
 
-### 3. 静态结构与运行时对象分层
+### 4. 静态结构与运行时对象分层
 
 `IRModule`、`MFileUnit`、`CodeUnit`、`AnonymousFunctionUnit` 是编译期组织结构。运行时函数
 句柄、closure code object、capture environment 等执行对象不应简单强持有整个编译期
@@ -128,7 +152,7 @@ MFile/module。
 这条原则对匿名函数尤其重要：IR 中可以用 module 级匿名函数表组织 body，但 runtime 句柄
 应持有可执行 closure code 和 captures。
 
-### 4. 便于 bytecode lowering
+### 5. 便于 bytecode lowering
 
 IR 应容易 lowering 到 bytecode：
 
@@ -137,7 +161,7 @@ IR 应容易 lowering 到 bytecode：
 - dynamic env / dynamic call 语义保持显式
 - 不在 lowering 阶段偷偷静态化脚本 slot 的运行时绑定或函数路径
 
-### 5. 便于后续 region 提取
+### 6. 便于后续 region 提取
 
 虽然 IR 不是主优化 IR，但它应清楚表达哪些区域适合进入 typed SSA，哪些区域必须留在解释
 执行语义里。
@@ -151,3 +175,8 @@ IR 应容易 lowering 到 bytecode：
 - [IR Builder 设计](./ir_builder_design.md)
 - [IR Verifier 设计](./ir_verifier_design.md)
 - [Execution Strategy](./execution_strategy.md)
+- [M 变量模型设计](./variable_model_design.md)
+- [M 工作区设计](./workspace_design.md)
+- [M 函数栈帧设计](./function_frame_design.md)
+- [Global / Persistent IR 节点设计](./global_persistent_ir_design.md)
+- [Deopt 与优化运行时参考资料](./deopt_runtime_references.md)

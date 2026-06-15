@@ -109,13 +109,16 @@ std::vector<std::shared_ptr<pcdata>>
   `StoreSlotInst`，文本 IR 打印为 `load` / `store`
 - `function` 名字访问同样 lower 成 `LoadSlotInst` / `StoreSlotInst`；参数、返回值、局部变量
   分别通过 `Arg`、`Ret`、`Local` tag 区分
+  当前基础 lowering 尚未接入完整 `eval` / `clear` binding fact；后续支持动态 binding barrier
+  后，用户可见 slot 的读取必须先由执行层检查或由前置分析证明当前 binding 仍 live。
 - `script` 中的 `A(...)` 先保留为 `ApplyInst`
 - `function` 中的 `A(...)` 会根据 lowering 期名字绑定表分派：
   若 `A` 尚未绑定为变量，则直接 lower 成
   `CallInst(callee_kind = Direct, dispatch_type = Dynamic)`；
   若 `A` 已绑定为 slot 名字，则先 `LoadSlotInst` 读取当前变量值，再 lower 成
   `ValueApplyInst`。`ValueApplyInst` 表示 base 已经是 `ValueId`，但尚未分派为函数句柄
-  调用或圆括号取值。
+  调用或圆括号取值。后续接入 `clear A`、`eval('clear A')` 或未知 binding barrier 后，这条
+  路径需要先确认 `A -> slot` binding 仍 live；否则应退回名字 / binding 解析。
 - `MFileUnit` 当前会记录入口单元之外的 local `FunctionUnit`，但基础 lowering 不会因为
   local 函数存在就把调用静态绑定成 `MFunction`。后续名字解析 pass 需要同时考虑
   `import`、`private`、路径和遮蔽规则，再决定是否把动态 direct call 收敛成 `call mfunc`。
@@ -183,8 +186,8 @@ block 的创建与 `entry` 指定现在由 `CodeUnit` 自身完成，builder 只
 - 通过 verifier 检查 parent 指针、CFG 边、slot/value 引用等结构约束
 - 校验各自的核心侧重点是否 lower 正确：
   - `test1`：脚本里即使定义了 local `sin`，主体中的 `sin(a)` 仍保留为 `apply`
-  - `test1_1`：函数里 `sin(a)` / `-a` 可命中 local `sin` / `uminus`，而 `plus = 1`
-    和 `cos = 1` 又会分别遮蔽 local `plus` / `cos`
+  - `test1_1`：函数里 `sin(a)` / `-a` 不在基础 lowering 阶段静态命中 local
+    `sin` / `uminus`，`plus = 1` 和 `cos = 1` 也会分别遮蔽同名 local 函数
   - `test2`：简单 `for i = 1:10` 生成五块 loop CFG，其中 `colon` lower 为非
     internal 的普通 `call`，`foreach_init` 和 `foreach_iterate` lower 为
     可静态确定的 `internal.foreach_init` / `internal.foreach_iterate` 调用

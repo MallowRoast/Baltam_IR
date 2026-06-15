@@ -116,6 +116,23 @@
 - printer 把占位输出位显示为 `[]`
 - 新增 `test7` 覆盖多返回值和 placeholder lowering
 
+12. 整理文档入口与 runtime 设计文档。
+
+当前文档结构：
+
+- 新增 [文档入口](./README.md)，集中维护阅读路线、专题分类和术语边界。
+- 将当前源码事实统一指向 [IR Schema](./ir_schema.md)，runtime / workspace / deopt 文档作为
+  后续设计约束阅读。
+- 增加变量、workspace、函数 frame、global/persistent、deopt 等 runtime 设计记录：
+  [variable_model_design.md](./variable_model_design.md)、
+  [workspace_design.md](./workspace_design.md)、
+  [function_frame_design.md](./function_frame_design.md)、
+  [global_persistent_ir_design.md](./global_persistent_ir_design.md)、
+  [deopt_runtime_references.md](./deopt_runtime_references.md)。
+- 明确当前脚本静态名字已经是 `ScriptVar` slot，文本 IR 打印仍是 `load` / `store`；
+  runtime 文档中的 `load_workspace/store_workspace` 表示 workspace API 或未来 generic binding
+  access，不是当前源码里的独立 IR 节点。
+
 TODO：
 
 - 增加 `parent_get` 节点

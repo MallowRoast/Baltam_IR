@@ -25,12 +25,16 @@
 
 当前使用 `EntityId<Tag>` 定义强类型 ID：
 
-- `SlotId`：当前 `CodeUnit` 内 frame slot 的稳定句柄。
+- `SlotId`：当前 `CodeUnit` 内 frame slot 的稳定 layout 句柄。
 - `ValueId`：当前 `CodeUnit` 内指令结果值的稳定句柄。
 - `AnonymousFunctionId`：当前 `IRModule` 内匿名函数体的稳定句柄。
 
 `SlotId` 和 `ValueId` 按 `CodeUnit` 局部分配；`AnonymousFunctionId` 按 `IRModule` 分配。
 无效 ID 用对应的 `Invalid*Id` 常量表示。
+
+`SlotId` 只说明 layout 中存在对应 slot。对用户可见的 `Arg` / `Ret` / `Local` 名字，当前
+activation 中该名字是否仍 live 还属于运行时 binding state；`clear a` 或
+`eval('clear a')` 可以让 `a -> SlotId` 的 live binding 失效。
 
 ## 2. IRModule / MFileUnit
 
@@ -320,6 +324,11 @@ Instruction
   - `result : ValueId`
   - `value : Operand`
 
+`LoadSlotInst` / `StoreSlotInst` 表示固定 frame offset 的 slot 访问。对用户可见 slot，
+`LoadSlotInst` 的语义前提是当前程序点已经证明该名字仍是 live frame-slot binding；
+`StoreSlotInst` 会写入 slot，并可重新建立对应名字的 live binding。这个约束不适用于用户
+不可见的 `InternalLocal` / `Hidden` slot。
+
 ### 函数句柄与应用
 
 - `CreateNamedFunctionHandleInst`
@@ -425,3 +434,6 @@ CaptureValue
 - [IR Builder 设计](./ir_builder_design.md)
 - [IR Verifier 设计](./ir_verifier_design.md)
 - [匿名函数句柄设计](./anonymous_function_handle_design.md)
+- [M 变量模型设计](./variable_model_design.md)
+- [M 工作区设计](./workspace_design.md)
+- [M 函数栈帧设计](./function_frame_design.md)

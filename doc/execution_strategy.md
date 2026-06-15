@@ -344,3 +344,6 @@ Tier 2 的代码比 Tier 1 更投机，因此需要更明确的依赖跟踪。�
 
 - [ir_draft.md](./ir_draft.md)
 - [ir_schema.md](./ir_schema.md)
+- [workspace_design.md](./workspace_design.md)
+- [function_frame_design.md](./function_frame_design.md)
+- [deopt_runtime_references.md](./deopt_runtime_references.md)

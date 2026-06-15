@@ -73,24 +73,14 @@ env HOME=/tmp XDG_CACHE_HOME=/tmp/.cache BALTAM_FRONTEND=console \
 
 ## 文档入口
 
-建议按这个顺序阅读：
+完整目录和阅读路线见 [doc/README.md](./doc/README.md)。
+
+快速路线：
 
 1. [IR Schema](./doc/ir_schema.md)：当前源码里的 IR 对象和指令 schema
 2. [IR Lowering 设计](./doc/ir_lowering_design.md)：当前 `.m -> IR` lowering 行为
 3. [IR Builder 设计](./doc/ir_builder_design.md)：底层 IR 构造器职责
 4. [IR Verifier 设计](./doc/ir_verifier_design.md)：结构校验范围
-5. [匿名函数句柄设计](./doc/anonymous_function_handle_design.md)：匿名函数特有语义
-6. [计划中与思考中的问题](./doc/planning_notes.md)：后续 pass 和优化方向
+5. [M 变量模型设计](./doc/variable_model_design.md)：runtime 变量和 binding 语义
+6. [M 工作区设计](./doc/workspace_design.md)：动态 workspace / env 设计
 7. [更新日志](./doc/update_notes.md)：当前快照和近期 TODO
-
-专题文档：
-
-- [IR 草案](./doc/ir_draft.md)
-- [循环 Lowering 设计](./doc/loop_lowering_design.md)
-- [Switch Lowering 设计](./doc/switch_lowering_design.md)
-- [CFG DOT 输出设计](./doc/cfg_dot_design.md)
-- [ValueId 类型事实与函数分派设计](./doc/value_type_dispatch_design.md)
-- [Execution Strategy](./doc/execution_strategy.md)
-- [后续需要学习与确认的问题](./doc/learning_notes.md)
-
-Matlab 语义调研记录位于 [doc/matlab](./doc/matlab)。
