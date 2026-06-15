@@ -13,6 +13,7 @@
 - 具名函数句柄、匿名函数句柄和 `value_apply`
 - 多返回值调用和 `~` 占位输出位
 - `if / else`
+- 短路逻辑 `&& / ||`
 - `switch / case / otherwise`
 - `for / while` 循环和循环内 `break / continue`
 - 嵌套循环中的最近一层 loop context 选择
@@ -85,6 +86,7 @@ std::vector<std::shared_ptr<pcdata>>
   - 名字读取
   - 一元运算
   - 二元运算
+  - 短路逻辑 `&& / ||`
   - 名字形式的圆括号应用
   - 带输出参数的圆括号应用语句
   - 多返回值调用和 `~` 占位输出位
@@ -125,6 +127,14 @@ std::vector<std::shared_ptr<pcdata>>
 - `function` 中的一元 / 二元运算在基础 lowering 中保留为普通 `UnaryInst` /
   `BinaryInst`，不因为存在同名 local 函数就提前静态分派。后续 pass 可以在完整名字解析
   稳定后再收敛到具体函数或 builtin。
+- `node_logic_and` / `node_logic_or` 仍作为普通二元 `&` / `|` lower 成 `BinaryInst`；
+  `node_logic_and_short` / `node_logic_or_short` 对应源码 `&&` / `||`，会 lower 成显式
+  CFG。左侧先在当前块求值，然后 `BranchInst` 决定是否进入 rhs 块；短路路径直接写入
+  `false` 或 `true`，rhs 路径只在需要时 lower 并写入右侧结果。两条路径最后汇合到
+  `sc.*.end`，通过 `InternalLocal` logical slot 读出表达式结果。当前 IR 没有
+  phi 节点，因此使用内部 slot 表达分支结果汇合。多个短路表达式之间的物理 slot 复用
+  留给后续 [InternalLocal 复用 Pass](./internal_local_reuse_pass_design.md)，不放进
+  lowering 阶段。
 - lowering 阶段的静态名字查询统一走两个入口：
   - `lookup_var(name)` 查询当前 lowering 已知的变量表，当前底层来自 `IRLowerer` 按
     `CodeUnit` 保存的 `name -> Slot` side table。这张表只属于 lowering 期语义状态，
@@ -207,6 +217,8 @@ block 的创建与 `entry` 指定现在由 `CodeUnit` 自身完成，builder 只
   - `test4_3`：`switch case` 包裹 `for / while` 时，循环内 `break / continue` 命中
     最近循环，循环正常结束后回到 `switch.end`
   - `test5_1`：具名函数句柄、匿名函数句柄、捕获值和 `value_apply`
+  - `test6`：`&& / ||` 不 lower 成普通 `BinaryInst And/Or`，而是生成 rhs / 短路 /
+    merge 基本块和内部 logical 结果 slot
   - `test7`：多返回值签名、多结果 `call` 和 `~` 占位输出位
 
 syntax smoke test 不再校验文本 IR 的显示格式，避免缩进、block 注释、source comment 等

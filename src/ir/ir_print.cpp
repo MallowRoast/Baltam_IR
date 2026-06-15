@@ -1005,7 +1005,7 @@ private:
         std::string text = (it == block_labels_.end() ? "<unknown-block>" : it->second);
         text += ':';
 
-        if (!options_.print_block_predecessors || block.predecessors.empty()) {
+        if (!options_.print_block_predecessors) {
             return text;
         }
 

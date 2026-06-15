@@ -180,6 +180,14 @@ add_ir_smoke_test(
 set_smoke_labels(test5_1_smoke smoke syntax)
 
 add_ir_smoke_test(
+    test6_smoke
+    syntax/test6_smoke.cpp
+    TEST6_MFILE_PATH
+    test/m/test6/test6.m
+)
+set_smoke_labels(test6_smoke smoke syntax)
+
+add_ir_smoke_test(
     test7_smoke
     syntax/test7_smoke.cpp
     TEST7_MFILE_PATH
@@ -206,6 +214,26 @@ add_test(
     COMMAND ir_type_smoke
 )
 set_smoke_labels(ir_type_smoke smoke feature)
+
+add_executable(ir_print_smoke
+    feature/ir_print_smoke.cpp
+)
+
+target_include_directories(ir_print_smoke
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_link_libraries(ir_print_smoke
+    PRIVATE
+        BALTAM_IR
+)
+
+add_test(
+    NAME ir_print_smoke
+    COMMAND ir_print_smoke
+)
+set_smoke_labels(ir_print_smoke smoke feature)
 
 add_ir_smoke_test(
     cfg_dot_smoke

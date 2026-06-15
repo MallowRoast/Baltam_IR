@@ -528,6 +528,27 @@ br label %then
 第一版 DCE 更适合作为保守 pass：只删除明确 pure、明确无 use 的内容。等 effect model 更细以后，
 再逐步扩大可删范围。
 
+### Pass 12：InternalLocal 复用
+
+#### 目标
+
+在不改变 high-level IR 语义的前提下，减少 lowering/runtime 内部临时 slot 的物理 frame
+占用。第一阶段重点是短路逻辑 `&& / ||` 生成的 logical `InternalLocal` 结果 slot。
+
+#### 第一阶段建议
+
+先把这条 pass 设计成 frame layout 前的分析 / 分配 pass，而不是直接改写 IR：
+
+- 输入仍是 canonical high-level IR
+- 输出 logical `InternalLocal` slot 到 physical frame slot 的映射
+- bytecode lowering 或 frame layout 使用该映射减少实际 frame 空间
+- 文本 IR 默认不运行该 pass，保留每个短路表达式一个 logical slot 的清晰形状
+
+后续如果 slot remap、def-use 和 slot table 清理基础设施稳定，再考虑把它扩展成可选 IR 改写
+pass。
+
+详细设计见 [internal_local_reuse_pass_design.md](./internal_local_reuse_pass_design.md)。
+
 ### 粗略顺序
 
 当前更合理的实现顺序是：
@@ -541,5 +562,7 @@ br label %then
 7. 再对 function 内的纯局部 slot 做寄存器化 / SSA 提升，先从单 block 或稳定 region 开始
 8. 最后做基于 `MFunction` 调用可达性的 local function DCE；若内联后出现新的死 local 函数，可以再重复一轮
 9. 每个会改 CFG 的 pass 之后，都可以再跑一轮 CFG simplify 作为 cleanup
+10. frame layout 或 bytecode lowering 前，可以运行 `InternalLocalReusePass`，把不重叠的
+    内部临时 slot 映射到同一个物理 frame 位置
 
 原因很简单：第二个 pass 依赖的前提，和第一个 pass 证明的其实是同一类事实；函数内联又依赖调用目标已经先收敛成足够稳定的静态 `call`；而寄存器化 / SSA 提升则最适合放在内联之后，去吃掉内联额外暴露出来的局部 slot 数据流机会。

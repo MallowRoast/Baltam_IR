@@ -64,6 +64,7 @@ private:
     void lower_break_stmt(const ast_ptr& node);
     void lower_continue_stmt(const ast_ptr& node);
     [[nodiscard]] ValueId lower_expr(const ast_ptr& node);
+    [[nodiscard]] ValueId lower_short_circuit_expr(const ast_ptr& node);
     [[nodiscard]] ValueId lower_named_value(std::string_view name, SourceSpan source_span);
     [[nodiscard]] ValueId lower_named_function_handle(const ast_ptr& node);
     [[nodiscard]] ValueId lower_anonymous_function_handle(const ast_ptr& node);

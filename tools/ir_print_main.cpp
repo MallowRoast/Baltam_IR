@@ -75,7 +75,7 @@ void print_usage(std::ostream& os) {
        << "  --source-full             include collapsed source excerpts in comments\n"
        << "  --no-line-numbers         omit source line numbers in comments\n"
        << "  --no-slots                do not print the slot table\n"
-       << "  --show-cfg                print basic block predecessor lists\n"
+       << "  --show-cfg                print basic block predecessor lists (default)\n"
        << "  --no-cfg                  do not print basic block predecessor lists\n"
        << "  --no-types                do not print ValueTable type facts\n"
        << "  --no-file-header          do not print the file header comment\n"

@@ -333,11 +333,26 @@ IRBuildResult IRLowerer::lower_parsed_units(
     mfile.entry_unit = nullptr;
     mfile.local_function_map.clear();
 
+    const bool has_function_main_unit = std::any_of(
+        parsed_units.begin(),
+        parsed_units.end(),
+        [&](const std::shared_ptr<pcdata>& parsed_unit) {
+            return parsed_unit != nullptr &&
+                !parsed_unit->is_mscript() &&
+                parsed_unit->funname == file_stem;
+        });
+
     for (const std::shared_ptr<pcdata>& parsed_unit : parsed_units) {
         if (parsed_unit == nullptr) {
             builder_.report(
                 IRBuildDiagnostic::Warning,
                 "已解析工作区列表中存在空项，已跳过");
+            continue;
+        }
+
+        if (has_function_main_unit &&
+            parsed_unit->is_mscript() &&
+            is_empty_stmt_node(parsed_unit->ast)) {
             continue;
         }
 
@@ -1840,6 +1855,9 @@ ValueId IRLowerer::lower_expr(const ast_ptr& node) {
             builder_.append_instruction(std::move(inst));
             return result;
         }
+        case node_logic_and_short:
+        case node_logic_or_short:
+            return lower_short_circuit_expr(node);
         case node_multiple_func: {
             const auto call = std::static_pointer_cast<multipleFuncCall>(node);
             if (call == nullptr || call->s() == nullptr || call->s()->nodetype != node_name) {
@@ -1910,6 +1928,125 @@ ValueId IRLowerer::lower_expr(const ast_ptr& node) {
                 source_span_from(node));
             return InvalidValueId;
     }
+}
+
+ValueId IRLowerer::lower_short_circuit_expr(const ast_ptr& node) {
+    if (node == nullptr ||
+        (node->nodetype != node_logic_and_short &&
+         node->nodetype != node_logic_or_short)) {
+        builder_.report(
+            IRBuildDiagnostic::Error,
+            "短路表达式节点非法",
+            source_span_from(node));
+        return InvalidValueId;
+    }
+
+    CodeUnit* unit = builder_.current_unit();
+    if (unit == nullptr) {
+        builder_.report(
+            IRBuildDiagnostic::Error,
+            "没有活动代码单元，无法 lower 短路表达式",
+            source_span_from(node));
+        return InvalidValueId;
+    }
+
+    const bool is_and = node->nodetype == node_logic_and_short;
+    const SourceSpan source_span = source_span_from(node);
+    const SourceSpan lhs_span = source_span_from(node->l());
+    const SourceSpan rhs_span = source_span_from(node->r());
+
+    const ValueId lhs = lower_expr(node->l());
+    if (!lhs.is_valid()) {
+        return InvalidValueId;
+    }
+
+    BasicBlock* rhs_block = unit->create_block(
+        is_and ? "sc.and.rhs" : "sc.or.rhs",
+        rhs_span);
+    BasicBlock* short_block = unit->create_block(
+        is_and ? "sc.and.false" : "sc.or.true",
+        lhs_span);
+    BasicBlock* merge_block = unit->create_block(
+        is_and ? "sc.and.end" : "sc.or.end",
+        source_span);
+
+    if (rhs_block == nullptr || short_block == nullptr || merge_block == nullptr) {
+        return InvalidValueId;
+    }
+
+    const Slot result_slot = builder_.create_slot(
+        SlotTag::InternalLocal,
+        is_and ? "__sc_and" : "__sc_or",
+        source_span,
+        SlotValueType::LogicalScalar);
+    if (!result_slot.is_valid()) {
+        return InvalidValueId;
+    }
+
+    std::unique_ptr<BranchInst> branch = std::make_unique<BranchInst>();
+    branch->condition = lhs;
+    branch->true_target = is_and ? rhs_block : short_block;
+    branch->false_target = is_and ? short_block : rhs_block;
+    branch->source_span = source_span;
+    builder_.append_instruction(std::move(branch));
+
+    builder_.set_insert_point(short_block);
+    std::unique_ptr<ConstInst> short_value = std::make_unique<ConstInst>();
+    short_value->result = builder_.create_value();
+    short_value->value = LogicalConstant{!is_and};
+    short_value->source_span = source_span;
+    short_value->attrs.is_synthetic = 1;
+    const ValueId short_result = short_value->result;
+    if (!short_result.is_valid()) {
+        return InvalidValueId;
+    }
+    builder_.append_instruction(std::move(short_value));
+
+    std::unique_ptr<StoreSlotInst> short_store = std::make_unique<StoreSlotInst>();
+    short_store->slot = result_slot;
+    short_store->value = short_result;
+    short_store->source_span = source_span;
+    short_store->attrs.is_synthetic = 1;
+    builder_.append_instruction(std::move(short_store));
+
+    std::unique_ptr<GotoInst> short_go = std::make_unique<GotoInst>();
+    short_go->target = merge_block;
+    short_go->source_span = source_span;
+    short_go->attrs.is_synthetic = 1;
+    builder_.append_instruction(std::move(short_go));
+
+    builder_.set_insert_point(rhs_block);
+    const ValueId rhs = lower_expr(node->r());
+    if (!rhs.is_valid()) {
+        return InvalidValueId;
+    }
+
+    std::unique_ptr<StoreSlotInst> rhs_store = std::make_unique<StoreSlotInst>();
+    rhs_store->slot = result_slot;
+    rhs_store->value = rhs;
+    rhs_store->source_span = rhs_span;
+    rhs_store->attrs.is_synthetic = 1;
+    builder_.append_instruction(std::move(rhs_store));
+
+    std::unique_ptr<GotoInst> rhs_go = std::make_unique<GotoInst>();
+    rhs_go->target = merge_block;
+    rhs_go->source_span = source_span;
+    rhs_go->attrs.is_synthetic = 1;
+    builder_.append_instruction(std::move(rhs_go));
+
+    builder_.set_insert_point(merge_block);
+    std::unique_ptr<LoadSlotInst> load = std::make_unique<LoadSlotInst>();
+    load->slot = result_slot;
+    load->result = builder_.create_value();
+    load->source_span = source_span;
+    load->attrs.is_synthetic = 1;
+    const ValueId result = load->result;
+    if (!result.is_valid()) {
+        return InvalidValueId;
+    }
+
+    builder_.append_instruction(std::move(load));
+    return result;
 }
 
 void IRLowerer::predeclare_function_signature(const pcdata& parsed_unit) {

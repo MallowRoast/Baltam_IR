@@ -120,7 +120,7 @@
 
 当前文档结构：
 
-- 新增 [文档入口](./README.md)，集中维护阅读路线、专题分类和术语边界。
+- 将根目录 [README](../README.md) 作为唯一文档入口，集中维护阅读路线、专题分类和术语边界。
 - 将当前源码事实统一指向 [IR Schema](./ir_schema.md)，runtime / workspace / deopt 文档作为
   后续设计约束阅读。
 - 增加变量、workspace、函数 frame、global/persistent、deopt 等 runtime 设计记录：
@@ -132,6 +132,28 @@
 - 明确当前脚本静态名字已经是 `ScriptVar` slot，文本 IR 打印仍是 `load` / `store`；
   runtime 文档中的 `load_workspace/store_workspace` 表示 workspace API 或未来 generic binding
   access，不是当前源码里的独立 IR 节点。
+
+13. 增加短路逻辑 `&& / ||` lowering，见 `test6`。
+
+当前支持：
+
+- `node_logic_and_short` / `node_logic_or_short` 不再 lower 成普通 `BinaryInst And/Or`
+- 左侧表达式先求值，再通过 `BranchInst` 决定是否进入右侧求值块
+- `&&` 的短路路径写入 logical `false`，`||` 的短路路径写入 logical `true`
+- rhs 路径仅在需要时 lower 并写入结果
+- 两条路径通过 `InternalLocal` logical slot 在 merge 块汇合，适配当前无 phi 的 IR 形态
+- 新增 `test/m/test6/test6.m` 和 `test6_smoke` 覆盖短路 CFG、内部结果 slot 和
+  `BinaryInst And/Or` 不应出现
+
+14. 增加 `InternalLocalReusePass` 设计记录。
+
+当前设计：
+
+- pass 不放进基础 lowering；lowering 继续为每个短路表达式创建独立 logical internal slot
+- 第一阶段只分析 `InternalLocal logical` 短路临时 slot 的 live range
+- 优先产出 logical slot 到 physical frame slot 的映射，供 bytecode lowering / frame layout 使用
+- 暂不默认改变 `ir_print` 输出，避免丢失 canonical lowering 的调试形状
+- 详细设计见 [internal_local_reuse_pass_design.md](./internal_local_reuse_pass_design.md)
 
 TODO：
 
@@ -147,4 +169,3 @@ TODO：
 - 第一阶段：补齐更多字面量，包括 `[]`、`"abc"`、`'abc'`、`true / false`、
   cell literal 和 struct 相关构造
 - 第二阶段：支持 `global` / `persistent`，并接入变量 lookup 与 slot/env 语义
-- 第二阶段：支持短路逻辑 `&&` / `||`，使用 CFG 表达条件求值

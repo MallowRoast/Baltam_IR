@@ -414,7 +414,7 @@ CaptureValue
 
 - block label 顶格打印，指令缩进两个空格。
 - block label 默认携带前驱注释，格式为 `label: ; preds = [%pred0, %pred1]`。
-  `entry` 没有前驱时不打印 `preds`。`ir_print --no-cfg` 可关闭这类注释。
+  没有前驱的入口块打印为 `entry: ; preds = []`。`ir_print --no-cfg` 可关闭这类注释。
 - slot 表打印在 unit 头部，slot 条目比 `; slots:` 再缩进一级。
 - `LoadSlotInst` 打印为 `load %slotN`。
 - `StoreSlotInst` 打印为 `store %slotN, value`。
