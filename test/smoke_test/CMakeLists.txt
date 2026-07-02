@@ -267,6 +267,26 @@ add_test(
 )
 set_smoke_labels(ir_print_smoke smoke feature)
 
+add_executable(ir_pass_manager_smoke
+    feature/ir_pass_manager_smoke.cpp
+)
+
+target_include_directories(ir_pass_manager_smoke
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_link_libraries(ir_pass_manager_smoke
+    PRIVATE
+        BALTAM_IR
+)
+
+add_test(
+    NAME ir_pass_manager_smoke
+    COMMAND ir_pass_manager_smoke
+)
+set_smoke_labels(ir_pass_manager_smoke smoke feature)
+
 add_ir_smoke_test(
     cfg_dot_smoke
     feature/cfg_dot_smoke.cpp

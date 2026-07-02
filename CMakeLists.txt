@@ -10,6 +10,11 @@ add_library(BALTAM_IR STATIC
     src/ir/ir_print.cpp
     src/ir/ir_type.cpp
     src/ir/ir_verify.cpp
+    src/pass/cfg_simplification_pass.cpp
+    src/pass/constant_deduplication_pass.cpp
+    src/pass/load_forwarding_pass.cpp
+    src/pass/ir_pass_manager.cpp
+    src/pass/unreachable_block_elimination_pass.cpp
 )
 
 target_include_directories(BALTAM_IR
