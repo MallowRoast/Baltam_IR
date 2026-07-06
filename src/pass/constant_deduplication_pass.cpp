@@ -140,6 +140,12 @@ struct DuplicateConst {
     ConstInst* duplicate = nullptr;
 };
 
+struct LoopInfo {
+    BasicBlock* header = nullptr;
+    BasicBlock* preheader = nullptr;
+    std::unordered_set<BasicBlock*> blocks;
+};
+
 [[nodiscard]] bool contains_block(const CodeUnit& unit, const BasicBlock* block) {
     return block != nullptr &&
         std::any_of(
@@ -415,6 +421,181 @@ void rewrite_const_layout(
         std::make_move_iterator(hoisted_constants.end()));
 }
 
+[[nodiscard]] bool is_loop_header(const BasicBlock& block) {
+    return block.label == "for.header" || block.label == "while.header";
+}
+
+[[nodiscard]] bool is_reachable_from_loop_header(
+    const BasicBlock& header,
+    const BasicBlock* target) {
+    if (target == nullptr) {
+        return false;
+    }
+
+    std::unordered_set<const BasicBlock*> visited;
+    std::vector<const BasicBlock*> worklist;
+    for (BasicBlock* successor : header.successors) {
+        if (successor != nullptr && successor != &header) {
+            worklist.push_back(successor);
+        }
+    }
+
+    while (!worklist.empty()) {
+        const BasicBlock* block = worklist.back();
+        worklist.pop_back();
+        if (block == nullptr || !visited.insert(block).second) {
+            continue;
+        }
+
+        if (block == target) {
+            return true;
+        }
+
+        for (BasicBlock* successor : block->successors) {
+            if (successor != nullptr && successor != &header) {
+                worklist.push_back(successor);
+            }
+        }
+    }
+
+    return false;
+}
+
+[[nodiscard]] BasicBlock* find_unique_loop_preheader(const BasicBlock& header) {
+    BasicBlock* preheader = nullptr;
+    for (BasicBlock* predecessor : header.predecessors) {
+        if (predecessor == nullptr ||
+            predecessor == &header ||
+            is_reachable_from_loop_header(header, predecessor)) {
+            continue;
+        }
+
+        if (preheader != nullptr && preheader != predecessor) {
+            return nullptr;
+        }
+        preheader = predecessor;
+    }
+    return preheader;
+}
+
+[[nodiscard]] std::unordered_set<BasicBlock*> collect_natural_loop_blocks(
+    BasicBlock& header,
+    const BasicBlock* preheader) {
+    std::unordered_set<BasicBlock*> blocks;
+    std::vector<BasicBlock*> worklist;
+    blocks.insert(&header);
+
+    for (BasicBlock* predecessor : header.predecessors) {
+        if (predecessor != nullptr && predecessor != preheader) {
+            worklist.push_back(predecessor);
+        }
+    }
+
+    while (!worklist.empty()) {
+        BasicBlock* block = worklist.back();
+        worklist.pop_back();
+        if (block == nullptr || block == preheader || !blocks.insert(block).second) {
+            continue;
+        }
+
+        for (BasicBlock* predecessor : block->predecessors) {
+            if (predecessor != nullptr && predecessor != preheader) {
+                worklist.push_back(predecessor);
+            }
+        }
+    }
+
+    return blocks;
+}
+
+[[nodiscard]] std::vector<LoopInfo> collect_loops(CodeUnit& unit) {
+    std::vector<LoopInfo> loops;
+
+    for (const auto& block_ptr : unit.basic_blocks) {
+        if (block_ptr == nullptr || !is_loop_header(*block_ptr)) {
+            continue;
+        }
+
+        BasicBlock* preheader = find_unique_loop_preheader(*block_ptr);
+        if (preheader == nullptr) {
+            continue;
+        }
+
+        std::unordered_set<BasicBlock*> blocks =
+            collect_natural_loop_blocks(*block_ptr, preheader);
+        if (blocks.size() <= 1U) {
+            continue;
+        }
+
+        loops.push_back({block_ptr.get(), preheader, std::move(blocks)});
+    }
+
+    return loops;
+}
+
+[[nodiscard]] std::vector<std::unique_ptr<Instruction>>::iterator insertion_point_before_terminator(
+    BasicBlock& block) {
+    if (!block.instructions.empty() &&
+        block.instructions.back() != nullptr &&
+        block.instructions.back()->is_terminator()) {
+        return std::prev(block.instructions.end());
+    }
+
+    return block.instructions.end();
+}
+
+[[nodiscard]] bool hoist_loop_constants(const CodeUnit& unit, const LoopInfo& loop) {
+    if (loop.header == nullptr || loop.preheader == nullptr || loop.blocks.empty()) {
+        return false;
+    }
+
+    std::vector<std::unique_ptr<Instruction>> hoisted_constants;
+
+    for (const auto& block_ptr : unit.basic_blocks) {
+        BasicBlock* block = block_ptr.get();
+        if (block == nullptr ||
+            block == loop.preheader ||
+            loop.blocks.find(block) == loop.blocks.end()) {
+            continue;
+        }
+
+        std::vector<std::unique_ptr<Instruction>> kept_instructions;
+        kept_instructions.reserve(block->instructions.size());
+
+        for (auto& inst_ptr : block->instructions) {
+            Instruction* instruction = inst_ptr.get();
+            if (instruction != nullptr && instruction->type() == Instruction::Const) {
+                instruction->parent = loop.preheader;
+                hoisted_constants.push_back(std::move(inst_ptr));
+                continue;
+            }
+
+            kept_instructions.push_back(std::move(inst_ptr));
+        }
+
+        block->instructions = std::move(kept_instructions);
+    }
+
+    if (hoisted_constants.empty()) {
+        return false;
+    }
+
+    auto insert_at = insertion_point_before_terminator(*loop.preheader);
+    loop.preheader->instructions.insert(
+        insert_at,
+        std::make_move_iterator(hoisted_constants.begin()),
+        std::make_move_iterator(hoisted_constants.end()));
+    return true;
+}
+
+[[nodiscard]] bool hoist_loop_constants(CodeUnit& unit) {
+    bool changed = false;
+    for (const LoopInfo& loop : collect_loops(unit)) {
+        changed = hoist_loop_constants(unit, loop) || changed;
+    }
+    return changed;
+}
+
 } // namespace
 
 IRPassResult ConstantDeduplicationPass::run(CodeUnit& unit, IRPassContext& context) {
@@ -437,30 +618,31 @@ IRPassResult ConstantDeduplicationPass::run(CodeUnit& unit, IRPassContext& conte
         return result;
     }
 
+    bool changed = false;
     std::vector<DuplicateConst> duplicates = collect_duplicate_constants(unit);
-    if (duplicates.empty()) {
-        return result;
-    }
+    if (!duplicates.empty()) {
+        ValueRewriteMap replacements;
+        replacements.reserve(duplicates.size());
+        for (const DuplicateConst& duplicate : duplicates) {
+            if (duplicate.duplicate == nullptr ||
+                duplicate.canonical == nullptr ||
+                duplicate.duplicate->result == duplicate.canonical->result) {
+                continue;
+            }
 
-    ValueRewriteMap replacements;
-    replacements.reserve(duplicates.size());
-    for (const DuplicateConst& duplicate : duplicates) {
-        if (duplicate.duplicate == nullptr ||
-            duplicate.canonical == nullptr ||
-            duplicate.duplicate->result == duplicate.canonical->result) {
-            continue;
+            replacements[duplicate.duplicate->result.value()] = duplicate.canonical->result;
         }
 
-        replacements[duplicate.duplicate->result.value()] = duplicate.canonical->result;
+        std::vector<ConstInst*> canonical_constants = canonical_hoist_order(duplicates);
+        rewrite_uses(unit, replacements);
+        update_value_table(unit, duplicates, canonical_constants);
+        (void)move_entry_block_to_front(unit);
+        rewrite_const_layout(unit, duplicates, canonical_constants);
+        changed = true;
     }
 
-    std::vector<ConstInst*> canonical_constants = canonical_hoist_order(duplicates);
-    rewrite_uses(unit, replacements);
-    update_value_table(unit, duplicates, canonical_constants);
-    (void)move_entry_block_to_front(unit);
-    rewrite_const_layout(unit, duplicates, canonical_constants);
-
-    result.changed = true;
+    changed = hoist_loop_constants(unit) || changed;
+    result.changed = changed;
     return result;
 }
 

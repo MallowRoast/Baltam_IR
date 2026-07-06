@@ -960,24 +960,14 @@ private:
     void assign_block_labels(const CodeUnit& unit) {
         block_labels_.clear();
 
-        std::unordered_map<std::string, std::size_t> counts;
+        std::size_t next_block_id = 0;
         for (std::size_t i = 0; i < unit.basic_blocks.size(); ++i) {
             const BasicBlock* block = unit.basic_blocks[i].get();
             if (block == nullptr) {
                 continue;
             }
 
-            std::string base = block->label.empty()
-                ? ("bb" + std::to_string(i))
-                : std::string(block->label);
-
-            std::size_t& count = counts[base];
-            std::string label = count == 0
-                ? base
-                : (base + "." + std::to_string(count));
-            ++count;
-
-            block_labels_.emplace(block, std::move(label));
+            block_labels_.emplace(block, "L" + std::to_string(next_block_id++));
         }
     }
 
@@ -991,32 +981,46 @@ private:
 
     [[nodiscard]] std::string format_block_ref(const BasicBlock* block) const {
         if (block == nullptr) {
-            return "%<null-block>";
+            return "<null-block>";
         }
 
         const auto it = block_labels_.find(block);
         if (it == block_labels_.end()) {
-            return "%<unknown-block>";
+            return "<unknown-block>";
         }
 
-        return '%' + it->second;
+        return it->second;
+    }
+
+    [[nodiscard]] std::string format_block_label_ref(const BasicBlock* block) const {
+        if (block == nullptr) {
+            return "<null-block>";
+        }
+
+        const auto it = block_labels_.find(block);
+        if (it == block_labels_.end()) {
+            return "<unknown-block>";
+        }
+
+        return it->second;
     }
 
     [[nodiscard]] std::string format_block_label(const BasicBlock& block) const {
         const auto it = block_labels_.find(&block);
         std::string text = (it == block_labels_.end() ? "<unknown-block>" : it->second);
-        text += ':';
+        text += ": ; Type = ";
+        text += block.label.empty() ? "<unnamed>" : block.label;
 
         if (!options_.print_block_predecessors) {
             return text;
         }
 
-        text += " ; preds = [";
+        text += ", preds = [";
         for (std::size_t i = 0; i < block.predecessors.size(); ++i) {
             if (i != 0) {
                 text += ", ";
             }
-            text += format_block_ref(block.predecessors[i]);
+            text += format_block_label_ref(block.predecessors[i]);
         }
         text += ']';
         return text;

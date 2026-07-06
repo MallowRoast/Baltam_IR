@@ -47,11 +47,14 @@ void verify_default_prints_all_block_predecessors() {
 
     const std::string text = format_ir(mfile, compact_print_options());
     smoke_test::require(
-        text.find("\nentry: ; preds = []") != std::string::npos,
-        "默认打印 IR 时，入口基本块也应显示空前驱列表");
+        text.find("\nL0: ; Type = entry, preds = []") != std::string::npos,
+        "默认打印 IR 时，入口基本块也应显示类别注释和空前驱列表");
     smoke_test::require(
-        text.find("\nnext: ; preds = [%entry]") != std::string::npos,
-        "默认打印 IR 时，普通基本块应显示前驱列表");
+        text.find("\nL1: ; Type = next, preds = [L0]") != std::string::npos,
+        "默认打印 IR 时，普通基本块应显示类别注释和前驱列表");
+    smoke_test::require(
+        text.find("br label L1") != std::string::npos,
+        "打印 IR 分支目标时 block label 不应带 % 前缀");
 }
 
 void verify_cfg_comments_can_be_disabled() {
@@ -63,9 +66,9 @@ void verify_cfg_comments_can_be_disabled() {
     const std::string text = format_ir(mfile, options);
 
     smoke_test::require(
-        text.find("\nentry:") != std::string::npos &&
-            text.find("\nnext:") != std::string::npos,
-        "关闭 CFG 注释后仍应打印基本块标签");
+        text.find("\nL0: ; Type = entry") != std::string::npos &&
+            text.find("\nL1: ; Type = next") != std::string::npos,
+        "关闭 CFG 前驱注释后仍应打印基本块数字标签和类别注释");
     smoke_test::require(
         text.find("preds =") == std::string::npos,
         "print_block_predecessors=false 时不应打印前驱注释");

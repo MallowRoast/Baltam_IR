@@ -228,6 +228,26 @@ void append_goto(BasicBlock& block, BasicBlock& target) {
     target.predecessors.push_back(&block);
 }
 
+void append_branch(
+    BasicBlock& block,
+    ValueId condition,
+    BasicBlock& true_target,
+    BasicBlock& false_target) {
+    auto branch = std::make_unique<BranchInst>();
+    branch->condition = condition;
+    branch->true_target = &true_target;
+    branch->false_target = &false_target;
+    branch->parent = &block;
+    block.instructions.push_back(std::move(branch));
+
+    block.successors.push_back(&true_target);
+    true_target.predecessors.push_back(&block);
+    if (&false_target != &true_target) {
+        block.successors.push_back(&false_target);
+        false_target.predecessors.push_back(&block);
+    }
+}
+
 void append_store(BasicBlock& block, Slot slot, ValueId value) {
     auto inst = std::make_unique<StoreSlotInst>();
     inst->slot = slot;
@@ -681,6 +701,79 @@ void verify_constant_deduplication_merges_duplicate_constants() {
                         "constant dedup should preserve non-const return value");
 }
 
+void verify_constant_deduplication_hoists_loop_constants() {
+    auto module = std::make_unique<IRModule>();
+    auto file = std::make_unique<MFileUnit>();
+    file->module = module.get();
+    file->path = NormalizedPath("const_hoist.m");
+
+    auto script = std::make_unique<ScriptUnit>();
+    script->name = "const_hoist";
+    script->file = file.get();
+    ScriptUnit* script_ptr = script.get();
+
+    BasicBlock* entry = script->create_block("entry", SourceSpan::invalid());
+    BasicBlock* header = script->create_block("while.header", SourceSpan::invalid());
+    BasicBlock* body = script->create_block("while.body", SourceSpan::invalid());
+    BasicBlock* exit = script->create_block("while.end", SourceSpan::invalid());
+    smoke_test::require(entry != nullptr && header != nullptr && body != nullptr && exit != nullptr,
+                        "constant hoist test blocks should be created");
+    smoke_test::require(script->set_entry_block(entry), "constant hoist test should set entry");
+
+    script->value_table.values.push_back({ValueId(0), 0, {}, nullptr});
+    script->value_table.values.push_back({ValueId(1), 0, {}, nullptr});
+
+    append_goto(*entry, *header);
+    ConstInst* condition = append_const(*header, ValueId(0), 1);
+    script->value_table.values[0].def = condition;
+    append_branch(*header, ValueId(0), *body, *exit);
+    ConstInst* body_const = append_const(*body, ValueId(1), 42);
+    script->value_table.values[1].def = body_const;
+    append_goto(*body, *header);
+    append_return(*exit);
+
+    file->entry_unit = script.get();
+    file->code_units.push_back(std::move(script));
+    module->files.push_back(std::move(file));
+
+    IRPassManagerOptions options;
+    options.verify_after_pipeline = true;
+
+    IRPassManager manager(options);
+    manager.add_pass<ConstantDeduplicationPass>();
+
+    IRPassManagerResult result = manager.run(*module);
+    smoke_test::require(result.ok(), "constant hoist should keep IR verifier-clean");
+    smoke_test::require(result.changed, "constant hoist should report changed");
+    smoke_test::require(entry->instructions.size() == 3,
+                        "constant hoist should insert loop consts before entry terminator");
+    smoke_test::require(entry->instructions[0]->type() == Instruction::Const,
+                        "constant hoist should place header const before goto");
+    smoke_test::require(entry->instructions[1]->type() == Instruction::Const,
+                        "constant hoist should place body const before goto");
+    smoke_test::require(entry->instructions[2]->type() == Instruction::Goto,
+                        "constant hoist should keep entry terminator last");
+    smoke_test::require(header->instructions.size() == 1 &&
+                            header->instructions[0]->type() == Instruction::Branch,
+                        "constant hoist should remove const from loop header");
+    smoke_test::require(body->instructions.size() == 1 &&
+                            body->instructions[0]->type() == Instruction::Goto,
+                        "constant hoist should remove const from loop body");
+
+    const auto& hoisted_condition = static_cast<const ConstInst&>(*entry->instructions[0]);
+    const auto& hoisted_body_const = static_cast<const ConstInst&>(*entry->instructions[1]);
+    smoke_test::require(hoisted_condition.result == ValueId(0),
+                        "constant hoist should preserve header const ValueId");
+    smoke_test::require(hoisted_body_const.result == ValueId(1),
+                        "constant hoist should preserve body const ValueId");
+    smoke_test::require(hoisted_condition.parent == entry && hoisted_body_const.parent == entry,
+                        "constant hoist should update hoisted const parents");
+    smoke_test::require(script_ptr->value_table.values[0].def == entry->instructions[0].get(),
+                        "constant hoist should keep header value table def pointing at hoisted const");
+    smoke_test::require(script_ptr->value_table.values[1].def == entry->instructions[1].get(),
+                        "constant hoist should keep body value table def pointing at hoisted const");
+}
+
 void verify_load_forwarding_eliminates_redundant_load() {
     auto module = std::make_unique<IRModule>();
     auto file = std::make_unique<MFileUnit>();
@@ -788,6 +881,7 @@ int main() {
         baltam::verify_cfg_simplification_merges_linear_block();
         baltam::verify_cfg_simplification_ignores_source_boundary();
         baltam::verify_constant_deduplication_merges_duplicate_constants();
+        baltam::verify_constant_deduplication_hoists_loop_constants();
         baltam::verify_load_forwarding_eliminates_redundant_load();
         std::cout << "ir_pass_manager_smoke passed\n";
     } catch (const std::exception& ex) {

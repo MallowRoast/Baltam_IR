@@ -1,6 +1,10 @@
 #include "ir/ir_lowering.h"
 #include "ir/ir_print.h"
 #include "ir/ir_verify.h"
+#include "pass/cfg_simplification_pass.h"
+#include "pass/constant_deduplication_pass.h"
+#include "pass/ir_pass_manager.h"
+#include "pass/load_forwarding_pass.h"
 
 #include <charconv>
 #include <cstdio>
@@ -20,6 +24,7 @@ struct Options {
     std::filesystem::path input_mfile;
     std::filesystem::path output;
     baltam::IRPrintOptions print_options;
+    bool run_passes = false;
     bool help = false;
 };
 
@@ -80,6 +85,7 @@ void print_usage(std::ostream& os) {
        << "  --no-types                do not print ValueTable type facts\n"
        << "  --no-file-header          do not print the file header comment\n"
        << "  --comment-column <n>      minimum source comment column\n"
+       << "  --run-passes              run the default IR cleanup pass pipeline before printing\n"
        << "  -h, --help                show this help\n";
 }
 
@@ -180,6 +186,10 @@ bool parse_args(int argc, char** argv, Options& options) {
             }
             continue;
         }
+        if (arg == "--run-passes") {
+            options.run_passes = true;
+            continue;
+        }
         if (!arg.empty() && arg.front() == '-') {
             std::cerr << "ir_print: 未知选项 " << arg << '\n';
             return false;
@@ -197,6 +207,37 @@ bool parse_args(int argc, char** argv, Options& options) {
     }
 
     return true;
+}
+
+bool report_pass_result(const baltam::IRPassManagerResult& result) {
+    for (const baltam::IRPassDiagnostic& diagnostic : result.diagnostics) {
+        if (diagnostic.severity == baltam::IRPassDiagnostic::Error) {
+            std::cerr << "ir_print: pass error";
+        } else if (diagnostic.severity == baltam::IRPassDiagnostic::Warning) {
+            std::cerr << "ir_print: pass warning";
+        } else {
+            std::cerr << "ir_print: pass log";
+        }
+
+        if (!diagnostic.pass_name.empty()) {
+            std::cerr << " [" << diagnostic.pass_name << ']';
+        }
+        std::cerr << ": " << diagnostic.message << '\n';
+    }
+
+    return result.ok();
+}
+
+bool run_default_pass_pipeline(baltam::IRModule& module) {
+    baltam::IRPassManagerOptions pass_options;
+    pass_options.verify_after_pipeline = true;
+
+    baltam::IRPassManager pass_manager(pass_options);
+    pass_manager.add_pass<baltam::ConstantDeduplicationPass>();
+    pass_manager.add_pass<baltam::LoadForwardingPass>();
+    pass_manager.add_pass<baltam::CFGSimplificationPass>();
+
+    return report_pass_result(pass_manager.run(module));
 }
 
 bool write_text_file(const std::filesystem::path& path, std::string_view text) {
@@ -260,6 +301,16 @@ int run(const Options& options) {
     }
     if (!verify_lowering_result(result)) {
         return 1;
+    }
+
+    if (options.run_passes) {
+        if (result.module == nullptr) {
+            std::cerr << "ir_print: pass pipeline requires an IR module\n";
+            return 1;
+        }
+        if (!run_default_pass_pipeline(*result.module)) {
+            return 1;
+        }
     }
 
     std::filesystem::path output = options.output;
