@@ -385,7 +385,7 @@ CaptureValue
 外层排列，每项记录候选 `callee_or_base`、当前维度 `dim` 和总索引数 `nindices`。单层
 `A(end)` 生成一个候选上下文；`A(fun(end))` 会保留 `fun -> A` 两层候选：若
 `fun(end)` 运行时解析为索引，则 `end` 属于 `fun`；若 `fun(end)` 解析为普通函数调用，
-则继续向外尝试 `A(...)`。后续名字解析、专用 pass 或 runtime 可把它收敛为专用 bytecode
+则继续向外尝试 `A(...)`。后续名字解析、专用 pass 或 runtime 可把它收敛为专用解释器操作
 或等价的 `internal.end_index(base, dim, nindices)`。`end` 不参与普通函数名查找，用户
 自定义 `end.m` 不是合法候选；类对象索引中的自定义 `end` 方法由处理 `MagicEndInst` 的
 阶段负责。

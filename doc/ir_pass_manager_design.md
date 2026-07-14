@@ -2,7 +2,7 @@
 
 ## 目标
 
-`IRPassManager` 是 IR lowering 之后、bytecode/frame lowering 之前的 pass 调度入口。第一版
+`IRPassManager` 是 IR lowering 之后、解释执行或 JIT 编译之前的 pass 调度入口。第一版
 重点解决三件事：
 
 - 统一 module / file / code unit 三个作用域的 pass 接口。
@@ -83,7 +83,7 @@ AST
   -> verify_ir
   -> optional cleanup / specialization passes
   -> InternalLocalReusePass
-  -> frame layout / bytecode lowering
+  -> frame layout / IR interpreter or JIT
 ```
 
 短期内可以先接入不改写 IR 的 pass，例如 `InternalLocalReusePass` 的物理 slot 分配表输出。

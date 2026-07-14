@@ -5,7 +5,7 @@
 
 核心原则是：
 
-> 能由源码静态确定的变量绑定，应尽量分配稳定编号或 slot，向 bytecode 和 JIT 传递下去。
+> 能由源码静态确定的变量绑定，应尽量分配稳定编号或 slot，向 interpreter 和 JIT 传递下去。
 > 仍依赖运行时名字创建或目标 workspace 的绑定，应保留为 workspace/env 语义，并可通过
 > binding cache 做加速。
 
@@ -191,7 +191,7 @@ IR: Slot::ScriptVar + LoadSlotInst/StoreSlotInst；运行时可降成 workspace 
 runtime: ScriptCodeObject::workspace_symbols + binding cache
 ```
 
-脚本静态名字可以在 script code object 内编号，并由 runtime/bytecode 缓存 target workspace
+脚本静态名字可以在 script code object 内编号，并由 runtime/interpreter 缓存 target workspace
 中的 binding。具体 `WorkspaceHandle`、binding cache 和 caller slot 特化规则见
 [M 工作区设计](./workspace_design.md#7-script-workspace)。
 
@@ -337,7 +337,7 @@ function:
 script:
   static workspace names
     -> ScriptVar slot + load/store
-    -> runtime/bytecode may assign workspace binding id
+    -> runtime may assign workspace binding id
 
   global declaration
     -> target workspace binding to GlobalCell

@@ -8,13 +8,16 @@
 当前默认的总体流水线是：
 
 ```text
-AST -> IR -> bytecode -> interpreter/profile -> typed SSA -> LLVM IR
+AST -> high-level IR -> IR interpreter/profile -> typed SSA -> LLVM IR
 ```
+
+当前架构明确不引入独立的中间执行 IR。解释器直接消费本 high-level IR，避免维护第二套指令
+schema、verifier、调试映射和动态语义实现。
 
 其中 high-level IR 的角色是：
 
 - 保留 Matlab / M 语言的高层动态语义边界
-- 为 bytecode lowering 提供直接输入
+- 为解释器和 JIT 提供直接输入
 - 作为后续热点编译前的语义规范化层
 - 给 verifier、printer、CFG 可视化和 smoke test 提供统一对象模型
 
@@ -23,7 +26,7 @@ AST -> IR -> bytecode -> interpreter/profile -> typed SSA -> LLVM IR
 当前主方向是：
 
 - `IR` 承担 Matlab 动态语义的主建模责任
-- `bytecode` 承担稳定执行、profile 和解释器回退
+- high-level IR interpreter 承担稳定执行、profile 和优化代码回退
 - `typed SSA` 只在热点 region 或热点函数上按需构造
 
 这样分层的核心原因不是“SSA 不好”，而是 Matlab 的完整动态语义不适合作为全局常驻 SSA 的
@@ -45,7 +48,7 @@ AST -> IR -> bytecode -> interpreter/profile -> typed SSA -> LLVM IR
 因此当前职责分工是：
 
 - `IR`：语义层 IR，显式表达动态环境、名字、调用和控制流边界。
-- `bytecode`：执行层 IR，负责解释执行、profile 和作为 deopt 回退目标。
+- `IR interpreter`：直接执行 high-level IR，负责完整语义、profile，并作为 deopt 回退目标。
 - `typed SSA`：热点优化 IR，只服务于数值热点和相对稳定的 region。
 
 更适合进入 typed SSA 的部分通常是：
@@ -113,7 +116,7 @@ live binding 失效，后续 slot 读写需要由执行层或前置分析确认 
 
 IR 的职责不是把所有语义都提前静态化，而是在当前阶段做清楚两件事：
 
-- 已经确定的静态语义，应显式传递给后续 bytecode、profile、JIT 和分析 pass。
+- 已经确定的静态语义，应显式传递给后续 interpreter、profile、JIT 和分析 pass。
 - 仍然依赖运行时环境的动态语义，应保留为可见的 IR 边界，而不是通过普通变量读写或普通调用
   暗中表达。
 
@@ -128,7 +131,7 @@ IR 的职责不是把所有语义都提前静态化，而是在当前阶段做�
 - 已经解析稳定的调用可以表达为 `call`；仍可能受 workspace 遮蔽或运行时分派影响的应用应保留
   为 `apply` 或 `value_apply`。
 
-这条原则的目标是让 IR 同时服务两类后续需求：bytecode/interpreter 可以按完整动态语义执行；
+这条原则的目标是让 IR 同时服务两类后续需求：IR interpreter 可以按完整动态语义执行；
 优化层可以只提取已经静态稳定或有 guard 保护的区域。
 
 ### 3. Non-SSA，但允许局部 ValueId
@@ -152,12 +155,12 @@ MFile/module。
 这条原则对匿名函数尤其重要：IR 中可以用 module 级匿名函数表组织 body，但 runtime 句柄
 应持有可执行 closure code 和 captures。
 
-### 5. 便于 bytecode lowering
+### 5. 便于直接解释执行
 
-IR 应容易 lowering 到 bytecode：
+IR 应容易由解释器直接执行：
 
 - slot 可以映射到 frame layout
-- block 可以线性化为 bytecode 基本块和跳转
+- block 和 terminator 可以直接驱动解释器控制流
 - dynamic env / dynamic call 语义保持显式
 - 不在 lowering 阶段偷偷静态化脚本 slot 的运行时绑定或函数路径
 

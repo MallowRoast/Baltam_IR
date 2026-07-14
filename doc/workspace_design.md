@@ -16,7 +16,7 @@
 - 函数中的 `eval`、脚本调用、`assignin`、`evalin` 可以访问目标工作区
 - `who`、`whos`、`exist`、`save`、debugger 能观察变量绑定
 - 函数正文普通变量访问在 binding live 时走静态 slot，不被动态名字污染
-- 后续 bytecode、解释器、JIT 和环境 cache 可以共享稳定的失效边界
+- 后续解释器、JIT 和环境 cache 可以共享稳定的失效边界
 
 因此，第一版 workspace 应先定义接口和 binding 语义，再决定每类 workspace 的底层存储。
 
@@ -177,7 +177,7 @@ clear(name):
 
 ```text
 ScriptActivation
-  bytecode pc
+  IR continuation
   temporaries
   WorkspaceHandle target
 ```
@@ -242,7 +242,7 @@ slot，并建立 live binding；后续 `y = b` 只有在 binding 仍 live 时才
   `persistent p` 访问同一份存储；它可以有静态 slot 位置，但值跨调用保留。
 
 workspace 层只需要能暴露这两类 binding，并在 `clear`、`clear global`、函数清理和文件失效时
-推进对应 epoch。它不负责定义专用 IR 节点、effect 或 bytecode binding index；这些细节见
+推进对应 epoch。它不负责定义专用 IR 节点、effect 或 runtime binding index；这些细节见
 [Global / Persistent IR 节点设计](./global_persistent_ir_design.md)。
 
 ## 9. clear / who / exist
@@ -270,7 +270,7 @@ workspace 层只需要能暴露这两类 binding，并在 `clear`、`clear globa
 - `InternalLocal`
 - `Hidden` ABI slot
 - script activation 临时状态
-- bytecode/JIT 临时值
+- interpreter/JIT 临时值
 
 `exist(name, "var")` 应通过 workspace binding 查询；不命中变量时，再由更高层名字解析系统判断
 函数、文件、class、builtin 等其他实体。

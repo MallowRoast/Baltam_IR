@@ -7,8 +7,11 @@
 当前设想的主流水线是：
 
 ```text
-AST -> IR -> bytecode -> interpreter/profile -> typed SSA -> LLVM IR
+AST -> high-level IR -> IR interpreter/profile -> typed SSA -> LLVM IR
 ```
+
+当前执行设计不引入独立的中间 bytecode 层。Tier 0 解释器直接执行 high-level IR，优化代码
+失效时回到对应的 IR continuation。
 
 ## 当前状态
 
@@ -108,11 +111,12 @@ global/persistent 和 deopt 相关文档视为后续设计约束。
 
 ### Runtime 与动态语义设计
 
-这一组多数是后续 runtime / bytecode / JIT 设计，不等价于当前源码已经全部实现：
+这一组多数是后续 runtime / interpreter / JIT 设计，不等价于当前源码已经全部实现：
 
 - [M 变量模型设计](./doc/variable_model_design.md)：变量类别、binding liveness 和 `clear` 影响矩阵。
 - [M 工作区设计](./doc/workspace_design.md)：workspace 作为 `name -> binding` 视图的语义规则。
-- [M 函数栈帧设计](./doc/function_frame_design.md)：函数 frame layout、slot fast path 和动态 env 旁路。
+- [InterpreterContext、CodeObject 与 Frame 设计](./doc/runtime_execution_objects_design.md)：解释器
+  会话状态、冻结代码对象、函数调用帧、所有权和执行流程。
 - [M 函数工作区中的静态 slot 与动态 env](./doc/function_workspace_env_design.md)：历史讨论归档，
   有效结论已合并到变量、workspace 和函数 frame 文档。
 - [Global / Persistent IR 节点设计](./doc/global_persistent_ir_design.md)：后续
@@ -149,5 +153,5 @@ global/persistent 和 deopt 相关文档视为后续设计约束。
   `LoadSlotInst` / `StoreSlotInst`，文本打印仍是 `load` / `store`。
 - Runtime 文档中的 `load_workspace` / `store_workspace` 表示 workspace API 或未来可能引入的
   generic binding access。当前源码没有独立的 `LoadWorkspaceInst` / `StoreWorkspaceInst`。
-- `global` / `persistent`、完整 workspace、bytecode、JIT 和 deopt 相关文档多数是设计目标，
+- `global` / `persistent`、完整 workspace、interpreter、JIT 和 deopt 相关文档多数是设计目标，
   不是当前已完成实现。

@@ -61,7 +61,7 @@
 
 对当前设计的启发：
 
-- `Tier 1` 即使不做复杂优化，也应保留 bytecode PC map / safepoint 入口。
+- `Tier 1` 即使不做复杂优化，也应保留 IR continuation map / safepoint 入口。
 - `Tier 2` 的 guard failure 需要 deopt state map。
 - 后续 LLVM JIT 需要把 M runtime 的逻辑 frame 映射到机器码 live state。
 
@@ -117,7 +117,7 @@
 
 - `Tier 1` 可以收集 profile，`Tier 2` 基于 profile 生成 typed SSA。
 - `Tier 2` 不应把动态边界吞进 SSA，而应围绕稳定 region 做 guard。
-- guard failure 应回到 bytecode PC，而不是重新解释整个函数。
+- guard failure 应回到对应 IR continuation，而不是重新解释整个函数。
 
 ## 5. GraalVM / Truffle 运行时资料
 
@@ -506,15 +506,15 @@ DeoptPoint:
 DeoptStateMap:
   描述如何从寄存器、栈槽、常量、SSA value、materialized object 恢复解释器可见状态。
 
-ContinuationPC:
-  回退后从哪个 bytecode/IR 位置继续执行。
+IRContinuation:
+  回退后从哪个 CodeUnit / BasicBlock / Instruction 继续执行。
 ```
 
 这三个概念对应到当前 M runtime：
 
 - `DeoptPoint` 应出现在 guard failure、helper call、dynamic dispatch、eval/clear/assignin 前后。
 - `DeoptStateMap` 应覆盖 frame slot、workspace binding、global/persistent 状态、临时值和返回位次。
-- `ContinuationPC` 应指向 Tier 0 bytecode 位置，避免从函数入口重新执行导致副作用重复。
+- `IRContinuation` 应指向 Tier 0 的 IR 位置，避免从函数入口重新执行导致副作用重复。
 
 ## 8. 与当前 M Runtime 设计的映射
 
@@ -534,14 +534,14 @@ Tier 2:
 
 Runtime:
   维护 workspace/global/path/builtin epoch。
-  维护 safepoint、bytecode PC map、deopt state map 和 code invalidation。
+  维护 safepoint、IR continuation map、deopt state map 和 code invalidation。
 ```
 
 当前最重要的设计原则：
 
 - deopt 不回滚已经提交的全局副作用。
 - 强动态 helper 应在执行副作用前 materialize / deopt 受影响 frame。
-- 优化代码应回退到 bytecode continuation，而不是从函数入口重新执行。
+- 优化代码应回退到 IR continuation，而不是从函数入口重新执行。
 - epoch / invalidation 只能发现假设失效，不能代替 deopt state recovery。
 
 ## 9. 活跃课题组 / 产业实验室
@@ -567,7 +567,7 @@ Runtime:
 
 对当前设计的价值：
 
-- 很适合作为 `Tier 0 AST/bytecode interpreter -> optimized runtime` 的长期参考。
+- 很适合作为“完整语义解释器 -> optimized runtime”的长期参考；其 AST/bytecode 选择不作为本项目方案。
 - 对 `eval`、动态 dispatch、specialization 和 safepoint 的工程分层有参考价值。
 - Truffle 的思想适合研究“解释器节点如何携带 profile 并逐步特化”。
 
@@ -869,7 +869,7 @@ CPython JIT:
 
 从当前设计阶段看，最直接有用的是：
 
-- 解释器和 bytecode 语义基线：CPython、YJIT、SpiderMonkey。
+- 其他系统的解释器语义基线：CPython、YJIT、SpiderMonkey。
 - `Tier 1` / baseline JIT：YJIT、V8 Sparkplug、JSC Baseline。
 - `Tier 2` / typed SSA / LLVM：V8 TurboFan、JSC DFG/FTL、Julia、HHVM。
 - deopt / safepoint / state map：Self、LLVM StackMaps/Statepoints、Graal、V8/JSC。

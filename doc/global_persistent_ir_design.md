@@ -192,7 +192,7 @@ global_table[name].value
 同名 global 可能被多个函数、脚本或命令行上下文共享修改。它不属于某个 `FunctionUnit` 的
 frame layout，也没有当前函数内可独立拥有的 frame slot 位置。
 
-bytecode lowering 可以把 `symbol` 降成某种 global binding index，用于加速查找：
+runtime 可以把 `symbol` 缓存成某种 global binding index，用于加速查找：
 
 ```text
 IR @g -> global_binding_index
@@ -227,7 +227,7 @@ Executable IR:
 
 - verifier 检查 load/store 是否引用了合法绑定
 - printer 打印 unit 级绑定信息
-- bytecode lowering 构造 global binding table 和 persistent cell layout
+- runtime 构造 global binding table 和 persistent cell layout
 - debugger / `who` / `whos` 识别用户可见变量
 
 如果后续需要表达声明位置的诊断或动态错误行为，可以再引入非值指令：
@@ -417,22 +417,22 @@ store_persistent %slot_n, %4
 - global 没有 slot
 - persistent 有 slot，但读写指令不是 `load_slot/store_slot`
 
-## 12. Bytecode lowering
+## 12. Runtime 执行映射
 
-bytecode 层可以分别 lowering：
+解释器和 JIT 可以分别映射：
 
 ```text
 IR @g        -> global_binding_index
 IR %slot_n   -> persistent_cell_offset
 ```
 
-建议 bytecode 指令：
+解释器直接按 IR 节点执行：
 
 ```text
-BC_LOAD_GLOBAL_BINDING      global_binding_index
-BC_STORE_GLOBAL_BINDING     global_binding_index
-BC_LOAD_PERSISTENT_SLOT     persistent_cell_offset
-BC_STORE_PERSISTENT_SLOT    persistent_cell_offset
+LoadGlobalInst      -> global_binding_index
+StoreGlobalInst     -> global_binding_index
+LoadPersistentInst  -> persistent_cell_offset
+StorePersistentInst -> persistent_cell_offset
 ```
 
 其中：

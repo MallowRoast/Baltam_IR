@@ -11,8 +11,6 @@ AST
  ↓
 IR（non-SSA，语义 IR）
  ↓
-Bytecode（解释执行 + profiling）
- ↓
 ────────────────────────────
 Execution Engine
 ────────────────────────────
@@ -31,8 +29,12 @@ Tier 2:
     - LLVM IR
 
 Deopt:
-  -> 回退到 bytecode
+  -> 回退到 high-level IR continuation
 ```
+
+本项目不在 high-level IR 与 interpreter 之间增加独立的中间执行 IR。Tier 0 直接遍历
+`CodeUnit`、`BasicBlock` 和具体 `Instruction`；profile、调试位置和 deopt continuation 也统一
+锚定到这套 high-level IR 身份。
 
 ## 总体原则
 
@@ -40,9 +42,9 @@ Deopt:
 
 这里应坚持几个原则：
 
-- bytecode + interpreter 是唯一稳定语义基线
+- high-level IR + interpreter 是唯一稳定语义基线
 - JIT 只负责更快地执行，不负责重新定义语义
-- 所有优化代码都必须能够可靠回退到 bytecode
+- 所有优化代码都必须能够可靠回退到 IR interpreter
 - 热点编译要尽量局部化，避免把强动态边界整体吞入优化区
 
 ## 为什么采用 Tiered Execution
@@ -64,7 +66,7 @@ Deopt:
 
 Interpreter 是整个系统的真实语义执行器，至少承担以下职责：
 
-- 执行 bytecode
+- 直接执行 high-level IR
 - 收集热点计数与基础 profile
 - 提供 deopt 后的恢复目标
 - 处理所有动态特性和慢路径
@@ -82,10 +84,10 @@ Tier 0 本身不追求最强性能，但必须保证：
 Tier 1 的目标是用较低编译成本替代解释执行，改善 warmup 和中等热点性能。它不追求最激进优化，而追求：
 
 - 编译快
-- 行为接近 bytecode
+- 行为接近 IR interpreter
 - 易于失效和回退
 
-Tier 1 最自然的编译粒度通常是 method-based，也可以是 bytecode function entry 为中心的基线编译。
+Tier 1 最自然的编译粒度是 `CodeUnit` 或函数入口，也可以只编译高频 CFG region。
 
 ### Tier 1 最小需要的 Runtime 机制
 
@@ -136,18 +138,18 @@ Tier 1 虽然不做最激进优化，但仍然需要少量 guard 来保护已缓
 
 这是 Matlab 场景下运行时正确性的基础设施，不只是优化设施。
 
-#### 5. Bytecode PC Map
+#### 5. IR Continuation Map
 
-Tier 1 至少要能把机器码执行位置映射回 bytecode 位置。最低要求包括：
+Tier 1 至少要能把机器码执行位置映射回 high-level IR continuation。最低要求包括：
 
-- 机器码 safepoint 或 patchpoint 对应的 bytecode PC
+- 机器码 safepoint 或 patchpoint 对应的 `CodeUnit / BasicBlock / Instruction`
 - 当前函数帧中局部变量槽位的映射信息
 
 即使 Baseline JIT 不做复杂 deopt，也需要这套信息来支持：
 
 - 异常处理
 - 调试或诊断
-- 失效后回到 bytecode
+- 失效后回到 IR interpreter
 
 #### 6. Runtime Helper ABI
 
@@ -231,9 +233,9 @@ Tier 2 必须大量依赖 guard 来保护投机假设。最低要能表达并执
 
 这是 Tier 2 的最低核心机制之一。
 
-一旦 guard 失败，优化代码必须能够回退到 bytecode 或较低 tier，因此需要记录：
+一旦 guard 失败，优化代码必须能够回退到 IR interpreter 或较低 tier，因此需要记录：
 
-- deopt 点对应的 bytecode PC
+- deopt 点对应的 IR continuation
 - 当前逻辑帧与调用栈的重建方式
 - live SSA value 如何 materialize 成解释器可见值
 - spill slot、常量、重命名局部变量之间的映射
@@ -245,7 +247,7 @@ Tier 2 必须大量依赖 guard 来保护投机假设。最低要能表达并执
 Tier 2 最低应支持 loop OSR，至少包括：
 
 - 从解释器进入已编译热点循环
-- 必要时从优化代码退回 bytecode
+- 必要时从优化代码退回 IR interpreter
 
 如果没有 OSR，很多真正热的循环无法在当前执行中受益，系统会严重依赖“下一次调用再优化”。
 
@@ -264,7 +266,7 @@ Tier 2 的代码比 Tier 1 更投机，因此需要更明确的依赖跟踪。�
 
 - 失效对应机器码
 - 清空相关 IC
-- 让后续执行自动回退到 bytecode 或低 tier
+- 让后续执行自动回退到 IR interpreter 或低 tier
 
 #### 7. Safepoint / Stack Map
 
@@ -292,7 +294,7 @@ Tier 2 的代码比 Tier 1 更投机，因此需要更明确的依赖跟踪。�
 
 无论是 Tier 1 还是 Tier 2，都应遵循同一条原则：
 
-- deopt 的语义目标统一回到 bytecode
+- deopt 的语义目标统一回到 high-level IR continuation
 
 这样做有几个直接好处：
 
@@ -305,14 +307,14 @@ Tier 2 的代码比 Tier 1 更投机，因此需要更明确的依赖跟踪。�
 - Interpreter 是唯一完整语义执行器
 - Baseline JIT 是低成本机器码层
 - Optimizing JIT 是投机执行层
-- 所有失败路径最终都能回到 bytecode/interpreter
+- 所有失败路径最终都能回到 IR interpreter
 
 ## 建议的最小落地顺序
 
 如果按工程风险排序，比较稳的顺序是：
 
-1. 先把 Tier 0 的 bytecode、profile 和环境版本机制打稳。
-2. 再做 Tier 1，优先补齐 hotness counter、单态 IC、guard、bytecode PC map。
+1. 先把 Tier 0 的 IR interpreter、profile 和环境版本机制打稳。
+2. 再做 Tier 1，优先补齐 hotness counter、单态 IC、guard、IR continuation map。
 3. 之后实现 Tier 2 的 hot region detection、typed SSA lowering、guard、deopt state map。
 4. 最后补强 OSR、PIC、后台编译和更细粒度 invalidation。
 
@@ -329,11 +331,11 @@ Tier 2 的代码比 Tier 1 更投机，因此需要更明确的依赖跟踪。�
 - `Tier 0`: Interpreter
 - `Tier 1`: Baseline JIT
 - `Tier 2`: Region-based Optimizing JIT
-- `Deopt`: 统一回退到 bytecode/interpreter
+- `Deopt`: 统一回退到 IR interpreter
 
 其中最关键的 runtime 机制是：
 
-- `Tier 1`: hotness counter、单态 IC、guard、environment epoch、bytecode PC map
+- `Tier 1`: hotness counter、单态 IC、guard、environment epoch、IR continuation map
 - `Tier 2`: profile feedback、hot region detection、guard、deopt state map、OSR、dependency tracking
 
 这套分工的核心目标很明确：

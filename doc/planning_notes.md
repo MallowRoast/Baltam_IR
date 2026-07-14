@@ -41,7 +41,7 @@
 
 因此这部分责任更适合放在：
 
-- bytecode lowering
+- IR interpreter / JIT 执行准备
 - 解释执行 runtime
 - 后续对象模型和 copy-on-write 触发逻辑
 
@@ -384,7 +384,7 @@ terminator、predecessor/successor 和 verifier 可见的 CFG 状态。
 - lowering 阶段更重要的是输出稳定、容易验证的语义形状
 - `continue` 的自然目标是 `latch`，提前合并会增加后续支持 `continue` 的复杂度
 - loop 分析、类型推导、SSA 提升等 pass 更容易消费 canonical loop form
-- block 数量是否真的影响性能，需要等解释器或 bytecode 执行路径稳定后再评估
+- block 数量是否真的影响性能，需要等 IR 解释执行路径稳定后再评估
 
 #### 运行时机
 
@@ -541,7 +541,7 @@ br label %then
 
 - 输入仍是 canonical high-level IR
 - 输出 logical `InternalLocal` slot 到 physical frame slot 的映射
-- bytecode lowering 或 frame layout 使用该映射减少实际 frame 空间
+- runtime frame layout 使用该映射减少实际 frame 空间
 - 文本 IR 默认不运行该 pass，保留每个短路表达式一个 logical slot 的清晰形状
 
 后续如果 slot remap、def-use 和 slot table 清理基础设施稳定，再考虑把它扩展成可选 IR 改写
@@ -562,7 +562,7 @@ pass。
 7. 再对 function 内的纯局部 slot 做寄存器化 / SSA 提升，先从单 block 或稳定 region 开始
 8. 最后做基于 `MFunction` 调用可达性的 local function DCE；若内联后出现新的死 local 函数，可以再重复一轮
 9. 每个会改 CFG 的 pass 之后，都可以再跑一轮 CFG simplify 作为 cleanup
-10. frame layout 或 bytecode lowering 前，可以运行 `InternalLocalReusePass`，把不重叠的
+10. 构建 runtime frame layout 前，可以运行 `InternalLocalReusePass`，把不重叠的
     内部临时 slot 映射到同一个物理 frame 位置
 
 原因很简单：第二个 pass 依赖的前提，和第一个 pass 证明的其实是同一类事实；函数内联又依赖调用目标已经先收敛成足够稳定的静态 `call`；而寄存器化 / SSA 提升则最适合放在内联之后，去吃掉内联额外暴露出来的局部 slot 数据流机会。

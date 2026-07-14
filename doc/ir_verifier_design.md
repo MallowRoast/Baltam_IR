@@ -92,7 +92,7 @@ verifier 使用独立的 `IRVerifyDiagnostic`，不复用 `IRBuildDiagnostic`。
 开启后，verifier 会检查 `SlotId` 是否符合当前 builder 的 unit-local 递增分配规则。
 
 该检查当前只产生 warning，因为 `SlotId` 的稠密性是 builder 实现策略，不是核心 IR schema 的
-必要语义。后续如果 bytecode frame layout 直接依赖稠密 `SlotId`，可以把这项升级为 error。
+必要语义。后续如果 runtime frame layout 直接依赖稠密 `SlotId`，可以把这项升级为 error。
 
 ## 当前检查范围
 

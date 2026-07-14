@@ -25,7 +25,7 @@
 - 类 `end` 方法不应在基础 lowering 阶段表现为普通 direct call
 
 因此 `MagicEndInst` 是 magic `end` 的 canonical high-level IR。后续阶段可以把它收敛为
-专用 runtime helper、专用 bytecode，或更低层的内部调用，但那是 `MagicEndInst` 的 lowering /
+专用 runtime helper、解释器专用操作，或更低层的内部调用，但那是 `MagicEndInst` 的 lowering /
 execution 策略，不是 AST 到 IR 的基础表示。
 
 ## 3. MagicEndInst
@@ -141,7 +141,7 @@ nested_value = A(fun(end));
 - 类对象按索引协议调用对应的 `end(obj, dim, nindices)` 语义
 - 非索引上下文或不支持索引 `end` 的值报错
 
-也可以选择生成专用 bytecode 或保留 `MagicEndInst` 到 interpreter 执行层。关键约束是：类对象
+也可以保留 `MagicEndInst` 到 interpreter 执行层，或在 JIT 中生成专用操作。关键约束是：类对象
 `end` 方法的正确性由处理 `MagicEndInst` 的阶段负责，不能假设普通函数调用路径已经覆盖。
 
 ## 7. 当前测试覆盖

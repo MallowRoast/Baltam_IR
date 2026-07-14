@@ -157,7 +157,7 @@ builder 当前主动维护这些约束：
 - dynamic env / global / dynamic call 解析
 - lowering 期名字绑定
 - verifier 全量校验
-- bytecode lowering
+- IR interpreter / JIT 执行准备
 
 也就是说，builder 只负责把已经做完语义决策的 lowering 动作安全地落到最终 IR 对象上。
 

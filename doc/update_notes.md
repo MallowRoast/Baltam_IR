@@ -151,7 +151,7 @@
 
 - pass 不放进基础 lowering；lowering 继续为每个短路表达式创建独立 logical internal slot
 - 第一阶段只分析 `InternalLocal logical` 短路临时 slot 的 live range
-- 优先产出 logical slot 到 physical frame slot 的映射，供 bytecode lowering / frame layout 使用
+- 优先产出 logical slot 到 physical frame slot 的映射，供 runtime frame layout 使用
 - 暂不默认改变 `ir_print` 输出，避免丢失 canonical lowering 的调试形状
 - 详细设计见 [internal_local_reuse_pass_design.md](./internal_local_reuse_pass_design.md)
 
@@ -177,6 +177,17 @@
   `end`、冒号范围里的 `end`、索引赋值里的 `end` 和嵌套索引 `A(fun(end))`
 - 新增 `test/m/test8/test8_1.m` 和 `test8_1_smoke` 覆盖脚本里 `A(fun(end))`
   无法静态确定归属层级的场景
+
+16. 收敛解释执行和运行时对象设计。
+
+- 主执行路径调整为 `AST -> high-level IR -> IR interpreter/profile -> typed SSA -> LLVM IR`，
+  不在 high-level IR 与 interpreter 之间维护独立的中间执行 IR。
+- 定义 `InterpreterContext / CodeObject / Frame` 三个一级运行时对象，分别承载会话级状态、
+  冻结代码级状态和单次调用状态。
+- builtin 和 plugin 继续复用项目已有查询与调用机制，不在 `InterpreterContext` 或
+  `CodeObject` 中重复维护注册表。
+- 统一所有权、slot/value layout、persistent/global/capture 存储位置和 IR continuation 规则，
+  见 [InterpreterContext、CodeObject 与 Frame 设计](./runtime_execution_objects_design.md)。
 
 TODO：
 

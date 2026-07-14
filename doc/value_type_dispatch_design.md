@@ -11,7 +11,7 @@
 这里的前提分层与 [ir_draft.md](./ir_draft.md) 和 [execution_strategy.md](./execution_strategy.md) 保持一致：
 
 - 主 `IR` 仍然是语义层、non-SSA 的高层表示
-- `bytecode` 和解释器仍然是稳定语义基线
+- high-level IR 解释器仍然是稳定语义基线
 - `typed SSA` 仍然只在热点稳定 region 上按需构造
 
 ## 1. 当前问题
@@ -456,7 +456,7 @@ OUT[block] : SlotId -> TypeFact
 - 在事实失效且尚未重新分析时回退到 `unknown`
 - 在分析确认只能给出全集上界时设为 `Any`
 - 降级成更保守的类型结论
-- 交给 bytecode / 解释器继续执行
+- 交给 IR 解释器继续执行
 
 ## 11. 与 typed SSA 的关系
 
@@ -467,7 +467,7 @@ OUT[block] : SlotId -> TypeFact
 1. 主 `IR` 上先形成 `ValueId -> TypeFact`
 2. 热点 region 提取时，筛出足够稳定的值和调用点
 3. `typed SSA` 只消费其中可证明或可 guard 的部分
-4. guard 失败时回退到 bytecode
+4. guard 失败时回退到对应 IR continuation
 
 也就是说：
 

@@ -40,7 +40,7 @@ AST
   -> canonical high-level IR
   -> optional cleanup passes
   -> InternalLocalReusePass
-  -> bytecode lowering / frame layout
+  -> runtime frame layout
 ```
 
 第一阶段不建议让 `ir_print` 默认跑该 pass。文本 IR 保持 canonical lowering 形状更适合调试。
@@ -112,7 +112,7 @@ struct PhysicalSlotAssignment {
 };
 ```
 
-bytecode lowering / frame layout 使用该表把多个 logical `InternalLocal` 映射到同一个物理 frame
+runtime frame layout 使用该表把多个 logical `InternalLocal` 映射到同一个物理 frame
 位置。
 
 优点：
@@ -124,7 +124,7 @@ bytecode lowering / frame layout 使用该表把多个 logical `InternalLocal` �
 缺点：
 
 - `ir_print` 仍会显示多个 logical internal slot。
-- 复用效果只在 bytecode / frame layout 层可见。
+- 复用效果只在 runtime frame layout 层可见。
 
 ### 方案 B：改写 IR slot 引用并清理 slot table
 
@@ -172,7 +172,7 @@ public:
 - 基于 CFG 计算 live range。
 - 对不相交 live range 做线性扫描分配。
 - 输出每个候选 slot 对应的 physical internal slot index。
-- verifier 仍验证原始 high-level IR；bytecode lowering 使用复用结果时再做 frame layout 检查。
+- verifier 仍验证原始 high-level IR；runtime 使用复用结果时再做 frame layout 检查。
 
 ## 与短路 lowering 的关系
 
@@ -190,5 +190,5 @@ public:
 - 扩展到其他 lowering 内部临时 slot。
 - 在 slot remap 基础设施完善后支持 IR 改写模式。
 - 和 `FunctionFrameLayout` 对接，把复用结果直接变成 frame offset。
-- 在 bytecode lowering 后增加检查，确保两个映射到同一物理位置的 logical slot live range
+- 在 frame layout 构建后增加检查，确保两个映射到同一物理位置的 logical slot live range
   不重叠。
