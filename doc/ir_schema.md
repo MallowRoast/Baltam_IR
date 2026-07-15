@@ -458,4 +458,4 @@ slot 时应报变量引用错误，不能回退到同名函数解析或外层候
 - [匿名函数句柄设计](./anonymous_function_handle_design.md)
 - [M 变量模型设计](./variable_model_design.md)
 - [M 工作区设计](./workspace_design.md)
-- [M 函数栈帧设计](./function_frame_design.md)
+- [InterpreterContext、CodeObject 与 Frame 设计](./runtime_execution_objects_design.md)

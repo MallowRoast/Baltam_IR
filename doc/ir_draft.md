@@ -124,8 +124,8 @@ IR 的职责不是把所有语义都提前静态化，而是在当前阶段做�
 
 - 函数入参、出参和普通局部变量的 slot layout 应向下传递；其 use 只有在当前 binding 仍 live
   时才表达为 `LoadSlotInst` / `StoreSlotInst`。
-- 后续接入的 `global` 应按全局 binding 显式读写；`persistent` 可以使用静态 `SlotId` 定位，
-  但也应有不同于普通 frame slot 的显式读写语义。
+- 后续接入的 `global` 应通过 `Slot::Global` 指向 `GlobalRegistry::values[name]` 显式读写；
+  `persistent` 可以使用静态 `SlotId` 定位，但二者都应有不同于普通 frame slot 的显式读写语义。
 - 脚本名字访问、`eval`、`assignin`、路径变化和仍未消歧的 `A(...)` 应保持 workspace、Env
   effect 或动态应用边界。
 - 已经解析稳定的调用可以表达为 `call`；仍可能受 workspace 遮蔽或运行时分派影响的应用应保留
@@ -180,6 +180,6 @@ IR 应容易由解释器直接执行：
 - [Execution Strategy](./execution_strategy.md)
 - [M 变量模型设计](./variable_model_design.md)
 - [M 工作区设计](./workspace_design.md)
-- [M 函数栈帧设计](./function_frame_design.md)
+- [InterpreterContext、CodeObject 与 Frame 设计](./runtime_execution_objects_design.md)
 - [Global / Persistent IR 节点设计](./global_persistent_ir_design.md)
 - [Deopt 与优化运行时参考资料](./deopt_runtime_references.md)

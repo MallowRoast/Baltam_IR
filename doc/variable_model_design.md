@@ -47,8 +47,8 @@ HiddenRuntime
 
 - `Arg` / `Ret` / `Local` 的 `SlotId` 和 frame offset 是静态 layout 信息。
 - `global g` / `persistent p` 的声明本身也是静态信息。
-- `a` 此刻是否仍是 live 的 frame-slot binding、`g` 此刻是否仍绑定到 `GlobalCell`、`p`
-  此刻是否仍绑定到 persistent cell，都是可能被 `clear` 影响的动态状态。
+- `a` 此刻是否仍是 live 的 frame-slot binding、`g` 此刻是否仍绑定到 `GlobalRegistry` value、`p`
+  此刻是否仍绑定到 persistent value table，都是可能被 `clear` 影响的动态状态。
 - 优化和专用 load/store 只能在没有跨过相关 clear/binding barrier，且能证明当前 binding
   仍然 live 的区域内安全使用。
 
@@ -126,29 +126,30 @@ visibility: 当前函数正文可见；其他函数不能通过同名 persistent
 scope: 当前 FunctionUnit
 lifetime: 随函数 code object / 函数清理规则存在，跨调用保留
 IR: 保守阶段使用 workspace/binding 语义；特化后使用 Slot::Persistent + load_persistent/store_persistent
-runtime: FunctionCodeObject::persistent_cells[persistent_offset]
+runtime: CodeObject::persistent.values[SlotId]
 ```
 
 `persistent` 可以有静态 slot 身份，但它不是普通 per-call frame local。它的 slot 定位到当前
-函数 code object 的 persistent cell，递归和重入同一函数时共享同一份存储。专用节点、effect
+函数 code object 的 persistent value table，递归和重入同一函数时共享同一份存储。专用节点、effect
 和 `clear` 细节见 [Global / Persistent IR 节点设计](./global_persistent_ir_design.md)。
 
 ## 4. Global
 
 `global` 是 session 级共享变量。声明了同名 `global x` 的函数、脚本或命令行上下文应读写同一
-个 global cell。
+个 global value。
 
 ```text
 visibility: 所有声明同名 global 的 workspace 可见
 scope: session/global table
 lifetime: 随 session/global table 和 clear global 规则存在
-IR: 保守阶段使用 workspace/binding 语义；特化后使用 load_global/store_global
-runtime: GlobalRegistry / GlobalCell
+IR: Slot::Global + 保守 workspace/binding 语义；特化后使用 load_global/store_global
+runtime: SlotId -> ba_obj_ptr in GlobalRegistry::values
 ```
 
-`global` 不属于任何函数 frame layout，不应用 `SlotId` 表达。后续可以用 symbol 或 code object
-中的 global binding index 加速访问，但这个 index 不是 frame slot offset。专用节点、effect 和
-`clear global` 细节见 [Global / Persistent IR 节点设计](./global_persistent_ir_design.md)。
+`global` 不属于任何函数 frame 的 per-call value，但源码中出现的 global 名字仍应有静态 `SlotId`。
+这个 slot 持有的 `ba_obj_ptr` 与 `GlobalRegistry::values[name]` 指向同一个变量地址，不是独立
+的 per-call frame value。专用节点、effect 和 `clear global` 细节见
+[Global / Persistent IR 节点设计](./global_persistent_ir_design.md)。
 
 ## 5. WorkspaceDynamic
 
@@ -166,7 +167,7 @@ visibility: 取决于目标 workspace，可被 `who/whos/exist/save/debugger` �
 scope: 目标 workspace
 lifetime: 随目标 workspace 存在
 IR: runtime Workspace API；后续可引入 load_workspace/store_workspace 这类 generic binding access
-runtime: DynamicEnv table / WorkspaceBinding
+runtime: DynamicEnv table / workspace value binding
 ```
 
 这类名字不能在基础 lowering 中假设为函数 frame slot，因为名字可能由字符串在运行时产生：
@@ -240,7 +241,7 @@ Varargout
 不是当前 `SlotTag`；脚本 activation 需要持有目标 workspace，使 `ScriptVar` slot 访问能落到
 base workspace、caller function workspace 或 `evalin` 选择的 workspace。
 
-frame layout 中 ABI slot 的细节见 [M 函数栈帧设计](./function_frame_design.md)，workspace
+Frame 中 ABI slot 的细节见 [InterpreterContext、CodeObject 与 Frame 设计](./runtime_execution_objects_design.md)，workspace
 handle 语义见 [M 工作区设计](./workspace_design.md)。
 
 ## 9. M 函数可能持有的变量类型
@@ -252,7 +253,7 @@ Arg
 Ret
 Local
 Persistent
-Global binding
+Global
 WorkspaceDynamic
 InternalLocal
 HiddenRuntime
@@ -262,9 +263,9 @@ Capture source values
 说明：
 
 - `Arg / Ret / Local` 是普通 per-call frame slot。
-- `Persistent` 是当前函数的 persistent slot，映射到 function-private persistent cell。
-- `Global binding` 不进入 frame slot 表；它在 global 声明表或 code object global binding table
-  中编号。
+- `Persistent` 是当前函数的 persistent slot，映射到 function-private persistent value table。
+- `Global` 有静态 slot，但不进入 per-call frame storage；它映射到 `GlobalRegistry` 中同名
+  value 的同一个变量地址。
 - `WorkspaceDynamic` 是 `eval`、脚本调用、`assignin/load` 等动态机制在当前函数 workspace
   中创建或访问的名字。
 - `InternalLocal / HiddenRuntime` 是 runtime 辅助状态，用户不可见。
@@ -279,7 +280,7 @@ Capture source values
 ```text
 ScriptStaticWorkspaceName
 WorkspaceDynamic
-Global binding
+Global
 InternalLocal
 HiddenRuntime(WorkspaceHandle)
 Capture source values
@@ -290,7 +291,7 @@ Capture source values
 - 脚本静态出现的普通名字应保留 workspace 语义，但可以在 script code object 内编号。
 - 脚本运行时写入的是 target workspace：base workspace、caller function workspace，或
   `evalin` 指定 workspace。
-- 脚本中的 `global` 可以把 target workspace 中的名字绑定到 global cell。
+- 脚本中的 `global` 可以把 target workspace 中的名字绑定到 global value。
 - 脚本不创建 persistent slot。
 - 脚本可以创建匿名函数并从 target workspace 捕获值。
 
@@ -302,7 +303,7 @@ Capture source values
 | Ret | 是 | 否 | `Slot::Ret` + `load_slot/store_slot` | 是，frame slot | 否 |
 | Local | 是 | 否 | `Slot::Local` + `load_slot/store_slot` | 是，frame slot | 否 |
 | Persistent | 是 | 否 | 保守阶段用 workspace/binding 语义；特化后用 `Slot::Persistent` + `load_persistent/store_persistent` | 是，persistent slot | 保守阶段是 |
-| Global | 是 | 是 | 保守阶段用 workspace/binding 语义；特化后用 `load_global/store_global` | 否，使用 global binding index | 保守阶段是 |
+| Global | 是 | 是 | `Slot::Global` + 保守 workspace/binding 语义；特化后用 `load_global/store_global` | 是，global value slot；不是 frame slot | 保守阶段是 |
 | WorkspaceDynamic | 是 | 是 | Workspace API；后续可有 `load_workspace/store_workspace` | 否 | 是 |
 | ScriptStaticWorkspaceName | 否 | 是 | `Slot::ScriptVar` + `load/store`，运行时可降成 workspace binding id | 是，脚本名字身份 slot；不是私有存储 | 是 |
 | Capture | 匿名函数体中是 | 可作为捕获来源 | `Slot::Capture` + `load_slot` | 是，capture slot | 来源可能是 workspace |
@@ -328,8 +329,8 @@ function:
     -> access remains generic workspace/binding access
 
   global declaration
-    -> record global declaration / candidate global binding
-    -> access remains generic workspace/binding access
+    -> create Slot::Global / record candidate global binding
+    -> access may remain generic workspace/binding access until specialized
 
   eval/script/assignin/load-created names
     -> FunctionWorkspaceView dynamic env
@@ -340,8 +341,9 @@ script:
     -> runtime may assign workspace binding id
 
   global declaration
-    -> target workspace binding to GlobalCell
-    -> base IR may keep ScriptVar slot access or generic binding access
+    -> target workspace binding to GlobalRegistry value
+    -> create or reuse Slot::Global for the static source name
+    -> base IR may keep guarded slot access or generic binding access
 
   eval-created names
     -> generic workspace lookup/store
@@ -364,10 +366,10 @@ binding_state(@x) == LiveFrameSlot
 binding_state(@x) == PersistentSlot
   -> load_persistent / store_persistent
 
-binding_state(@x) == GlobalCell
+binding_state(@x) == GlobalRegistryValue
   -> load_global / store_global
 
-binding_state(@x) == WorkspaceBinding with stable symbol
+binding_state(@x) == workspace value binding with stable symbol
   -> workspace binding id / inline cache
 
 binding_state(@x) unknown for a static function slot
@@ -468,7 +470,7 @@ store_slot 是否仍可用于后续赋值:
 ### Persistent
 
 `clear p` 会让当前 activation 中的 persistent binding 失效；后续同一次调用中的 `p = ...`
-不能继续无条件写 persistent cell，需要按当前 binding state 重新分类。下一次进入函数时，
+不能继续无条件写 persistent value table，需要按当前 binding state 重新分类。下一次进入函数时，
 源码中的 `persistent p` 声明会重新建立 persistent binding。
 
 同一个源码名字可能跨 `clear` 切换 binding kind。约束应是“同一程序点不能同时绑定成
@@ -478,13 +480,13 @@ persistent 和 ordinary local”，而不是“整个 code unit 中同名永远�
 
 ### Global
 
-`clear g` 会移除当前 workspace 中 `g -> GlobalCell("g")` 的绑定，但不会清除 global cell 本体。
+`clear g` 会移除当前 workspace 中 `g -> GlobalRegistry::values["g"]` 的绑定，但不会清除 global
+value 本体。
 后续 `g = ...` 应重新分类为当前 workspace 的普通 binding；再次出现 `global g` 才重新建立
-global binding。`clear global g` 更强，会影响 global cell / registry 本体，并使相关 cache
-失效。
+global binding。`clear global g` 更强，会影响 global value / registry 本体，并使相关 cache 失效。
 
-因此，`load_global/store_global` 只适用于仍证明绑定到 GlobalCell 的程序点。专用节点和
-`clear_binding @g` 细节见
+因此，`load_global/store_global` 只适用于仍证明绑定到 GlobalRegistry value 的程序点。专用节点和
+`clear_binding %slot_g` 细节见
 [Global / Persistent IR 节点设计](./global_persistent_ir_design.md#14-clear-对专用节点的影响)。
 
 ### WorkspaceDynamic 和 ScriptStaticWorkspaceName
@@ -522,7 +524,7 @@ internal/hidden slot 是否失效:
 | Ret | 当前 activation 的 frame-slot binding 失效，layout 保留 | 后续 use 仍可用 `load_slot`，但必须走 binding check；dead 时慢路径 name lookup/deopt | `clear_slot %slot`，kill fast-path binding fact |
 | Local | 当前 activation 的 frame-slot binding 失效，layout 保留 | 后续 use 仍可用 `load_slot`，但必须走 binding check；dead 时慢路径 name lookup/deopt | `clear_slot %slot`，kill fast-path binding fact |
 | Persistent | 当前 activation 的 persistent binding 失效 | `load_persistent/store_persistent` 在后续同一 activation 不再安全 | `clear_binding %slot_p`，后续重新分类 |
-| Global | 当前 workspace 的 global binding 失效 | `load_global/store_global` 对后续当前 binding 不再安全 | `clear_binding @g`，后续重新分类 |
+| Global | 当前 workspace 的 global binding 失效 | `load_global/store_global` 对后续当前 binding 不再安全 | `clear_binding %slot_g`，后续重新分类 |
 | WorkspaceDynamic | 当前 workspace binding 被删除/解除 | 已缓存 binding id 失效 | invalidate binding cache |
 | ScriptStaticWorkspaceName | target workspace 中该 symbol 的 binding 失效 | workspace binding id 失效 | invalidate script binding cache entry |
 | Capture | 已构造 closure capture 不变 | closure 内 capture slot 仍可用 | 构造点前 clear 影响捕获读取 |
@@ -547,10 +549,10 @@ clear_workspace_binding %env, @name
   用于脚本/base/dynamic workspace 名字。
 
 clear_global @name
-  用于清 global cell / registry 本体，并使全局 binding cache 失效。
+  用于清 global value / registry 本体，并使全局 binding cache 失效。
 
 clear_function @function
-  用于清函数 code object 相关状态，包括 persistent cells。
+  用于清函数 code object 相关状态，包括 persistent value table。
 ```
 
 如果遇到无法精确分析的动态 clear，例如：
@@ -571,7 +573,7 @@ invalidate affected binding facts
 ## 相关文档
 
 - [M 工作区设计](./workspace_design.md)
-- [M 函数栈帧设计](./function_frame_design.md)
+- [InterpreterContext、CodeObject 与 Frame 设计](./runtime_execution_objects_design.md)
 - [Global / Persistent IR 节点设计](./global_persistent_ir_design.md)
 - [匿名函数句柄设计](./anonymous_function_handle_design.md)
 - [IR 草案](./ir_draft.md)

@@ -4,8 +4,9 @@
 
 ```text
 InterpreterContext
-  └── CodeObject cache
-        └── Frame -> caller Frame -> ...
+  ├── CodeObjectCache
+  ├── AnonymousCodeTable
+  └── Frame -> caller Frame -> ...
 ```
 
 它们的职责边界是：
@@ -21,20 +22,23 @@ InterpreterContext
 
 ```text
 InterpreterContext
-  owns BaseWorkspace / GlobalRegistry / resolver / code cache
-  non-owning current_frame
+  owns BaseWorkspace / GlobalRegistry / code cache / anonymous code table
+  non-owning current_frame / interrupt state
 
 CodeObjectCache
-  owns shared_ptr<CodeObject>
+  owns file-backed / named shared_ptr<CodeObject>
+
+AnonymousCodeTable
+  owns anonymous-function shared_ptr<CodeObject>
 
 CodeObject
   shares ownership of IRModule
   non-owning pointer to one CodeUnit inside that module
-  owns layouts / persistent cells / code metadata
+  owns persistent value table / code revision metadata
 
 Frame
-  shares ownership of CodeObject
-  owns per-call slots / ValueId temporaries / dynamic bindings
+  non-owning pointer to CodeObject
+  owns per-call slot entries / ValueId temporaries / dynamic bindings
   non-owning caller and InterpreterContext pointers
 
 ClosureObject
@@ -47,115 +51,155 @@ ClosureObject
 
 ## 2. InterpreterContext
 
-建议第一版按单线程解释执行设计：
+`InterpreterContext` 是一次解释器会话的执行状态容器。它只保存解释执行期间必须共享、并且没有
+更合适 owner 的状态：
+
+- base workspace 和 global value table
+- 具名 M 代码 cache
+- 匿名函数体代码表
+- 当前活跃 Frame 指针
+- 宿主请求中断的标志
+
+路径解析、source loader、builtin/plugin registry、诊断输出、debugger、trace、profile 和
+pass pipeline 配置都不属于 `InterpreterContext`。这些能力由项目已有 runtime/host service 或
+`CodeObject` 构建层提供。
 
 ```cpp
+inline constexpr std::size_t kMaxCallDepth = 1024;
+
 class InterpreterContext final {
 public:
     BaseWorkspace base_workspace;
     GlobalRegistry globals;
 
-    FunctionResolver resolver;
     CodeObjectCache code_cache;
+    AnonymousCodeTable anonymous_codes;
 
     Frame* current_frame = nullptr;
-    std::size_t call_depth = 0;
-
-    EnvironmentEpochs epochs;
-    RuntimeOptions options;
-
-    DiagnosticEngine diagnostics;
-    RuntimeServices services;
 
     std::atomic_bool interrupt_requested{false};
 };
 ```
 
+不放入 `InterpreterContext` 的状态：
+
+| 内容 | 归属 |
+|---|---|
+| 函数解析、路径搜索、source 过期判断 | 项目已有符号查找 / source loader |
+| builtin/plugin registry | 项目已有 runtime 分派机制 |
+| source 过期状态、路径/代码失效状态 | 外层 invalidation 机制；通过 cache invalidate 接口生效 |
+| verify、pass pipeline、构建选项 | `CodeObject` 构建层 |
+| diagnostic、debugger、trace、profile | runtime/host service 或 side table |
+| 当前调用深度计数器 | 创建 Frame 前从 caller 链计算，并检查 `kMaxCallDepth` |
+
 ### 2.1 `base_workspace`
 
 ```cpp
-struct WorkspaceBinding {
-    ba_obj_ptr value;
-    bool bound = false;
-};
-
 struct BaseWorkspace {
-    std::unordered_map<InternedString, WorkspaceBinding> bindings;
-    std::uint64_t version = 0;
+    std::unordered_map<InternedString, ba_obj_ptr> values;
 };
 ```
 
-它表示命令行、REPL 和顶层脚本使用的普通工作区。顶层脚本不拥有独立变量存储，而是把
-`ScriptVar` 访问映射到这里。
+它表示命令行、REPL 和顶层脚本使用的普通工作区。`values` 是按名字索引的 session 级变量存储，
+不是某个 `CodeUnit` 的 `SlotId`。顶层脚本
+不拥有独立变量存储，而是把 `ScriptVar` 访问映射到这里。
 
-`version` 在新建、删除或改变可观察 binding 时递增，供 workspace cache、debugger 和后续
-guard 使用。base workspace 与 global table 是两种存储；`global x` 只在当前 workspace 建立
-到 `GlobalRegistry` 的绑定，不把 global value 复制到 `bindings`。
+`values[name] == nullptr` 表示该名字当前未绑定或已 clear。base workspace 与 global table 是
+两种存储；`global x` 只在当前 workspace 建立到 `GlobalRegistry` 的绑定，不把 global value
+复制到 `values`。
 
 ### 2.2 `globals`
 
 ```cpp
-struct GlobalCell {
-    ba_obj_ptr value;
-    bool bound = false;
-    std::uint64_t version = 0;
-};
-
 struct GlobalRegistry {
-    std::unordered_map<InternedString, GlobalCell> cells;
-    std::uint64_t version = 0;
+    std::unordered_map<InternedString, ba_obj_ptr> values;
 };
 ```
 
-它保存 session 级共享 global cell。声明了同名 global 的不同 Frame 访问同一个 `GlobalCell`。
+它保存 session 级共享 global value。声明了同名 global 的不同 Frame 访问同一个
+`ba_obj_ptr`。
 
-- `GlobalCell::version` 跟踪特定 cell 的值或绑定变化。
-- `GlobalRegistry::version` 跟踪表结构变化，例如新增、删除或 `clear global`。
-- 普通函数 Frame 不复制 global value，也不拥有 global cell。
+- `values[name] == nullptr` 表示该 global 当前未绑定或已 clear。
+- 普通函数 Frame 不拥有 global table；但 `global x` 仍为 `x` 分配普通 `SlotId`。该 slot
+  持有 `ba_obj_ptr`，并且与 `GlobalRegistry` 中同名 value 指向同一个变量地址，
+  不把 global value 复制成一份独立局部值。
 
-### 2.3 `resolver`
-
-```cpp
-class FunctionResolver {
-public:
-    ResolveResult resolve_m_function(
-        InterpreterContext& context,
-        const ResolveRequest& request);
-
-private:
-    std::filesystem::path current_directory_;
-    std::vector<std::filesystem::path> search_paths_;
-};
-```
-
-它负责项目自身的 M 代码解析，包括当前文件 local function、private function、M 文件、当前
-目录和搜索路径。解析失败或目标属于 builtin/plugin 时，调用流程交给已有 runtime 分派机制；
-`InterpreterContext` 不保存第二份 builtin registry。
-
-resolver cache 必须记录相关 `path` 或 `code` epoch，不能在 `cd`、路径变化、文件失效后继续
-复用旧目标。
-
-### 2.4 `code_cache`
+### 2.3 `code_cache`
 
 ```cpp
 struct CodeCacheKey {
     NormalizedPath source_file;
-    InternedString function_name;
+    InternedString unit_name;
 };
 
-struct CodeCacheEntry {
-    std::shared_ptr<CodeObject> code;
-    FileFingerprint source_fingerprint;
-    std::uint64_t path_epoch = 0;
-    std::uint64_t code_epoch = 0;
+class CodeObjectCache final {
+public:
+    std::shared_ptr<CodeObject> find(const CodeCacheKey& key) const;
+
+    void insert(CodeCacheKey key, std::shared_ptr<CodeObject> code);
+    void invalidate(const CodeCacheKey& key);
+    void invalidate_source(const NormalizedPath& source_file);
+    void invalidate_all();
+    void collect_retired(const Frame* current_frame);
+
+private:
+    std::unordered_map<CodeCacheKey, std::shared_ptr<CodeObject>> entries_;
+    std::vector<std::shared_ptr<CodeObject>> retired_;
 };
 ```
 
-它缓存已经完成 parse、IR lowering、verify、pass pipeline 和 layout 构建的 `CodeObject`。
-缓存失效只阻止新调用使用旧对象；活跃 Frame 通过 `shared_ptr` 保持旧 revision 存活。
+它缓存已经完成 parse、IR lowering、verify、pass pipeline 和代码级运行时状态初始化的
+`CodeObject`。
+缓存失效只阻止新调用使用旧对象。由于 `Frame::code` 是裸指针，`invalidate*` 不能直接释放旧
+`CodeObject`；它应把旧对象标记 `invalidated` 后移入 `retired_`。Frame 退出后，解释器可以用
+当前 `current_frame` 链扫描活跃调用栈，并通过 `collect_retired` 释放已不再被任何活跃 Frame 指向的
+旧 revision。
 
-cache key 至少包含规范化文件路径和函数/unit 身份。有效性需要考虑源码 fingerprint、路径环境、
-IR pipeline 配置和 `clear functions`。
+`InterpreterContext` 不保存独立函数解析器，也不保存第二份 builtin/plugin registry。函数、脚本、
+builtin 和 plugin 的名字查找继续使用项目已有符号查找与 runtime 分派机制；只有目标解析为可执行
+M 代码时，才从 `code_cache` 取得或构建 `CodeObject`。
+
+cache key 只包含规范化文件路径和文件内 unit 身份。这里暂用 `unit_name` 表达主函数、脚本顶层
+unit 和 local function 的区别；如果 IR 后续提供稳定 `CodeUnitId`，可以替换这个字段。路径搜索、
+builtin/plugin 优先级、class/private/local 函数解析都在进入 cache 前完成；cache 不重复保存
+resolver 结果，也不判断源码内容是否过期。源码是否过期由外层 source loader、路径解析和
+clear/rehash 机制判断，并触发对应 `invalidate_source` 或 `invalidate_all`。
+
+`CodeObjectCache` 不保存匿名函数体。匿名函数没有 Matlab 函数名字空间中的可查找名字，应该进入
+独立的 `anonymous_codes`。
+
+### 2.4 `anonymous_codes`
+
+```cpp
+struct AnonymousCodeKey {
+    const IRModule* module = nullptr;
+    AnonymousFunctionId function_id = InvalidAnonymousFunctionId;
+};
+
+class AnonymousCodeTable final {
+public:
+    std::shared_ptr<CodeObject> find(const AnonymousCodeKey& key) const;
+    void insert(AnonymousCodeKey key, std::shared_ptr<CodeObject> code);
+    void invalidate_module(const IRModule* module);
+    void invalidate_all();
+    void collect_retired(const Frame* current_frame);
+
+private:
+    std::unordered_map<AnonymousCodeKey, std::shared_ptr<CodeObject>> entries_;
+    std::vector<std::shared_ptr<CodeObject>> retired_;
+};
+```
+
+它是 session 级匿名函数代码表，不是 Matlab `global` 变量表。key 使用 `IRModule` 身份和
+`AnonymousFunctionId`，因为匿名函数 ID 只在所属 module 内唯一。
+
+执行 `CreateAnonymousFunctionHandleInst` 时，解释器用当前 `CodeObject::ir_owner.get()` 和
+指令中的 `function_id` 查找或构建匿名函数体 `CodeObject`，再把该 `CodeObject` 与捕获值一起放入
+`ClosureObject`。匿名函数体不参与普通名字查找，也不进入 `CodeObjectCache`。
+
+源码或 pipeline 失效时，对应 module 的匿名函数表项必须从 `anonymous_codes` 的 active entries
+移入 `retired_`。已经构造好的 closure 可以继续通过 `shared_ptr<CodeObject>` 保持旧匿名函数体
+存活；活跃匿名函数 Frame 则通过 `collect_retired(current_frame)` 的 caller 链检查避免裸指针悬空。
 
 ### 2.5 `current_frame`
 
@@ -169,121 +213,58 @@ current_frame -> caller -> caller -> nullptr
 函数局部变量查找不能沿 caller 链向上搜索。
 
 进入和退出 Frame 应使用 RAII，保证 runtime error 或 C++ 异常展开时仍能恢复
-`current_frame` 和 `call_depth`。
-
-### 2.6 `call_depth`
-
-它记录当前调用深度，用于递归限制、诊断和 profile。创建新 Frame 前检查：
-
-```cpp
-call_depth < options.max_call_depth
-```
-
-正常进入时递增，所有退出路径上递减。
-
-### 2.7 `epochs`
-
-```cpp
-struct EnvironmentEpochs {
-    std::uint64_t workspace = 0;
-    std::uint64_t global = 0;
-    std::uint64_t path = 0;
-    std::uint64_t code = 0;
-};
-```
-
-- `workspace`：base workspace、脚本、`eval`、`assignin` 或 `load` 改变可观察名字绑定。
-- `global`：global registry 结构变化。
-- `path`：`addpath`、`rmpath`、`cd`、`rehash` 等改变 M 函数解析环境。
-- `code`：`clear functions`、文件失效或 IR pipeline revision 变化。
-
-局部 Frame slot 的普通写入不推进全局 workspace epoch。特定 global cell 的普通值更新优先推进
-cell version，不必让整个 global registry cache 失效。
-
-### 2.8 `options`
-
-```cpp
-struct RuntimeOptions {
-    std::size_t max_call_depth = 1024;
-    bool verify_ir_before_execution = true;
-    bool run_optimization_passes = true;
-    bool collect_profile = false;
-    bool enable_debugger = false;
-    bool trace_calls = false;
-    bool trace_instructions = false;
-};
-```
-
-改变会影响 IR 或 layout 的 option 后，必须使相关 code cache 失效。trace 选项只服务诊断，不能
-改变语言语义。
-
-### 2.9 `diagnostics`
-
-它统一产生 runtime error、warning、源码位置和调用栈。解释器和 helper 不应直接向
-`std::cerr` 输出用户诊断。`DiagnosticEngine` 不拥有 Frame；需要调用栈时临时遍历
 `current_frame`。
 
-### 2.10 `services`
+调用深度上限使用 `kMaxCallDepth` 这样的编译期常量或构建配置，不作为 `InterpreterContext` 成员。
+创建新 Frame 前从 caller 链计算当前深度即可。
 
-```cpp
-struct RuntimeServices {
-    OutputSink* output = nullptr;
-    InputProvider* input = nullptr;
-    FileSystem* filesystem = nullptr;
-    Clock* clock = nullptr;
-};
-```
-
-这些是 runtime 与宿主环境的非拥有接口，便于 CLI、GUI 和测试注入不同实现。第一版可以只接入
-实际需要的 output 和 filesystem。
-
-### 2.11 `interrupt_requested`
+### 2.6 `interrupt_requested`
 
 宿主通过它请求中断执行。解释器至少在函数入口、循环回边和长时间 helper 返回后检查。中断
 处理应转成统一 runtime error，再通过正常 Frame 展开恢复状态。
 
 ## 3. CodeObject
 
-`CodeObject` 对应一个可执行 `CodeUnit`，由所有调用共享：
+`CodeObject` 对应一个已经完成 lowering、verify 和 pass pipeline 的可执行 `CodeUnit`。它不再
+复制 `CodeUnit` 中已有的 slot/value/source/profile/signature 元数据，只保存解释执行必须跨调用
+共享的代码级状态：
 
 ```cpp
 class CodeObject final {
 public:
-    CodeIdentity identity;
-
     std::shared_ptr<IRModule> ir_owner;
     CodeUnit* unit = nullptr;
 
-    FrameLayout frame_layout;
-    ValueLayout value_layout;
-    FunctionSignature signature;
+    PersistentTable persistent;
 
-    NameBindingTable name_bindings;
-    PersistentStorage persistent;
-
-    ExecutionMetadata execution;
-    SourceMetadata source;
-
-    CodeObjectFlags flags;
+    bool invalidated = false;
     std::uint64_t revision = 0;
 };
 ```
 
-### 3.1 `identity`
+不放入 `CodeObject` 的重复派生字段：
 
-```cpp
-struct CodeIdentity {
-    NormalizedPath source_file;
-    InternedString function_name;
-    CodeUnit::Type unit_type = CodeUnit::Function;
-    AnonymousFunctionId anonymous_id = InvalidAnonymousFunctionId;
-};
-```
+| 信息 | 来源 |
+|---|---|
+| slot 数量和 slot 名字 | `unit->slot_table` |
+| ValueId 数量和 def 信息 | `unit->value_table` |
+| 参数顺序 | `FunctionUnit::param_slots` / `AnonymousFunctionUnit::param_slots` |
+| 返回值顺序 | `FunctionUnit::return_slots` |
+| `varargin/varargout/nargin/nargout` | `SlotTag` |
+| entry block | `unit->entry_block` |
+| block 顺序 | `unit->basic_blocks` |
+| 代码显示身份 / source range | `CodeUnit` / instruction 的 source span，或外层 AST/source manager |
+| profile 统计 | profile side table |
+| `contains_eval` 等 feature flag | 需要时扫描 IR 或由构建层 side table 提供 |
 
-它是 cache、调用栈、debugger 和失效操作使用的代码身份。匿名函数使用 module 内 ID 作为真实
-身份，内部文本名只用于显示。
+这样 `Frame` 创建时直接按 `SlotId` / `ValueId` 分配运行时数组，不需要额外的 frame/value/
+signature/name 映射结构。
 
-### 3.2 `ir_owner` 与 `unit`
+`CodeObject` 不保存额外代码身份结构。具名代码的 cache 身份在 `CodeCacheKey` 中，匿名函数体身份
+在 `AnonymousCodeKey` 中；调用栈、debugger 和诊断显示名从 `CodeUnit`、instruction source span
+或外层 AST/source manager 派生。
+
+### 3.1 `ir_owner` 与 `unit`
 
 `ir_owner` 共享拥有完整 `IRModule`，`unit` 指向其中当前 CodeObject 执行的代码单元。不能只从
 module 中拆出一个 `CodeUnit`，因为当前 IR 包含 file/module、local target、lexical parent、CFG
@@ -299,145 +280,70 @@ IR 已通过 verifier
 IR 已冻结，不再运行改写 pass
 ```
 
-### 3.3 `frame_layout`
+### 3.2 直接索引策略
 
-```cpp
-enum class RuntimeStorageKind : std::uint8_t {
-    FrameSlot,
-    Capture,
-    Persistent,
-    Global,
-    Workspace,
-};
+`SlotId` 和 `ValueId` 都直接作为当前 `Frame` 内数组索引使用：
 
-struct SlotRuntimeInfo {
-    RuntimeStorageKind storage;
-    SlotTag tag;
-    std::uint32_t storage_index;
-    InternedString name;
-    bool user_visible = false;
-    bool clearable = false;
-};
-
-struct FrameLayout {
-    std::vector<SlotRuntimeInfo> slots;
-    std::uint32_t frame_slot_count = 0;
-    std::uint32_t user_binding_count = 0;
-};
+```text
+SlotId  -> Frame::slot_values[SlotId]
+ValueId -> Frame::temporaries[ValueId]
 ```
 
-`slots[SlotId]` 把 IR slot 身份映射到运行时存储：
+Frame 创建时按以下大小分配：
+
+```text
+slot_values.size()  == unit->slot_table.slots.size()
+temporaries.size()  == unit->value_table.values.size()
+```
+
+slot 的存储来源由 `SlotInfo::slot.tag` 决定，不需要单独的运行时 slot 映射表：
 
 | Slot 类别 | 存储位置 |
 |---|---|
-| `Arg/Ret/Local/InternalLocal` | `Frame::slot_values` |
+| `Arg/Ret/Local/InternalLocal` | 当前 `Frame::slot_values[SlotId]` 拥有的 slot |
 | `Varargin/Varargout` | 用户可见 Frame slot |
-| `Capture` | closure capture environment |
-| `Persistent` | `CodeObject::persistent` |
-| `Global` | `InterpreterContext::globals` |
-| `ScriptVar/BaseVar` | target workspace |
+| `Capture` | `Frame::slot_values[SlotId]` 指向 closure capture 中的变量值 |
+| `Persistent` | `Frame::slot_values[SlotId]` 指向 `CodeObject::persistent` 中的变量值 |
+| `Global` | `Frame::slot_values[SlotId]` 指向 `InterpreterContext::globals` 中的同一变量地址 |
+| `ScriptVar/BaseVar` | `Frame::slot_values[SlotId]` 指向 target workspace binding 的变量值 |
 | `Nargin/Nargout` | Frame 调用元数据 |
 
-`storage_index` 只在对应 storage kind 内有效，不能把所有 `SlotId` 直接当作 Frame offset。
+普通 `LoadSlotInst/StoreSlotInst` 只读写 `Frame::slot_values[SlotId]`，不查哈希表，也不查额外映射表。
+不同 `SlotTag` 的差异只体现在 Frame 初始化阶段：初始化时把 slot entry 连接到当前 Frame、global
+binding、persistent value table、closure capture 或 workspace binding。
 
-### 3.4 `value_layout`
+按名机制也不需要 `CodeObject` 维护第二份符号表。`eval`、脚本、`who/whos` 和 debugger 可以扫描
+`unit->slot_table.slots`，或在解释器内部建立非语义缓存；缓存必须能从 `SlotTable` 重建，不能成为
+新的语义来源。
+
+### 3.3 `persistent`
 
 ```cpp
-struct ValueRuntimeInfo {
-    std::uint32_t temporary_offset = InvalidRuntimeOffset;
-};
-
-struct ValueLayout {
-    std::vector<ValueRuntimeInfo> values;
-    std::uint32_t temporary_count = 0;
+struct PersistentTable {
+    std::unordered_map<SlotId, ba_obj_ptr> values;
 };
 ```
 
-它把仍有定义的 `ValueId` 紧凑映射到 `Frame::temporaries`。pass 删除且 `def == nullptr` 的 value
-不分配空间。Slot 和 ValueId 必须使用不同存储：slot 是用户变量或内部局部状态，ValueId 是 IR
-数据流结果。
+`PersistentTable` 是当前 `CodeObject` 私有的 value table，形状与 `GlobalRegistry` 类似：
+global 用变量名索引，persistent 用稳定的 `SlotId` 索引。准确说，`SlotId` 是这张表的 key，
+表里的 value 仍然是 `ba_obj_ptr`。
 
-### 3.5 `signature`
+persistent 属于代码级状态，递归和后续调用共享，不属于任何一次 Frame。Frame 初始化到
+`SlotTag::Persistent` 时，把 `Frame::slot_values[SlotId]` 连接到
+`CodeObject::persistent.values[SlotId]` 的同一变量地址。
 
-```cpp
-struct FunctionSignature {
-    std::vector<std::uint32_t> parameter_slots;
-    std::vector<std::uint32_t> return_slots;
-    std::optional<std::uint32_t> varargin_slot;
-    std::optional<std::uint32_t> varargout_slot;
-};
-```
+`persistent.values[SlotId] == nullptr` 表示该 persistent 变量尚未初始化或已被 clear。因为
+persistent 变量自己的 `SlotId` 在同一个 `CodeObject` revision 内稳定，所以不需要
+额外 offset、`storage_index` 或与整个 slot table 等长的 storage vector。
 
-这些字段保存运行时 Frame offset，不再保存原始 `SlotId`。它们决定参数初始化、命名返回值收集
-以及 `varargin/varargout` 打包和展开顺序。`nargin/nargout` 保存在 Frame header，不进入用户
-名字表。
+### 3.4 `invalidated` 与 `revision`
 
-### 3.6 `name_bindings`
+`CodeObject` 构造成功即表示 IR 已通过 verifier、pass pipeline 已结束且 IR 已冻结，因此不再保存
+构建状态位。新调用只需要检查 `!invalidated`。失效对象不再接受新调用，
+但旧 Frame 可以继续通过裸指针执行它；因此拥有该 `CodeObject` 的 code table 必须把失效对象保留到
+没有活跃 Frame 可能再引用它。`revision` 区分同一源码函数的多个代码版本，不等同于环境 epoch。
 
-它把用户可见静态名字映射到 storage kind 和 index，只给 `eval`、脚本、`who/whos`、debugger
-等按名机制使用。普通 `LoadSlotInst/StoreSlotInst` 直接通过 `frame_layout` 访问，不查哈希表。
-`InternalLocal`、ValueId 和隐藏调用状态不进入该表。
-
-### 3.7 `persistent`
-
-```cpp
-struct PersistentCell {
-    ba_obj_ptr value;
-    bool initialized = false;
-    std::uint64_t version = 0;
-};
-
-struct PersistentStorage {
-    std::vector<PersistentCell> cells;
-};
-```
-
-persistent 属于代码级状态，递归和后续调用共享，不属于任何一次 Frame。第一版单线程不需要在
-每个 storage 内预放 mutex；真正支持并发重入时再确定同步策略。
-
-### 3.8 `execution`
-
-```cpp
-struct InstructionLocation {
-    BasicBlock* block = nullptr;
-    std::uint32_t instruction_index = 0;
-};
-
-struct ExecutionMetadata {
-    InstructionLocation entry;
-    std::vector<BasicBlock*> block_order;
-    std::unordered_map<BasicBlock*, std::uint32_t> block_ids;
-    std::shared_ptr<CodeProfile> profile;
-};
-```
-
-`entry` 是新 Frame 的初始 IR continuation。稳定 block ID 用于 profile、debug 和后续优化状态
-映射，不依赖 block label 唯一。profile 是 side table，不能为了计数修改冻结的 IR。
-
-### 3.9 `source`
-
-它保存源码路径、函数范围、文件 fingerprint，以及可选 AST owner。解释执行只依赖 IR；AST
-只服务源码诊断、debug 或重新构建，可以为空。正常执行不能回退到 AST 求值，否则 IR 不再是
-唯一语义基线。
-
-### 3.10 `flags` 与 `revision`
-
-```cpp
-struct CodeObjectFlags {
-    bool verified = false;
-    bool optimized = false;
-    bool frozen = false;
-    bool may_use_dynamic_workspace = false;
-    bool contains_eval = false;
-    bool contains_script_call = false;
-    bool is_invalidated = false;
-};
-```
-
-新调用只能使用 `verified && frozen && !is_invalidated` 的对象。失效对象不再接受新调用，但旧
-Frame 可以继续持有它。`revision` 区分同一源码函数的多个代码版本，不等同于环境 epoch。
-
-### 3.11 构建顺序
+### 3.5 构建顺序
 
 ```text
 parse / load AST
@@ -445,15 +351,13 @@ parse / load AST
   -> verify
   -> PassManager
   -> verify
-  -> FrameLayout
-  -> ValueLayout
-  -> FunctionSignature / NameBindingTable / PersistentStorage
-  -> ExecutionMetadata
+  -> PersistentTable
   -> freeze CodeObject
-  -> insert CodeObjectCache
+  -> insert CodeObjectCache 或 AnonymousCodeTable
 ```
 
-任何步骤失败都不能把半初始化对象放入 cache。
+具名函数和脚本插入 `CodeObjectCache`；匿名函数体插入 `AnonymousCodeTable`。任何步骤失败都不能把
+半初始化对象放入表中。
 
 ## 4. Frame
 
@@ -462,14 +366,13 @@ Frame 对应一次函数或匿名函数调用：
 ```cpp
 struct Frame {
     InterpreterContext* context = nullptr;
-    std::shared_ptr<CodeObject> code;
+    CodeObject* code = nullptr;
     Frame* caller = nullptr;
 
     BasicBlock* block = nullptr;
     std::uint32_t instruction_index = 0;
 
     std::vector<ba_obj_ptr> slot_values;
-    std::vector<std::uint8_t> slot_bound;
     std::vector<ba_obj_ptr> temporaries;
 
     std::uint32_t actual_nargin = 0;
@@ -482,8 +385,10 @@ struct Frame {
 
 ### 4.1 `context`、`code` 与 `caller`
 
-- `context` 是非拥有指针，提供 global、base workspace、resolver、诊断和服务。
-- `code` 共享拥有当前 CodeObject，保证 cache 失效时活跃执行仍安全。
+- `context` 是非拥有指针，提供 global、base workspace、code cache、anonymous code table、
+  current frame 和 interrupt state。
+- `code` 是非拥有指针。`CodeObjectCache`、`AnonymousCodeTable` 或 closure 持有所有权；cache
+  失效只能阻止新调用，不能销毁仍可能被活跃 Frame 指向的旧 CodeObject。
 - `caller` 是非拥有调用链指针，只服务调用栈和 caller workspace 选择，不参与普通局部查找。
 
 ### 4.2 IR continuation
@@ -499,62 +404,73 @@ return：结束当前 Frame
 
 解释器直接从 `code->unit` 取得 block 和 instruction，不复制另一套指令。
 
-### 4.3 `slot_values` 与 `slot_bound`
+### 4.3 `slot_values`
 
-`slot_values` 只为 `FrameSlot` 类别分配，大小由 `frame_layout.frame_slot_count` 决定。
-`slot_bound` 显式区分未初始化/已 clear 与合法 runtime value。
+`slot_values` 按 `code->unit->slot_table.slots.size()` 分配，每个 `SlotId` 都有对应 entry。对于
+`Arg/Ret/Local/InternalLocal`，entry 是当前 Frame 拥有的变量槽；对于 `Global`、`Persistent`、
+`Capture` 和 `Workspace`，entry 持有与对应外部存储一致的 `ba_obj_ptr`。
+
+不再维护单独的 `slot_bound`。`slot_values[SlotId] == nullptr` 表示该变量当前未初始化或已被
+`clear`；合法运行时值必须是非空 `ba_obj_ptr`。空矩阵、空字符串等语言值仍然是非空对象，不能用
+nullptr 表示。
 
 ```text
-load unbound slot  -> cleared/undefined variable error
-store slot         -> 写 value 并置 bound
-clear slot         -> 释放 value 并清 bound
+load nullptr slot  -> cleared/undefined variable error
+store slot         -> 写入非空 ba_obj_ptr
+clear slot         -> slot value 置 nullptr
 ```
 
 静态变量被 clear 后不能回退为同名函数解析。
 
 ### 4.4 `temporaries`
 
-它保存当前调用中 `ValueId` 的运行时结果，大小由 `value_layout.temporary_count` 决定。临时值
-不进入 name lookup，不被 `who/whos` 观察，也不与 SlotId 共用编号空间。
+它保存当前调用中 `ValueId` 的运行时结果，按 `code->unit->value_table.values.size()` 分配。
+普通 ValueId 访问直接使用 `Frame::temporaries[ValueId]`，不需要额外的 temporary 映射字段。
+临时值不进入 name lookup，不被 `who/whos` 观察，也不与 SlotId 共用编号空间。
 
 ### 4.5 调用元数据
 
 - `actual_nargin` 是调用者实际传入的参数数量。
 - `requested_nargout` 是调用者请求的返回值数量。
-- `varargin/varargout` 是用户可见变量，存放在 signature 指定的普通 Frame slot 中。
+- 参数和返回值顺序使用 `FunctionUnit::param_slots` / `FunctionUnit::return_slots`，匿名函数参数
+  使用 `AnonymousFunctionUnit::param_slots`。
+- `varargin/varargout` 是用户可见变量，存放在对应 `SlotTag::Varargin` / `SlotTag::Varargout`
+  的 Frame slot 中。
 
 ### 4.6 `closure`
 
-匿名函数调用时，它指向构造句柄时按值保存的 capture environment。`Capture` slot 通过
-`SlotRuntimeInfo` 读取其中固定 index。closure 不引用外层 Frame，因此不会延长外层调用生命期。
+匿名函数调用时，它指向构造句柄时按值保存的 capture environment。`ClosureObject` 同时保存从
+`AnonymousCodeTable` 得到的匿名函数体 `CodeObject`。`Capture` slot 通过 `SlotId` 读取 closure
+environment 中对应的 `ba_obj_ptr`。closure 不引用外层 Frame，因此不会延长外层调用生命期。
 
 ### 4.7 `dynamic_bindings`
 
 只有执行 `eval`、脚本、`assignin` 或运行时创建动态名字时才延迟分配。静态名字仍由
-`CodeObject::name_bindings` 定位到 slot/persistent/global；不属于静态 layout 的名字存入这里。
+`unit->slot_table` 定位到 slot；不属于静态 slot 表的名字存入这里。
 
 ## 5. 调用流程
 
 ### 5.1 进入函数
 
 ```text
-1. resolver/code cache 得到 CodeObject。
-2. 检查 verified、frozen、invalidated 和递归深度。
+1. 普通 M 函数通过项目已有符号查找机制和 `CodeObjectCache` 得到 `CodeObject`；匿名函数通过
+   closure 中保存的 `CodeObject` 调用；builtin/plugin 转交既有分派机制。
+2. 检查 invalidated，并确认 caller 链深度不超过 `kMaxCallDepth`。
 3. 创建 Frame，设置 context/code/caller。
-4. 按 layout 分配 slot、binding state 和 temporaries。
-5. 按 signature 写入实参并构造 varargin。
+4. 按 `CodeUnit` 的 slot/value table 分配 slot values 和 temporaries。
+5. 按 `CodeUnit` 的接口 slot 写入实参并构造 varargin。
 6. 设置 actual_nargin/requested_nargout。
-7. continuation 指向 execution.entry。
-8. 通过 RAII 更新 current_frame 和 call_depth。
+7. continuation 指向 `unit->entry_block`。
+8. 通过 RAII 更新 current_frame。
 9. 开始解释执行。
 ```
 
 ### 5.2 返回函数
 
 ```text
-1. 按 return_slots 检查并收集命名返回值。
+1. 按 `FunctionUnit::return_slots` 检查并收集命名返回值。
 2. 按请求数量展开 varargout。
-3. 恢复 InterpreterContext::current_frame 和 call_depth。
+3. 恢复 InterpreterContext::current_frame。
 4. 把结果写入 caller 中 CallInst 对应的 ValueId temporary。
 5. 析构当前 Frame 的 slot、temporary 和动态 binding。
 ```
@@ -570,13 +486,16 @@ clear slot         -> 释放 value 并清 bound
 
 global 属于 InterpreterContext。
 persistent 属于 CodeObject。
-local/arg/ret 属于 Frame。
+每个静态可见源码变量都有 SlotId，Frame 中有对应 slot entry。
+local/arg/ret slot entry 由 Frame 拥有。
+global/persistent/capture/workspace slot entry 指向对应外部存储的同一变量地址。
 capture 属于 ClosureEnvironment。
 ValueId 结果属于 Frame::temporaries。
 
 CodeObject 发布后 IR 不可变。
+匿名函数体 CodeObject 属于 InterpreterContext::anonymous_codes，不属于 CodeObjectCache。
 Frame 不拥有 caller 或 InterpreterContext。
-Frame 共享拥有 CodeObject。
+Frame 不拥有 CodeObject；CodeObject owner 必须保证活跃 Frame 指针不悬空。
 普通函数名字查找不沿 caller 链进行。
 builtin/plugin 继续使用项目已有机制。
 ```

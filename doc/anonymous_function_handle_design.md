@@ -54,12 +54,17 @@ z = f(2);
 外层名字
   -> 外层 load
   -> 外层 ValueId
+  -> create_anon_func 查 anonymous_codes 得到匿名函数体 CodeObject
   -> create_anon_func 捕获运行时值
-  -> closure capture value
+  -> closure code + capture value
   -> 调用时填入匿名函数 frame 的 Capture slot
   -> body 内 load
   -> body-local ValueId
 ```
+
+`anonymous_codes` 是 `InterpreterContext` 里的匿名函数代码表。它用所属 `IRModule` 和
+`AnonymousFunctionId` 定位匿名函数体 `CodeObject`，不参与普通函数名字查找，也不复用
+`CodeObjectCache`。
 
 ## 函数与脚本捕获来源
 
@@ -92,7 +97,7 @@ z = f(2);
 
 `value_apply` 不静态假设 `%f` 一定是匿名函数句柄。运行时再根据 `%f` 的实际值分派：
 
-- 匿名函数句柄：取出 closure code 和 captures 调用
+- 匿名函数句柄：取出 closure 保存的 `CodeObject` 和 captures 调用
 - 具名函数句柄：按句柄内绑定或 unresolved 名字规则调用
 - 数组或对象：按索引 / overload 规则继续分派
 
@@ -102,7 +107,7 @@ z = f(2);
 
 `@(x) x + y` 没有 Matlab 名字空间里的函数名。它构造的是 closure 实例，实例携带：
 
-- 匿名函数体代码引用
+- 匿名函数体 `CodeObject` 引用
 - 构造点捕获值
 
 因此匿名函数不能复用 `CreateNamedFunctionHandleInst`。
@@ -128,5 +133,5 @@ z = f(2);
 - 自由变量分析继续放在 lowering 内，还是抽成独立 AST 分析 pass
 - 捕获值的 runtime 复制语义：深拷贝、COW value，还是沿用当前 `ba_obj` 复制规则
 - 匿名函数体引用 local / private / import 时，runtime closure code 如何保存依赖
-- closure code object 的缓存、序列化和释放策略
+- `AnonymousCodeTable` 的内存上限、序列化和更细粒度释放策略
 - 逃逸分析如何证明某些匿名函数体可以放入函数局部表，而不是 module 级匿名函数表

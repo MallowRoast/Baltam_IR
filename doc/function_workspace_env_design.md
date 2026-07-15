@@ -13,8 +13,8 @@
 
 ## 已合并位置
 
-- 函数 frame layout、slot binding state、`eval('clear a')` 后的 checked slot 访问：
-  [M 函数栈帧设计](./function_frame_design.md)
+- 函数 Frame、slot binding state、`eval('clear a')` 后的 checked slot 访问：
+  [InterpreterContext、CodeObject 与 Frame 设计](./runtime_execution_objects_design.md)
 - workspace 作为 `name -> binding` 视图、脚本运行时 target workspace、动态 env observer：
   [M 工作区设计](./workspace_design.md)
 - 变量类别、binding liveness、`clear` 对各类变量的影响：

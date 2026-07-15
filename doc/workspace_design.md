@@ -66,12 +66,12 @@ WorkspaceBinding
 ```text
 DynamicLocal  -> DynamicEnv table entry
 FrameSlot     -> FunctionFrame.slot_values[offset] + slot_binding_state[offset]
-Global        -> GlobalVariableCell
+Global        -> GlobalRegistry::values[name]
 Persistent    -> PersistentVariableCell
 ImportedName  -> Import table entry
 ```
 
-这样做的原因是：workspace 是名字语义；变量值可能住在 frame slot、动态表、全局 cell 或
+这样做的原因是：workspace 是名字语义；变量值可能住在 frame slot、动态表、全局 value 或
 persistent cell 里。
 
 ## 4. Workspace 类型
@@ -363,6 +363,6 @@ WorkspaceEpoch
 
 - [M 变量模型设计](./variable_model_design.md)
 - [Global / Persistent IR 节点设计](./global_persistent_ir_design.md)
-- [M 函数栈帧设计](./function_frame_design.md)
+- [InterpreterContext、CodeObject 与 Frame 设计](./runtime_execution_objects_design.md)
 - [M 函数工作区中的静态 slot 与动态 env](./function_workspace_env_design.md)
 - [IR Schema](./ir_schema.md)

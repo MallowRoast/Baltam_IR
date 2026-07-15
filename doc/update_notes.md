@@ -126,7 +126,7 @@
 - 增加变量、workspace、函数 frame、global/persistent、deopt 等 runtime 设计记录：
   [variable_model_design.md](./variable_model_design.md)、
   [workspace_design.md](./workspace_design.md)、
-  [function_frame_design.md](./function_frame_design.md)、
+  [runtime_execution_objects_design.md](./runtime_execution_objects_design.md)、
   [global_persistent_ir_design.md](./global_persistent_ir_design.md)、
   [deopt_runtime_references.md](./deopt_runtime_references.md)。
 - 明确当前脚本静态名字已经是 `ScriptVar` slot，文本 IR 打印仍是 `load` / `store`；
