@@ -15,6 +15,9 @@ add_library(BALTAM_IR STATIC
     src/pass/load_forwarding_pass.cpp
     src/pass/ir_pass_manager.cpp
     src/pass/unreachable_block_elimination_pass.cpp
+    src/runtime/code_object.cpp
+    src/runtime/frame.cpp
+    src/runtime/interpreter_context.cpp
 )
 
 target_include_directories(BALTAM_IR
