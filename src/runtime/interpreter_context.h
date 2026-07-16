@@ -14,7 +14,7 @@ struct RuntimeFrame;
 struct BaseWorkspace {
     std::unordered_map<InternedString, ba_obj_ptr> values;
 
-    [[nodiscard]] ba_obj_ptr& value(InternedString name);
+    [[nodiscard]] ba_obj_ptr& find(InternedString name);
     [[nodiscard]] ba_obj_ptr find(InternedString name) const;
     void clear(InternedString name);
 };
@@ -22,7 +22,7 @@ struct BaseWorkspace {
 struct GlobalRegistry {
     std::unordered_map<InternedString, ba_obj_ptr> values;
 
-    [[nodiscard]] ba_obj_ptr& value(InternedString name);
+    [[nodiscard]] ba_obj_ptr& find(InternedString name);
     [[nodiscard]] ba_obj_ptr find(InternedString name) const;
     void clear(InternedString name);
 };

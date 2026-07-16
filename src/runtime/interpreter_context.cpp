@@ -4,7 +4,7 @@
 
 namespace baltam {
 
-ba_obj_ptr& BaseWorkspace::value(InternedString name) {
+ba_obj_ptr& BaseWorkspace::find(InternedString name) {
     return values[std::move(name)];
 }
 
@@ -17,7 +17,7 @@ void BaseWorkspace::clear(InternedString name) {
     values[std::move(name)].reset();
 }
 
-ba_obj_ptr& GlobalRegistry::value(InternedString name) {
+ba_obj_ptr& GlobalRegistry::find(InternedString name) {
     return values[std::move(name)];
 }
 

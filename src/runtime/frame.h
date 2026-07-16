@@ -21,6 +21,7 @@ struct DynamicBindings {
 struct ClosureEnvironment {
     std::unordered_map<SlotId, ba_obj_ptr> values;
 
+    [[nodiscard]] ba_obj_ptr& find(SlotId slot);
     [[nodiscard]] ba_obj_ptr find(SlotId slot) const;
 };
 

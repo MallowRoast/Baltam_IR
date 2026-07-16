@@ -17,6 +17,10 @@ std::size_t checked_index(Id id, std::size_t size, const char* kind) {
 
 } // namespace
 
+ba_obj_ptr& ClosureEnvironment::find(SlotId slot) {
+    return values[slot];
+}
+
 ba_obj_ptr ClosureEnvironment::find(SlotId slot) const {
     const auto it = values.find(slot);
     return it != values.end() ? it->second : ba_obj_ptr{};

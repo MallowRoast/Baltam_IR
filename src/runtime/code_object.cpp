@@ -51,7 +51,7 @@ void collect_retired_impl(
 
 } // namespace
 
-ba_obj_ptr& PersistentTable::value(SlotId slot) {
+ba_obj_ptr& PersistentTable::find(SlotId slot) {
     return values[slot];
 }
 
