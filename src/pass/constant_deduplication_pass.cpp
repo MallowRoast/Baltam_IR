@@ -208,7 +208,7 @@ void rewrite_values(std::vector<ValueId>& values, const ValueRewriteMap& replace
 void rewrite_instruction_uses(Instruction& instruction, const ValueRewriteMap& replacements) {
     switch (instruction.type()) {
         case Instruction::StoreSlot:
-            rewrite_operand(static_cast<StoreSlotInst&>(instruction).value, replacements);
+            rewrite_value(static_cast<StoreSlotInst&>(instruction).value, replacements);
             break;
         case Instruction::CreateAnonymousFunctionHandle:
             for (auto& capture :

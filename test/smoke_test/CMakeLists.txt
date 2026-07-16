@@ -287,6 +287,30 @@ add_test(
 )
 set_smoke_labels(ir_pass_manager_smoke smoke feature)
 
+add_executable(runtime_test0_1_smoke
+    feature/runtime_test0_1_smoke.cpp
+)
+
+target_include_directories(runtime_test0_1_smoke
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+set_target_properties(runtime_test0_1_smoke PROPERTIES
+    BUILD_RPATH "/opt/Baltamatica/lib"
+)
+
+target_link_libraries(runtime_test0_1_smoke
+    PRIVATE
+        BALTAM_IR
+)
+
+add_test(
+    NAME runtime_test0_1_smoke
+    COMMAND runtime_test0_1_smoke
+)
+set_smoke_labels(runtime_test0_1_smoke smoke runtime)
+
 add_ir_smoke_test(
     cfg_dot_smoke
     feature/cfg_dot_smoke.cpp

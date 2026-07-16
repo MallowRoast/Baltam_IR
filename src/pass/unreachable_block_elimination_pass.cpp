@@ -98,7 +98,7 @@ void collect_used_values(
     std::unordered_set<ValueId>& values) {
     switch (instruction.type()) {
         case Instruction::StoreSlot:
-            collect_operand_values(static_cast<const StoreSlotInst&>(instruction).value, values);
+            values.insert(static_cast<const StoreSlotInst&>(instruction).value);
             break;
         case Instruction::CreateAnonymousFunctionHandle:
             for (const auto& capture :

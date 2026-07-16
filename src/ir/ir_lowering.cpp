@@ -85,7 +85,9 @@ static const std::unordered_map<nodeType, UnaryOp> kUnaryOpMap = {
 };
 
 bool try_parse_number_constant(const numval& number_node, Constant& out_constant) {
-    std::string text = number_node.str;
+    std::string text = number_node.literal.empty()
+        ? number_node.to_string()
+        : number_node.literal;
     text.erase(
         std::remove_if(
             text.begin(),

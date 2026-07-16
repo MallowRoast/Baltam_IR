@@ -607,7 +607,7 @@ private:
                         error("匿名函数 capture slot 是只读的，不能 store_slot", inst.source_span);
                     }
                 }
-                verify_operand(inst.value, "store_slot value", inst.source_span);
+                verify_value_ref(inst.value, "store_slot value", inst.source_span);
                 break;
             }
             case Instruction::GlobalDecl: {

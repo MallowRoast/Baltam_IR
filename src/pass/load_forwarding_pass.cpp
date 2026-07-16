@@ -93,7 +93,7 @@ void rewrite_values(std::vector<ValueId>& values, const ValueRewriteMap& rewrite
 void rewrite_instruction_uses(Instruction& instruction, const ValueRewriteMap& rewrites) {
     switch (instruction.type()) {
         case Instruction::StoreSlot:
-            rewrite_operand(static_cast<StoreSlotInst&>(instruction).value, rewrites);
+            rewrite_value(static_cast<StoreSlotInst&>(instruction).value, rewrites);
             break;
         case Instruction::CreateAnonymousFunctionHandle:
             for (auto& capture :
@@ -227,16 +227,12 @@ IRPassResult LoadForwardingPass::run(CodeUnit& unit, IRPassContext& context) {
                         break;
                     }
 
-                    if (const auto* value = std::get_if<ValueId>(&inst.value)) {
-                        const ValueId resolved = resolve_value(*value, rewrites);
-                        if (resolved.is_valid()) {
-                            slot_states[inst.slot.id] = {
-                                slot_info->slot.tag,
-                                resolved,
-                            };
-                        } else {
-                            slot_states.erase(inst.slot.id);
-                        }
+                    const ValueId resolved = resolve_value(inst.value, rewrites);
+                    if (resolved.is_valid()) {
+                        slot_states[inst.slot.id] = {
+                            slot_info->slot.tag,
+                            resolved,
+                        };
                     } else {
                         slot_states.erase(inst.slot.id);
                     }

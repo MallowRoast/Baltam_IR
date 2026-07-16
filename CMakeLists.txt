@@ -17,7 +17,9 @@ add_library(BALTAM_IR STATIC
     src/pass/unreachable_block_elimination_pass.cpp
     src/runtime/code_object.cpp
     src/runtime/frame.cpp
+    src/runtime/ir_executor.cpp
     src/runtime/interpreter_context.cpp
+    src/runtime/lookup.cpp
 )
 
 target_include_directories(BALTAM_IR
@@ -33,6 +35,8 @@ target_link_libraries(BALTAM_IR
     PUBLIC
         # 当前统一链接本机 `/opt/Baltamatica/lib` 下的运行库，避免和仓库 `deps/`
         # 目录中的旧版 `.so` 混用。`deps/` 只保留头文件用途。
+        /opt/Baltamatica/lib/libbt_core.so
+        /opt/Baltamatica/lib/libbt_worker.so
         /opt/Baltamatica/lib/libbt_ast.so
         /opt/Baltamatica/lib/libbt_ast_base.so
         /opt/Baltamatica/lib/libbt_logger.so

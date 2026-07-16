@@ -31,8 +31,6 @@ public:
 
     bool invalidated = false;
     std::uint64_t revision = 0;
-
-    [[nodiscard]] bool executable() const noexcept;
 };
 
 struct CodeCacheKey {

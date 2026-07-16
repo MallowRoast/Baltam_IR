@@ -1334,7 +1334,8 @@ private:
             }
             case Instruction::StoreSlot: {
                 const auto& inst = static_cast<const StoreSlotInst&>(instruction);
-                return "store " + format_slot_ref(inst.slot) + ", " + format_operand(inst.value);
+                return "store " + format_slot_ref(inst.slot) + ", " +
+                    format_value_id(inst.value);
             }
             case Instruction::GlobalDecl: {
                 const auto& inst = static_cast<const GlobalDeclInst&>(instruction);

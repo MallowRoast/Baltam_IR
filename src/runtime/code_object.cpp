@@ -63,10 +63,6 @@ void PersistentTable::clear(SlotId slot) {
     }
 }
 
-bool CodeObject::executable() const noexcept {
-    return !invalidated && ir_owner != nullptr && unit != nullptr;
-}
-
 bool operator==(const CodeCacheKey& lhs, const CodeCacheKey& rhs) {
     return lhs.source_file == rhs.source_file && lhs.unit_name == rhs.unit_name;
 }

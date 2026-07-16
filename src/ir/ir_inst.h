@@ -297,7 +297,7 @@ public:
     }
 
     Slot slot = InvalidSlot;
-    Operand value;
+    ValueId value = InvalidValueId;
 };
 
 /**

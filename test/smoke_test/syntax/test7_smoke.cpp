@@ -116,16 +116,13 @@ void verify_multi_result_call(const FunctionUnit& function, const FunctionUnit& 
             }
             const auto& store = static_cast<const StoreSlotInst&>(*inst_ptr);
             if ((store.slot == function.return_slots[0] &&
-                 std::holds_alternative<ValueId>(store.value) &&
-                 std::get<ValueId>(store.value) == calls[0]->results[0]) ||
+                 store.value == calls[0]->results[0]) ||
                 (store.slot == function.return_slots[1] &&
-                 std::holds_alternative<ValueId>(store.value) &&
-                 std::get<ValueId>(store.value) == calls[0]->results[1])) {
+                 store.value == calls[0]->results[1])) {
                 ++stores_to_returns;
             }
             if (store.slot == function.return_slots[1] &&
-                std::holds_alternative<ValueId>(store.value) &&
-                std::get<ValueId>(store.value) == calls[1]->results[1]) {
+                store.value == calls[1]->results[1]) {
                 placeholder_call_second_result_stored = true;
             }
         }
