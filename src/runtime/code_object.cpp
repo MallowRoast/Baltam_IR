@@ -51,17 +51,16 @@ void collect_retired_impl(
 
 } // namespace
 
-ba_obj_ptr& PersistentTable::find(SlotId slot) {
-    return values[slot];
-}
-
 ba_obj_ptr PersistentTable::find(SlotId slot) const {
     const auto it = values.find(slot);
     return it != values.end() ? it->second : ba_obj_ptr{};
 }
 
 void PersistentTable::clear(SlotId slot) {
-    values[slot].reset();
+    const auto it = values.find(slot);
+    if (it != values.end()) {
+        it->second.reset();
+    }
 }
 
 bool CodeObject::executable() const noexcept {

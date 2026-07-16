@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <stdexcept>
+
 namespace baltam {
 namespace {
 
@@ -16,10 +17,6 @@ std::size_t checked_index(Id id, std::size_t size, const char* kind) {
 }
 
 } // namespace
-
-ba_obj_ptr& ClosureEnvironment::find(SlotId slot) {
-    return values[slot];
-}
 
 ba_obj_ptr ClosureEnvironment::find(SlotId slot) const {
     const auto it = values.find(slot);

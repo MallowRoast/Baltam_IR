@@ -1,12 +1,6 @@
 #include "runtime/interpreter_context.h"
 
-#include <utility>
-
 namespace baltam {
-
-ba_obj_ptr& BaseWorkspace::find(InternedString name) {
-    return values[std::move(name)];
-}
 
 ba_obj_ptr BaseWorkspace::find(InternedString name) const {
     const auto it = values.find(name);
@@ -14,11 +8,10 @@ ba_obj_ptr BaseWorkspace::find(InternedString name) const {
 }
 
 void BaseWorkspace::clear(InternedString name) {
-    values[std::move(name)].reset();
-}
-
-ba_obj_ptr& GlobalRegistry::find(InternedString name) {
-    return values[std::move(name)];
+    const auto it = values.find(name);
+    if (it != values.end()) {
+        it->second.reset();
+    }
 }
 
 ba_obj_ptr GlobalRegistry::find(InternedString name) const {
@@ -27,7 +20,10 @@ ba_obj_ptr GlobalRegistry::find(InternedString name) const {
 }
 
 void GlobalRegistry::clear(InternedString name) {
-    values[std::move(name)].reset();
+    const auto it = values.find(name);
+    if (it != values.end()) {
+        it->second.reset();
+    }
 }
 
 } // namespace baltam
