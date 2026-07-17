@@ -321,9 +321,6 @@ Instruction
 - `StoreSlotInst`
   - `slot : Slot`
   - `value : Operand`
-- `CopyInst`
-  - `result : ValueId`
-  - `value : Operand`
 
 `LoadSlotInst` / `StoreSlotInst` 表示固定 frame offset 的 slot 访问。对用户可见 slot，
 `LoadSlotInst` 的语义前提是当前程序点已经证明该名字仍是 live frame-slot binding；

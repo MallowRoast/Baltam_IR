@@ -201,7 +201,6 @@ public:
         ValueApply,
         MagicEnd,
         Call,
-        Copy,
         Unary,
         Binary,
         Goto,
@@ -513,20 +512,6 @@ public:
     Operand callee;
     FunctionUnit* m_function_target = nullptr;
     std::vector<Operand> arguments;
-};
-
-/**
- * @brief `copy` 指令。
- */
-class CopyInst final : public Instruction {
-public:
-    /**
-     * @brief 构造 `copy` 指令。
-     */
-    CopyInst() noexcept : Instruction(Instruction::Copy) {}
-
-    ValueId result = InvalidValueId;
-    Operand value;
 };
 
 /**

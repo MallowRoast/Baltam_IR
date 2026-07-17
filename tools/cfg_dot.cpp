@@ -249,12 +249,14 @@ private:
             case Instruction::Const:
             case Instruction::LoadSlot:
             case Instruction::StoreSlot:
+            case Instruction::GlobalDecl:
+            case Instruction::PersistentDecl:
             case Instruction::CreateNamedFunctionHandle:
             case Instruction::CreateAnonymousFunctionHandle:
             case Instruction::Apply:
             case Instruction::ValueApply:
+            case Instruction::MagicEnd:
             case Instruction::Call:
-            case Instruction::Copy:
             case Instruction::Unary:
             case Instruction::Binary:
                 return;

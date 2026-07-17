@@ -205,7 +205,6 @@ verifier 会检查：
 - `StoreSlotInst::value`
 - `ApplyInst::callee_or_base / arguments`
 - `CallInst::callee / arguments`
-- `CopyInst::value`
 - `UnaryInst::operand`
 - `BinaryInst::lhs / rhs`
 - `BranchInst::condition`

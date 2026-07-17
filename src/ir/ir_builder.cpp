@@ -201,10 +201,6 @@ TypeFact instruction_result_type_fact(
         case Instruction::CreateNamedFunctionHandle:
         case Instruction::CreateAnonymousFunctionHandle:
             return scalar_type_fact(TypeSet::function_handle());
-        case Instruction::Copy:
-            return operand_type_fact(
-                value_table,
-                static_cast<const CopyInst*>(instruction)->value);
         case Instruction::Unary:
             return unknown_type_fact();
         case Instruction::Binary:
@@ -317,11 +313,6 @@ void bind_instruction_results(CodeUnit* unit, Instruction* instruction) {
                     : result_type_fact;
                 bind_value_def(value_table, inst->results[i], i, instruction, call_result_type_fact);
             }
-            break;
-        }
-        case Instruction::Copy: {
-            const auto* inst = static_cast<const CopyInst*>(instruction);
-            bind_value_def(value_table, inst->result, 0, instruction, result_type_fact);
             break;
         }
         case Instruction::Unary: {

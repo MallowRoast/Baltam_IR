@@ -239,9 +239,6 @@ void rewrite_instruction_uses(Instruction& instruction, const ValueRewriteMap& r
             rewrite_operands(inst.arguments, replacements);
             break;
         }
-        case Instruction::Copy:
-            rewrite_operand(static_cast<CopyInst&>(instruction).value, replacements);
-            break;
         case Instruction::Unary:
             rewrite_operand(static_cast<UnaryInst&>(instruction).operand, replacements);
             break;

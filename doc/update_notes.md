@@ -189,6 +189,23 @@
 - 统一所有权、slot/value layout、persistent/global/capture 存储位置和 IR continuation 规则，
   见 [InterpreterContext、CodeObject 与 Frame 设计](./runtime_execution_objects_design.md)。
 
+17. 明确 CodeObject 构建期优化分层。
+
+- lowering 后只运行环境无关的 canonical IR pass，不对 `dispatch_type = Dynamic` 的 Matlab
+  运算和调用做常量折叠。
+- CodeObject 构建时可结合当前路径、private 目录、import、builtin/plugin registry 和
+  class/method 表解析动态调用，记录依赖与失效 guard，再运行环境感知优化。
+- `store` 消除和常量折叠必须受分派解析结果约束；dynamic `add` 数据流上不隐式 load slot，
+  但语义上仍可能进入 opaque runtime 分派。
+- 详细设计见 [CodeObject 构建期优化设计](./code_object_optimization_design.md)。
+
+18. 移除 `CopyInst`，并细化 store/load 优化规则。
+
+- high-level IR 不再保留独立 `CopyInst`；值别名应直接通过 `ValueId` 重写表达。
+- `GlobalDeclInst` / `PersistentDeclInst` 在 store/load 优化中只失效声明列表里的 slot。
+- `CreateNamedFunctionHandleInst` 不读写当前 frame slot，不应阻断 frame-local store/load 优化。
+- 详细规则见 [Store / Load 优化规则设计](./store_load_optimization_design.md)。
+
 TODO：
 
 - 增加 `parent_get` 节点

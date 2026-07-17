@@ -75,7 +75,7 @@
 当前实现边界：
 
 - IR builder 只写入“构建时能明确知道”的类型事实
-- `ConstInst` 写入精确常量类型事实；`CopyInst` 复制输入值的类型事实
+- `ConstInst` 写入精确常量类型事实
 - `LoadSlotInst` 只有在读取带 `SlotInfo::value_type` 约束的 slot 时写入类型事实，否则保持
   `unknown`
 - 少数 `dispatch_type = Internal` 的 call / binary primitive 拥有构建期摘要；动态分派
@@ -299,7 +299,6 @@ IR builder 只写入不依赖数据流、不依赖名字解析、也不依赖 Ma
 
 - `ConstInst` 直接给出精确类型事实
 - `LoadSlotInst` 如果读取的 slot 带有 `SlotInfo::value_type` 约束，则直接使用该固定类型
-- `CopyInst` 复制输入值的 `TypeFact`
 - 已知 internal helper / primitive 可以写入保守摘要
 - 其他结果值默认保持 `unknown`
 
@@ -495,7 +494,6 @@ OUT[block] : SlotId -> TypeFact
 - `create_value()` 同步创建占位 `ValueInfo`
 - `append_instruction()` 回填 `def` 和 `result_index`
 - `ConstInst` 写入基础常量类型事实
-- `CopyInst` 传播输入值类型事实
 
 后续建议顺序：
 

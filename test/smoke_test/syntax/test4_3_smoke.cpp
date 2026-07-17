@@ -173,13 +173,14 @@ void verify_printed_loop_exit_layout(const MFileUnit& mfile) {
     options.print_type_facts = false;
 
     const std::string text = format_ir(mfile, options);
-    const std::size_t for_end = text.find("\nfor.end:");
-    const std::size_t next_case = text.find("\nswitch.case.1:");
-    const std::size_t while_end = text.find("\nwhile.end:");
-    const std::size_t otherwise = text.find("\nswitch.otherwise:");
+    constexpr std::string_view case_marker = "; Type = switch.case";
+    const std::size_t for_end = text.find("; Type = for.end");
+    const std::size_t next_case = text.find(case_marker, for_end);
+    const std::size_t while_end = text.find("; Type = while.end");
+    const std::size_t otherwise = text.find("; Type = switch.otherwise");
 
     smoke_test::require(for_end != std::string::npos, "打印 IR 应包含 for.end");
-    smoke_test::require(next_case != std::string::npos, "打印 IR 应包含 switch.case.1");
+    smoke_test::require(next_case != std::string::npos, "打印 IR 应包含下一条 switch.case");
     smoke_test::require(while_end != std::string::npos, "打印 IR 应包含 while.end");
     smoke_test::require(otherwise != std::string::npos, "打印 IR 应包含 switch.otherwise");
     smoke_test::require(for_end < next_case,

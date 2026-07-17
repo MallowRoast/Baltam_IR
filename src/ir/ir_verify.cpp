@@ -385,8 +385,6 @@ private:
                 return static_cast<const CreateNamedFunctionHandleInst&>(instruction).result == value_id && result_index == 0;
             case Instruction::CreateAnonymousFunctionHandle:
                 return static_cast<const CreateAnonymousFunctionHandleInst&>(instruction).result == value_id && result_index == 0;
-            case Instruction::Copy:
-                return static_cast<const CopyInst&>(instruction).result == value_id && result_index == 0;
             case Instruction::Unary:
                 return static_cast<const UnaryInst&>(instruction).result == value_id && result_index == 0;
             case Instruction::Binary:
@@ -658,12 +656,6 @@ private:
                 define_values(inst.results, "call results", inst.source_span);
                 verify_call(inst, unit, mfile);
                 verify_operands(inst.arguments, "call argument", inst.source_span);
-                break;
-            }
-            case Instruction::Copy: {
-                const auto& inst = static_cast<const CopyInst&>(instruction);
-                define_value(inst.result, inst.source_span);
-                verify_operand(inst.value, "copy value", inst.source_span);
                 break;
             }
             case Instruction::Unary: {

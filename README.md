@@ -108,6 +108,11 @@ global/persistent 和 deopt 相关文档视为后续设计约束。
 - [CFG DOT 输出设计](./doc/cfg_dot_design.md)：`ir_cfg_dot` 输出、节点和边的显示约定。
 - [ValueId 类型事实与函数分派设计](./doc/value_type_dispatch_design.md)：`ValueTable` 类型事实和
   后续分派优化。
+- [IR 优化 Pass 文档](./doc/pass/README.md)：已实现 cleanup pass 的优化内容、适用场景和边界。
+- [CodeObject 构建期优化设计](./doc/code_object_optimization_design.md)：静态 IR 优化与
+  CodeObject 阶段环境感知优化的分层、依赖和失效规则。
+- [Store / Load 优化规则设计](./doc/store_load_optimization_design.md)：`load` 转发、
+  `store` 消除和指令 barrier 的安全边界。
 
 ### Runtime 与动态语义设计
 

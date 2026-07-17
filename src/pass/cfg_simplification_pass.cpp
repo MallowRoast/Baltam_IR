@@ -93,7 +93,6 @@ bool normalize_cfg_edges(CodeUnit& unit) {
                 case Instruction::ValueApply:
                 case Instruction::MagicEnd:
                 case Instruction::Call:
-                case Instruction::Copy:
                 case Instruction::Unary:
                 case Instruction::Binary:
                     break;
@@ -191,7 +190,6 @@ void replace_successor(
         case Instruction::ValueApply:
         case Instruction::MagicEnd:
         case Instruction::Call:
-        case Instruction::Copy:
         case Instruction::Unary:
         case Instruction::Binary:
             break;

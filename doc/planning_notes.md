@@ -264,7 +264,7 @@ caller 中同名的静态 slot，或绑定到 caller/base 的动态环境存储�
 - 在 caller 中为 callee 的局部 slot 建立一份重命名后的映射
 - 把 callee 的直线型指令复制到调用点附近
 - 把形参改写成调用点实参，把返回值改写成调用点结果
-- 内联完成后，再跑一轮 DCE、copy propagation 或 SSA 清理
+- 内联完成后，再跑一轮 DCE 或 SSA 清理
 
 #### 这样收窄的原因
 
@@ -448,30 +448,7 @@ CFG simplify 暴露更多机会。
 
 > 操作语义已经静态确定，并且输入都是可用常量事实。
 
-### Pass 9：复制消除 / copy propagation
-
-#### 目标
-
-消除 IR 层面的冗余 `CopyInst` 和单纯值别名，减少无意义的中间 `ValueId`，并简化后续
-DCE、常量折叠和 SSA 提升的输入。
-
-这里的“复制消除”只指 IR 数据流里的 `copy` 或等价别名传播，不是运行时对象的
-copy-on-write，也不是函数调用参数的物理复制。
-
-#### 第一阶段可以覆盖的规则
-
-- `x = copy y` 后，若 `x` 的所有 use 都可安全替换为 `y`，则替换 use 并删除该 `CopyInst`。
-- 多级 copy 链压缩，例如 `x = copy y; z = copy x` 可直接让 `z` 使用 `y`。
-- 常量 copy 可与常量传播协同，让后续常量折叠直接看到原始常量。
-
-#### 需要注意的问题
-
-- 替换 use 时必须维护 `ValueTable`、def-use 信息和 verifier 约束。
-- 如果后续 `CopyInst` 被赋予额外语义，例如 materialize、guarded copy 或对象边界，
-  就不能再按普通别名处理。
-- 当前阶段更适合先做局部、显式 use 列表或扫描式替换版本，等 def-use 基础设施稳定后再扩展。
-
-### Pass 10：死分支消除
+### Pass 9：死分支消除
 
 #### 目标
 
@@ -505,7 +482,7 @@ br label %then
 - 如果条件值来自 `ApplyInst` 或动态 `CallInst`，即使看起来名字是 `true/false` 相关函数，也不能折叠。
 - 对循环分支做消除时要特别注意是否会改变 loop 结构；删除后必须立刻跑 CFG 验证和 CFG simplify。
 
-### Pass 11：死代码消除
+### Pass 10：死代码消除
 
 #### 目标
 
@@ -514,7 +491,6 @@ br label %then
 #### 第一阶段可以覆盖的规则
 
 - 删除未使用结果的 `ConstInst`。
-- 删除未使用结果且无副作用的 `CopyInst`。
 - 删除未使用结果且已知 pure 的 `UnaryInst / BinaryInst`。
 - 删除不可达 block 中的所有指令，这部分通常配合 CFG simplify 完成。
 

@@ -60,9 +60,6 @@ void collect_defined_values(
                 values.insert(value);
             }
             break;
-        case Instruction::Copy:
-            values.insert(static_cast<const CopyInst&>(instruction).result);
-            break;
         case Instruction::Unary:
             values.insert(static_cast<const UnaryInst&>(instruction).result);
             break;
@@ -130,9 +127,6 @@ void collect_used_values(
             collect_operand_values(inst.arguments, values);
             break;
         }
-        case Instruction::Copy:
-            collect_operand_values(static_cast<const CopyInst&>(instruction).value, values);
-            break;
         case Instruction::Unary:
             collect_operand_values(static_cast<const UnaryInst&>(instruction).operand, values);
             break;

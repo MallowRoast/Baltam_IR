@@ -12,6 +12,8 @@
 它不直接实现任何优化，也不在第一版缓存 analysis 结果。具体 pass 只需要声明自己的作用域，
 并在对应 IR 对象上返回 `IRPassResult`。
 
+已实现 pass 的具体优化内容和使用场景见 [IR 优化 Pass 文档](./pass/README.md)。
+
 ## 非目标
 
 - 不把 pass 逻辑塞回 `IRLowerer`。lowering 仍负责生成 canonical high-level IR。

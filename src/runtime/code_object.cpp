@@ -63,6 +63,15 @@ void PersistentTable::clear(SlotId slot) {
     }
 }
 
+NormalizedPath PrivateFunctionTable::find(InternedString name) const {
+    const auto it = files.find(name);
+    return it != files.end() ? it->second : NormalizedPath{};
+}
+
+void PrivateFunctionTable::clear() noexcept {
+    files.clear();
+}
+
 bool operator==(const CodeCacheKey& lhs, const CodeCacheKey& rhs) {
     return lhs.source_file == rhs.source_file && lhs.unit_name == rhs.unit_name;
 }

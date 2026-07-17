@@ -515,10 +515,6 @@ void eval_call(RuntimeFrame& frame, const CallInst& inst) {
         "运行时二元运算返回值未绑定");
 }
 
-[[nodiscard]] ba_obj_ptr eval_copy(RuntimeFrame& frame, const CopyInst& inst) {
-    return eval_operand(frame, inst.value);
-}
-
 [[nodiscard]] std::vector<ba_obj_ptr> eval_return(
     RuntimeFrame& frame,
     const ReturnInst& inst) {
@@ -630,11 +626,6 @@ std::vector<ba_obj_ptr> execute_frame(RuntimeFrame& frame) {
             case Instruction::Call:
                 eval_call(frame, static_cast<const CallInst&>(instruction));
                 break;
-            case Instruction::Copy: {
-                const auto& inst = static_cast<const CopyInst&>(instruction);
-                frame.temporary(inst.result) = eval_copy(frame, inst);
-                break;
-            }
             case Instruction::Unary: {
                 const auto& inst = static_cast<const UnaryInst&>(instruction);
                 frame.temporary(inst.result) = eval_unary(frame, inst);

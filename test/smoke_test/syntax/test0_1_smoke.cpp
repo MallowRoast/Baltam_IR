@@ -1,6 +1,21 @@
+#include "ir/ir_print.h"
+#include "pass/cfg_simplification_pass.h"
+#include "pass/constant_deduplication_pass.h"
+#include "pass/ir_pass_manager.h"
+#include "pass/load_forwarding_pass.h"
+#include "print/obj2str.h"
+#include "runtime/ir_executor.h"
+#include "runtime/interpreter_context.h"
 #include "smoke_test_common.h"
 
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
 #include <iostream>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace baltam {
 namespace {
@@ -78,20 +93,213 @@ void verify_other_important_checks(const IRBuildResult& result) {
     smoke_test::require(ret->values[0].is_valid(), "函数隐式 ret 应返回读取返回槽位后的 ValueId");
 }
 
+const char* slot_tag_name(SlotTag tag) noexcept {
+    switch (tag) {
+        case SlotTag::BaseVar:
+            return "BaseVar";
+        case SlotTag::ScriptVar:
+            return "ScriptVar";
+        case SlotTag::Local:
+            return "Local";
+        case SlotTag::Arg:
+            return "Arg";
+        case SlotTag::Ret:
+            return "Ret";
+        case SlotTag::Capture:
+            return "Capture";
+        case SlotTag::InternalLocal:
+            return "InternalLocal";
+        case SlotTag::Global:
+            return "Global";
+        case SlotTag::Persistent:
+            return "Persistent";
+        case SlotTag::Nargin:
+            return "Nargin";
+        case SlotTag::Nargout:
+            return "Nargout";
+        case SlotTag::Varargin:
+            return "Varargin";
+        case SlotTag::Varargout:
+            return "Varargout";
+    }
+
+    return "Unknown";
+}
+
+std::string format_runtime_value(const ba_obj_ptr& value) {
+    if (value == nullptr) {
+        return "<unbound>";
+    }
+
+    try {
+        return internal::obj2str_one_line(*value);
+    } catch (const std::exception&) {
+        try {
+            return value->brief_type_str();
+        } catch (const std::exception&) {
+            return "<unprintable>";
+        }
+    }
+}
+
+void require_pass_manager_ok(const IRPassManagerResult& result) {
+    if (result.ok()) {
+        return;
+    }
+
+    std::string message = "优化 pass pipeline 不应产生 Error 诊断";
+    for (const IRPassDiagnostic& diagnostic : result.diagnostics) {
+        if (diagnostic.severity == IRPassDiagnostic::Error) {
+            message += ": ";
+            message += diagnostic.pass_name;
+            message += ": ";
+            message += diagnostic.message;
+            break;
+        }
+    }
+    smoke_test::fail(std::move(message));
+}
+
+void optimize_ir(IRModule& module) {
+    IRPassManagerOptions options;
+    options.verify_after_each_pass = true;
+    options.verify_after_pipeline = true;
+
+    IRPassManager manager(options);
+    manager.add_pass<ConstantDeduplicationPass>();
+    manager.add_pass<LoadForwardingPass>();
+    manager.add_pass<CFGSimplificationPass>();
+
+    const IRPassManagerResult result = manager.run(module);
+    require_pass_manager_ok(result);
+}
+
+void print_optimized_ir(const MFileUnit& mfile) {
+    IRPrintOptions options;
+    options.print_source_line_numbers = false;
+
+    std::cout << "===== optimized test0_1 IR =====\n"
+              << format_ir(mfile, options)
+              << "===== end optimized test0_1 IR =====\n";
+}
+
+void print_frame_symbols(const RuntimeFrame& frame, std::string_view label) {
+    std::cout << "===== frame exit symbols: " << label << " =====\n";
+    if (frame.code == nullptr || frame.code->unit == nullptr) {
+        std::cout << "  <no code unit>\n";
+        return;
+    }
+
+    const CodeUnit& unit = *frame.code->unit;
+    if (unit.slot_table.slots.empty()) {
+        std::cout << "  <empty>\n";
+        return;
+    }
+
+    for (const SlotInfo& slot : unit.slot_table.slots) {
+        const std::size_t index = static_cast<std::size_t>(slot.slot.id.value());
+        const ba_obj_ptr value = index < frame.slot_values.size()
+            ? frame.slot_values[index]
+            : ba_obj_ptr{};
+
+        std::cout << "  " << slot.name
+                  << " [" << slot_tag_name(slot.slot.tag) << "] = "
+                  << format_runtime_value(value) << '\n';
+    }
+}
+
+void print_base_workspace_symbols(const BaseWorkspace& workspace) {
+    std::cout << "===== base workspace symbols =====\n";
+    if (workspace.values.empty()) {
+        std::cout << "  <empty>\n";
+        return;
+    }
+
+    std::vector<std::pair<InternedString, ba_obj_ptr>> values;
+    values.reserve(workspace.values.size());
+    for (const auto& entry : workspace.values) {
+        values.push_back(entry);
+    }
+
+    std::sort(
+        values.begin(),
+        values.end(),
+        [](const auto& lhs, const auto& rhs) {
+            return lhs.first < rhs.first;
+        });
+
+    for (const auto& entry : values) {
+        std::cout << "  " << entry.first << " = "
+                  << format_runtime_value(entry.second) << '\n';
+    }
+}
+
+std::shared_ptr<CodeObject> make_code_object(IRBuildResult& result) {
+    smoke_test::require(result.module != nullptr, "运行时 CodeObject 需要 IR module");
+    smoke_test::require(result.mfile != nullptr, "运行时 CodeObject 需要 mfile");
+    smoke_test::require(result.mfile->entry_unit != nullptr, "运行时 CodeObject 需要入口代码单元");
+
+    auto code = std::make_shared<CodeObject>();
+    code->unit = result.mfile->entry_unit;
+    code->ir_owner = std::shared_ptr<IRModule>(std::move(result.module));
+    return code;
+}
+
+void execute_optimized_ir(IRBuildResult& result) {
+    InterpreterContext context;
+    std::shared_ptr<CodeObject> code = make_code_object(result);
+
+    RuntimeFrame base_frame;
+    base_frame.context = &context;
+
+    std::vector<ba_obj_ptr> outputs;
+    {
+        FrameScope base_scope(context, base_frame);
+
+        RuntimeFrame frame;
+        frame.code = code.get();
+        frame.requested_nargout = 1;
+        frame.initialize_storage();
+
+        {
+            FrameScope function_scope(context, frame);
+            outputs = execute_frame(frame);
+            print_frame_symbols(frame, code->unit->name);
+        }
+    }
+
+    print_base_workspace_symbols(context.base_workspace);
+
+    smoke_test::require(outputs.size() == 1, "test0_1 runtime should return one output");
+    smoke_test::require(outputs.front() != nullptr, "test0_1 output must be bound");
+
+    const double actual = outputs.front()->as_double();
+    const double expected = std::sin(3.0) * 2.0;
+    smoke_test::require(
+        std::abs(actual - expected) < 1e-12,
+        "test0_1 runtime output mismatch");
+}
+
 } // namespace
 } // namespace baltam
 
 int main() {
+    int exit_code = 0;
     try {
-        const baltam::smoke_test::SmokeArtifacts artifacts =
+        baltam::smoke_test::SmokeArtifacts artifacts =
             baltam::smoke_test::build_ir(TEST0_1_MFILE_PATH);
         baltam::verify_complete_ir(artifacts.result);
         baltam::verify_core_focus(artifacts.result);
         baltam::verify_other_important_checks(artifacts.result);
+        baltam::optimize_ir(*artifacts.result.module);
+        baltam::print_optimized_ir(*artifacts.result.mfile);
+        baltam::execute_optimized_ir(artifacts.result);
     } catch (const std::exception& ex) {
         std::cerr << "test0_1_smoke 失败: " << ex.what() << '\n';
-        return 1;
+        exit_code = 1;
     }
 
-    return 0;
+    std::cout.flush();
+    std::cerr.flush();
+    std::_Exit(exit_code);
 }

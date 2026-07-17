@@ -68,6 +68,42 @@ void invalidate_environment_states(SlotStateMap& slot_states) {
     }
 }
 
+void invalidate_declared_slots(
+    SlotStateMap& slot_states,
+    const std::vector<Slot>& slots) {
+    for (Slot slot : slots) {
+        if (slot.id.is_valid()) {
+            slot_states.erase(slot.id);
+        }
+    }
+}
+
+[[nodiscard]] bool is_dynamic_operator_barrier(const Instruction& instruction) noexcept {
+    switch (instruction.type()) {
+        case Instruction::Unary:
+            return static_cast<const UnaryInst&>(instruction).dispatch_type != Internal;
+        case Instruction::Binary:
+            return static_cast<const BinaryInst&>(instruction).dispatch_type != Internal;
+        case Instruction::Const:
+        case Instruction::LoadSlot:
+        case Instruction::StoreSlot:
+        case Instruction::GlobalDecl:
+        case Instruction::PersistentDecl:
+        case Instruction::CreateNamedFunctionHandle:
+        case Instruction::CreateAnonymousFunctionHandle:
+        case Instruction::Apply:
+        case Instruction::ValueApply:
+        case Instruction::MagicEnd:
+        case Instruction::Call:
+        case Instruction::Goto:
+        case Instruction::Branch:
+        case Instruction::Return:
+            return false;
+    }
+
+    return false;
+}
+
 void rewrite_value(ValueId& value, const ValueRewriteMap& rewrites) {
     value = resolve_value(value, rewrites);
 }
@@ -124,9 +160,6 @@ void rewrite_instruction_uses(Instruction& instruction, const ValueRewriteMap& r
             rewrite_operands(inst.arguments, rewrites);
             break;
         }
-        case Instruction::Copy:
-            rewrite_operand(static_cast<CopyInst&>(instruction).value, rewrites);
-            break;
         case Instruction::Unary:
             rewrite_operand(static_cast<UnaryInst&>(instruction).operand, rewrites);
             break;
@@ -257,10 +290,24 @@ IRPassResult LoadForwardingPass::run(CodeUnit& unit, IRPassContext& context) {
                     result.changed = true;
                     break;
                 }
+                case Instruction::GlobalDecl:
+                    invalidate_declared_slots(
+                        slot_states,
+                        static_cast<const GlobalDeclInst&>(instruction).slots);
+                    break;
+                case Instruction::PersistentDecl:
+                    invalidate_declared_slots(
+                        slot_states,
+                        static_cast<const PersistentDeclInst&>(instruction).slots);
+                    break;
+                case Instruction::Apply:
+                case Instruction::ValueApply:
+                case Instruction::MagicEnd:
+                case Instruction::Call:
+                    invalidate_environment_states(slot_states);
+                    break;
                 default:
-                    if (instruction.effect == Heap ||
-                        instruction.effect == Env ||
-                        instruction.effect == Opaque) {
+                    if (is_dynamic_operator_barrier(instruction)) {
                         invalidate_environment_states(slot_states);
                     }
                     break;

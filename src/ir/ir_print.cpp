@@ -1383,10 +1383,6 @@ private:
                     inst.callee_kind == CallInst::Direct,
                     inst.dispatch_type == Internal ? "internal." : "");
             }
-            case Instruction::Copy: {
-                const auto& inst = static_cast<const CopyInst&>(instruction);
-                return format_value_result(unit, inst.result) + " = copy " + format_operand(inst.value);
-            }
             case Instruction::Unary: {
                 const auto& inst = static_cast<const UnaryInst&>(instruction);
                 return format_value_result(unit, inst.result) + " = " +

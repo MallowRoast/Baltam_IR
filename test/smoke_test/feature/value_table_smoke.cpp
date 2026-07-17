@@ -183,16 +183,24 @@ void verify_append_instruction_records_simple_type_facts() {
     smoke_test::require(comparison_info->type_fact.is_unknown, "未静态分派的比较结果在类型推导前应保持 unknown");
     smoke_test::require(!comparison_info->type_fact.is_scalar, "未静态分派的比较结果不应断言为标量");
 
-    const ValueId copied = builder.create_value();
-    auto copy_inst = std::make_unique<CopyInst>();
-    copy_inst->result = copied;
-    copy_inst->value = comparison;
-    builder.append_instruction(std::move(copy_inst));
+    const ValueId internal_comparison = builder.create_value();
+    auto internal_cmp_inst = std::make_unique<BinaryInst>();
+    internal_cmp_inst->result = internal_comparison;
+    internal_cmp_inst->op = Gt;
+    internal_cmp_inst->dispatch_type = Internal;
+    internal_cmp_inst->lhs = lhs;
+    internal_cmp_inst->rhs = rhs;
+    builder.append_instruction(std::move(internal_cmp_inst));
 
-    const ValueInfo* copied_info = unit.value_table.find(copied);
-    smoke_test::require(copied_info != nullptr, "copy 结果应存在于 value_table");
-    smoke_test::require(copied_info->type_fact.is_unknown, "copy 应复制输入 unknown 状态");
-    smoke_test::require(!copied_info->type_fact.is_scalar, "copy 应复制输入标量事实");
+    const ValueInfo* internal_comparison_info = unit.value_table.find(internal_comparison);
+    smoke_test::require(internal_comparison_info != nullptr, "internal comparison 结果应存在于 value_table");
+    smoke_test::require(!internal_comparison_info->type_fact.is_unknown,
+                        "internal comparison 应记录已知类型事实");
+    smoke_test::require(internal_comparison_info->type_fact.is_scalar,
+                        "internal comparison 应记录标量事实");
+    smoke_test::require(
+        internal_comparison_info->type_fact.types.definitely(TypeSet::logical()),
+        "internal comparison 应记录 logical 类型事实");
 }
 
 void verify_load_slot_uses_fixed_slot_type() {

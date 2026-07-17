@@ -236,6 +236,7 @@ public:
     CodeUnit* unit = nullptr;
 
     PersistentTable persistent;
+    PrivateFunctionTable private_functions;
 
     bool invalidated = false;
     std::uint64_t revision = 0;
@@ -336,14 +337,29 @@ persistent 属于代码级状态，递归和后续调用共享，不属于任何
 persistent 变量自己的 `SlotId` 在同一个 `CodeObject` revision 内稳定，所以不需要
 额外 offset、`storage_index` 或与整个 slot table 等长的 storage vector。
 
-### 3.4 `invalidated` 与 `revision`
+### 3.4 `private_functions`
+
+`PrivateFunctionTable` 是当前文件对应 `private` 目录的快照表。当前源码还没有实现 private
+目录解析，因此这张表只保留结构，默认保持为空：
+
+```cpp
+struct PrivateFunctionTable {
+    std::unordered_map<InternedString, NormalizedPath> files;
+};
+```
+
+后续接入 private 函数支持时，CodeObject 构建层可以把当前文件所在目录下 `private/` 中可见的函数
+名记录到这里。表项 key 是函数名，value 是对应 private 函数文件的规范化路径。resolver-aware
+优化和 cache invalidation 可以把它作为当前 CodeObject 的 private lookup 快照使用。
+
+### 3.5 `invalidated` 与 `revision`
 
 `CodeObject` 构造成功即表示 IR 已通过 verifier、pass pipeline 已结束且 IR 已冻结，因此不再保存
 构建状态位。新调用只需要检查 `!invalidated`。失效对象不再接受新调用，
 但旧 Frame 可以继续通过裸指针执行它；因此拥有该 `CodeObject` 的 code table 必须把失效对象保留到
 没有活跃 Frame 可能再引用它。`revision` 区分同一源码函数的多个代码版本，不等同于环境 epoch。
 
-### 3.5 构建顺序
+### 3.6 构建顺序
 
 ```text
 parse / load AST
@@ -352,6 +368,7 @@ parse / load AST
   -> PassManager
   -> verify
   -> PersistentTable
+  -> PrivateFunctionTable  // 当前为空
   -> freeze CodeObject
   -> insert CodeObjectCache 或 AnonymousCodeTable
 ```

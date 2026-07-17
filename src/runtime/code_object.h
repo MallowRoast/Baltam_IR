@@ -22,12 +22,20 @@ struct PersistentTable {
     void clear(SlotId slot);
 };
 
+struct PrivateFunctionTable {
+    std::unordered_map<InternedString, NormalizedPath> files;
+
+    [[nodiscard]] NormalizedPath find(InternedString name) const;
+    void clear() noexcept;
+};
+
 class CodeObject final {
 public:
     std::shared_ptr<IRModule> ir_owner;
     CodeUnit* unit = nullptr;
 
     PersistentTable persistent;
+    PrivateFunctionTable private_functions;
 
     bool invalidated = false;
     std::uint64_t revision = 0;
