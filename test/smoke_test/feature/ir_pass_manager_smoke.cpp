@@ -578,6 +578,48 @@ void verify_cfg_simplification_merges_linear_block() {
                         "CFG simplify should rebuild linear predecessor");
 }
 
+void verify_cfg_simplification_merges_return_block_with_body() {
+    ScriptUnit unit;
+    unit.name = "cfg_simplify_return";
+
+    BasicBlock* entry = unit.create_block("entry", SourceSpan::invalid());
+    BasicBlock* exit = unit.create_block("exit", SourceSpan::invalid());
+    smoke_test::require(entry != nullptr && exit != nullptr,
+                        "CFG simplify return test blocks should be created");
+    smoke_test::require(unit.set_entry_block(entry), "CFG simplify return test should set entry");
+
+    unit.value_table.values.push_back({ValueId(0), 0, {}, nullptr});
+
+    append_goto(*entry, *exit);
+    append_const(*exit, ValueId(0));
+    unit.value_table.values[0].def = exit->instructions.front().get();
+
+    auto ret = std::make_unique<ReturnInst>();
+    ret->values.push_back(ValueId(0));
+    ret->parent = exit;
+    exit->instructions.push_back(std::move(ret));
+
+    IRPassContext context;
+    context.unit = &unit;
+
+    CFGSimplificationPass pass;
+    IRPassResult result = pass.run(unit, context);
+    smoke_test::require(result.ok(), "CFG simplify return merge should not error");
+    smoke_test::require(result.changed, "CFG simplify should merge return block with body");
+    smoke_test::require(unit.basic_blocks.size() == 1,
+                        "CFG simplify should remove merged return block");
+    smoke_test::require(unit.basic_blocks[0].get() == entry,
+                        "CFG simplify should keep entry after return merge");
+    smoke_test::require(entry->instructions.size() == 2,
+                        "CFG simplify should move return block body into predecessor");
+    smoke_test::require(entry->instructions[0]->type() == Instruction::Const,
+                        "CFG simplify should move const before merged return");
+    smoke_test::require(entry->instructions[1]->type() == Instruction::Return,
+                        "CFG simplify should merge return terminator into predecessor");
+    smoke_test::require(entry->successors.empty(),
+                        "CFG simplify should clear merged return successors");
+}
+
 void verify_cfg_simplification_ignores_source_boundary() {
     ScriptUnit unit;
     unit.name = "cfg_simplify_source";
@@ -938,6 +980,7 @@ int main() {
         baltam::verify_cfg_simplification_runs_ube();
         baltam::verify_cfg_simplification_normalizes_cfg_edges();
         baltam::verify_cfg_simplification_merges_linear_block();
+        baltam::verify_cfg_simplification_merges_return_block_with_body();
         baltam::verify_cfg_simplification_ignores_source_boundary();
         baltam::verify_dead_branch_elimination_rewrites_constant_branch();
         baltam::verify_constant_deduplication_merges_duplicate_constants();

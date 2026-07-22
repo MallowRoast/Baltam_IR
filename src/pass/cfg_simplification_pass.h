@@ -11,7 +11,7 @@ namespace baltam {
  * - 清理过时 CFG 边。
  * - 删除不可达 block。
  * - 删除空跳转块并折叠连续跳转。
- * - 合并单前驱、单后继的线性 block。
+ * - 合并单前驱的线性 block，以及带正文的单前驱 return 结尾 block。
  */
 class CFGSimplificationPass final : public IRCodeUnitPass {
 public:

@@ -231,20 +231,14 @@ bool remove_empty_goto_block(CodeUnit& unit, BasicBlock& block) {
 bool is_linear_merge_candidate(const BasicBlock& block, const CodeUnit& unit) {
     if (&block == unit.entry_block ||
         block.instructions.size() <= 1U ||
-        block.predecessors.size() != 1U ||
-        block.successors.size() != 1U) {
+        block.predecessors.size() != 1U) {
         return false;
     }
 
     BasicBlock* predecessor = block.predecessors.front();
-    BasicBlock* successor = block.successors.front();
     if (predecessor == nullptr ||
-        successor == nullptr ||
         predecessor == &block ||
-        successor == &block ||
-        predecessor == successor ||
         predecessor->parent != &unit ||
-        successor->parent != &unit ||
         predecessor->instructions.empty()) {
         return false;
     }
@@ -261,12 +255,32 @@ bool is_linear_merge_candidate(const BasicBlock& block, const CodeUnit& unit) {
     }
 
     const Instruction* block_terminator = block.terminator();
-    if (block_terminator == nullptr || block_terminator->type() != Instruction::Goto) {
+    if (block_terminator == nullptr) {
         return false;
     }
 
-    const auto& block_goto = static_cast<const GotoInst&>(*block_terminator);
-    return block_goto.target == successor;
+    switch (block_terminator->type()) {
+        case Instruction::Goto: {
+            if (block.successors.size() != 1U) {
+                return false;
+            }
+
+            BasicBlock* successor = block.successors.front();
+            if (successor == nullptr ||
+                successor == &block ||
+                successor == predecessor ||
+                successor->parent != &unit) {
+                return false;
+            }
+
+            const auto& block_goto = static_cast<const GotoInst&>(*block_terminator);
+            return block_goto.target == successor;
+        }
+        case Instruction::Return:
+            return block.successors.empty();
+        default:
+            return false;
+    }
 }
 
 bool merge_linear_block(CodeUnit& unit, BasicBlock& block) {

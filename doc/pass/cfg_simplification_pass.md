@@ -14,7 +14,7 @@ Pass 名称：`cfg-simplification`
 2. 删除不可达 block
 3. 删除空的 goto bridge block
 4. 折叠连续跳转
-5. 合并单前驱、单后继的线性 block
+5. 合并单前驱 block；如果 block 以 `return` 结束且前面还有正文，也同样并入前驱
 
 示例：
 
@@ -31,6 +31,23 @@ bridge:
 ```text
 entry:
   br label exit
+```
+
+如果目标 block 以 `return` 结束且前面还有正文，也会直接并入前驱：
+
+```text
+entry:
+  br label exit
+
+exit:
+  ret x
+```
+
+可改写为：
+
+```text
+entry:
+  ret x
 ```
 
 ## 不处理的情况
@@ -50,6 +67,9 @@ entry:
 ```text
 constant-deduplication
 load-forwarding
+constant-folding
+dead-branch-elimination
+constant-deduplication
 cfg-simplification
 ```
 
