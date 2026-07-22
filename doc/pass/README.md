@@ -6,6 +6,8 @@
 当前已实现：
 
 - [Constant Deduplication Pass](./constant_deduplication_pass.md)
+- [Constant Folding Pass](./constant_folding_pass.md)
+- [Dead Branch Elimination Pass](./dead_branch_elimination_pass.md)
 - [Load Forwarding Pass](./load_forwarding_pass.md)
 - [Unreachable Block Elimination Pass](./unreachable_block_elimination_pass.md)
 - [CFG Simplification Pass](./cfg_simplification_pass.md)
@@ -22,6 +24,9 @@
 ```text
 constant-deduplication
 load-forwarding
+constant-folding
+dead-branch-elimination
+constant-deduplication
 cfg-simplification
 ```
 

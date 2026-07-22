@@ -1,7 +1,8 @@
 #include "pass/cfg_simplification_pass.h"
 #include "pass/constant_deduplication_pass.h"
-#include "pass/load_forwarding_pass.h"
+#include "pass/dead_branch_elimination_pass.h"
 #include "pass/ir_pass_manager.h"
+#include "pass/load_forwarding_pass.h"
 #include "pass/unreachable_block_elimination_pass.h"
 #include "smoke_test_common.h"
 
@@ -604,6 +605,64 @@ void verify_cfg_simplification_ignores_source_boundary() {
                         "CFG simplify should remove source boundary block");
 }
 
+void verify_dead_branch_elimination_rewrites_constant_branch() {
+    auto module = std::make_unique<IRModule>();
+    auto file = std::make_unique<MFileUnit>();
+    file->module = module.get();
+    file->path = NormalizedPath("dead_branch.m");
+
+    auto script = std::make_unique<ScriptUnit>();
+    script->name = "dead_branch";
+    script->file = file.get();
+
+    BasicBlock* entry = script->create_block("entry", SourceSpan::invalid());
+    BasicBlock* then_block = script->create_block("then", SourceSpan::invalid());
+    BasicBlock* else_block = script->create_block("else", SourceSpan::invalid());
+    smoke_test::require(entry != nullptr && then_block != nullptr && else_block != nullptr,
+                        "dead branch test blocks should be created");
+    smoke_test::require(script->set_entry_block(entry), "dead branch test should set entry");
+
+    script->value_table.values.push_back({ValueId(0), 0, {}, nullptr});
+
+    ConstInst* condition = append_const(*entry, ValueId(0), 1);
+    script->value_table.values[0].def = condition;
+    append_branch(*entry, ValueId(0), *then_block, *else_block);
+    append_return(*then_block);
+    append_return(*else_block);
+
+    file->entry_unit = script.get();
+    file->code_units.push_back(std::move(script));
+    module->files.push_back(std::move(file));
+
+    IRPassManagerOptions options;
+    options.verify_after_pipeline = true;
+
+    IRPassManager manager(options);
+    manager.add_pass<DeadBranchEliminationPass>();
+
+    IRPassManagerResult result = manager.run(*module);
+    smoke_test::require(result.ok(), "dead branch elimination should keep IR verifier-clean");
+    smoke_test::require(result.changed, "dead branch elimination should report changed");
+    smoke_test::require(result.pass_runs.size() == 1, "dead branch elimination should record one summary");
+    smoke_test::require(result.pass_runs[0].pass_name == "dead-branch-elimination",
+                        "dead branch elimination pass name mismatch");
+
+    CodeUnit& unit = *module->files[0]->entry_unit;
+    smoke_test::require(unit.basic_blocks.size() == 3,
+                        "dead branch elimination should not remove blocks by itself");
+    smoke_test::require(entry->instructions.back()->type() == Instruction::Goto,
+                        "dead branch elimination should rewrite branch to goto");
+    const auto& go = static_cast<const GotoInst&>(*entry->instructions.back());
+    smoke_test::require(go.target == then_block,
+                        "dead branch elimination should select the true target");
+    smoke_test::require(entry->successors.size() == 1 && entry->successors[0] == then_block,
+                        "dead branch elimination should keep only the chosen successor");
+    smoke_test::require(then_block->predecessors.size() == 1 && then_block->predecessors[0] == entry,
+                        "dead branch elimination should keep chosen predecessor");
+    smoke_test::require(else_block->predecessors.empty(),
+                        "dead branch elimination should remove dead predecessor");
+}
+
 void verify_constant_deduplication_merges_duplicate_constants() {
     auto module = std::make_unique<IRModule>();
     auto file = std::make_unique<MFileUnit>();
@@ -880,6 +939,7 @@ int main() {
         baltam::verify_cfg_simplification_normalizes_cfg_edges();
         baltam::verify_cfg_simplification_merges_linear_block();
         baltam::verify_cfg_simplification_ignores_source_boundary();
+        baltam::verify_dead_branch_elimination_rewrites_constant_branch();
         baltam::verify_constant_deduplication_merges_duplicate_constants();
         baltam::verify_constant_deduplication_hoists_loop_constants();
         baltam::verify_load_forwarding_eliminates_redundant_load();

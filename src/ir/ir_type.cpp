@@ -25,8 +25,15 @@ std::ostream& operator<<(std::ostream& os, TypeSet type_set) {
     };
 
     append_leaf(TypeSet::logical(), "logical");
+    append_leaf(TypeSet::int8(), "int8");
+    append_leaf(TypeSet::int16(), "int16");
+    append_leaf(TypeSet::int32(), "int32");
     append_leaf(TypeSet::int64(), "int64");
+    append_leaf(TypeSet::uint8(), "uint8");
+    append_leaf(TypeSet::uint16(), "uint16");
+    append_leaf(TypeSet::uint32(), "uint32");
     append_leaf(TypeSet::uint64(), "uint64");
+    append_leaf(TypeSet::float32(), "single");
     append_leaf(TypeSet::float64(), "double");
     append_leaf(TypeSet::complex(), "complex128");
     append_leaf(TypeSet::char_array(), "char_array");

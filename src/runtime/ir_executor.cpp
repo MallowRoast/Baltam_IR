@@ -38,6 +38,12 @@ namespace {
     if (std::get_if<EmptyDoubleMatrixConstant>(&constant) != nullptr) {
         return ba_obj::make_default_value("double", {0, 0});
     }
+    if (const auto* value = std::get_if<RuntimeObjectConstant>(&constant)) {
+        if (value->value == nullptr) {
+            throw std::runtime_error("运行时对象常量未绑定");
+        }
+        return std::make_shared<ba_obj>(*value->value);
+    }
 
     throw std::runtime_error("未知的运行时常量类型");
 }

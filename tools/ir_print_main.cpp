@@ -3,11 +3,14 @@
 #include "ir/ir_verify.h"
 #include "pass/cfg_simplification_pass.h"
 #include "pass/constant_deduplication_pass.h"
+#include "pass/constant_folding_pass.h"
+#include "pass/dead_branch_elimination_pass.h"
 #include "pass/ir_pass_manager.h"
 #include "pass/load_forwarding_pass.h"
 
 #include <charconv>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -235,6 +238,9 @@ bool run_default_pass_pipeline(baltam::IRModule& module) {
     baltam::IRPassManager pass_manager(pass_options);
     pass_manager.add_pass<baltam::ConstantDeduplicationPass>();
     pass_manager.add_pass<baltam::LoadForwardingPass>();
+    pass_manager.add_pass<baltam::ConstantFoldingPass>();
+    pass_manager.add_pass<baltam::DeadBranchEliminationPass>();
+    pass_manager.add_pass<baltam::ConstantDeduplicationPass>();
     pass_manager.add_pass<baltam::CFGSimplificationPass>();
 
     return report_pass_result(pass_manager.run(module));
@@ -341,5 +347,8 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    return run(options);
+    const int exit_code = run(options);
+    std::cout.flush();
+    std::cerr.flush();
+    std::_Exit(exit_code);
 }

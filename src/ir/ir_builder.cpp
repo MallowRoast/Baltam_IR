@@ -1,5 +1,8 @@
 #include "ir/ir_builder.h"
 
+#include "ba_obj/ba_obj.h"
+#include "ba_obj/ba_type.h"
+
 #include <algorithm>
 #include <string>
 #include <type_traits>
@@ -68,6 +71,64 @@ TypeFact constant_type_fact(const StringLiteralConstant&) noexcept {
 
 TypeFact constant_type_fact(const EmptyDoubleMatrixConstant&) noexcept {
     return type_fact(TypeSet::float64(), false);
+}
+
+TypeSet type_set_from_runtime_type(int type) noexcept {
+    switch (type) {
+        case ba_bool_mat:
+            return TypeSet::logical();
+        case ba_int8_mat:
+            return TypeSet::int8();
+        case ba_int16_mat:
+            return TypeSet::int16();
+        case ba_int32_mat:
+            return TypeSet::int32();
+        case ba_int64_mat:
+            return TypeSet::int64();
+        case ba_uint8_mat:
+            return TypeSet::uint8();
+        case ba_uint16_mat:
+            return TypeSet::uint16();
+        case ba_uint32_mat:
+            return TypeSet::uint32();
+        case ba_uint64_mat:
+            return TypeSet::uint64();
+        case ba_single_mat:
+            return TypeSet::float32();
+        case ba_double_mat:
+            return TypeSet::float64();
+        case ba_complex_double_mat:
+            return TypeSet::complex();
+        case ba_char_mat:
+            return TypeSet::char_array();
+        case ba_string:
+            return TypeSet::string_scalar();
+        case ba_cell:
+            return TypeSet::cell_array();
+        case ba_struct:
+            return TypeSet::struct_array();
+        case ba_function_handle:
+            return TypeSet::function_handle();
+        case ba_extern:
+            return TypeSet::external_object();
+        default:
+            break;
+    }
+
+    return TypeSet::bottom();
+}
+
+TypeFact constant_type_fact(const RuntimeObjectConstant& constant) noexcept {
+    if (constant.value == nullptr) {
+        return unknown_type_fact();
+    }
+
+    const TypeSet types = type_set_from_runtime_type(constant.value->type());
+    if (types.empty()) {
+        return unknown_type_fact();
+    }
+
+    return type_fact(types, constant.value->is_scalar());
 }
 
 TypeFact internal_call_result_type_fact(const CallInst& inst, std::size_t result_index) noexcept {

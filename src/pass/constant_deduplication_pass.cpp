@@ -68,6 +68,12 @@ void hash_combine(std::size_t& seed, std::size_t value) noexcept {
     return true;
 }
 
+[[nodiscard]] bool constant_equal(
+    const RuntimeObjectConstant& lhs,
+    const RuntimeObjectConstant& rhs) noexcept {
+    return lhs.value == rhs.value && lhs.folded == rhs.folded;
+}
+
 [[nodiscard]] std::size_t constant_hash(LogicalConstant value) {
     return std::hash<bool>{}(value.value);
 }
@@ -100,6 +106,12 @@ void hash_combine(std::size_t& seed, std::size_t value) noexcept {
 
 [[nodiscard]] std::size_t constant_hash(EmptyDoubleMatrixConstant) {
     return 0x517cc1b727220a95ULL;
+}
+
+[[nodiscard]] std::size_t constant_hash(const RuntimeObjectConstant& value) {
+    std::size_t seed = std::hash<const ba_obj*>{}(value.value.get());
+    hash_combine(seed, std::hash<bool>{}(value.folded));
+    return seed;
 }
 
 struct ConstantHash {

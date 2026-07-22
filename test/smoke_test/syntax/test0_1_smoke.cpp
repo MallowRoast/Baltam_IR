@@ -1,6 +1,9 @@
 #include "ir/ir_print.h"
+#include "ba_obj/ba_type.h"
 #include "pass/cfg_simplification_pass.h"
 #include "pass/constant_deduplication_pass.h"
+#include "pass/constant_folding_pass.h"
+#include "pass/dead_branch_elimination_pass.h"
 #include "pass/ir_pass_manager.h"
 #include "pass/load_forwarding_pass.h"
 #include "print/obj2str.h"
@@ -168,10 +171,72 @@ void optimize_ir(IRModule& module) {
     IRPassManager manager(options);
     manager.add_pass<ConstantDeduplicationPass>();
     manager.add_pass<LoadForwardingPass>();
+    manager.add_pass<ConstantFoldingPass>();
+    manager.add_pass<DeadBranchEliminationPass>();
+    manager.add_pass<ConstantDeduplicationPass>();
     manager.add_pass<CFGSimplificationPass>();
 
     const IRPassManagerResult result = manager.run(module);
     require_pass_manager_ok(result);
+}
+
+void verify_constant_folding_result(const IRBuildResult& result) {
+    const CodeUnit* unit = result.mfile->entry_unit;
+    smoke_test::require(unit != nullptr, "常量折叠检查需要入口代码单元");
+
+    bool found_folded_three = false;
+    bool found_folded_sin = false;
+    bool found_folded_condition = false;
+    for (const auto& block_ptr : unit->basic_blocks) {
+        if (block_ptr == nullptr) {
+            continue;
+        }
+
+        for (const auto& inst_ptr : block_ptr->instructions) {
+            if (inst_ptr == nullptr || inst_ptr->type() != Instruction::Const) {
+                continue;
+            }
+
+            const auto& inst = static_cast<const ConstInst&>(*inst_ptr);
+            const auto* runtime_constant =
+                std::get_if<RuntimeObjectConstant>(&inst.value);
+            if (runtime_constant == nullptr ||
+                !runtime_constant->folded ||
+                runtime_constant->value == nullptr) {
+                continue;
+            }
+
+            const double value = runtime_constant->value->as_double();
+            if (runtime_constant->value->type() == ba_double_mat &&
+                std::abs(value - 3.0) < 1e-12) {
+                found_folded_three = true;
+            }
+            if (runtime_constant->value->type() == ba_double_mat &&
+                std::abs(value - std::sin(3.0)) < 1e-12) {
+                found_folded_sin = true;
+            }
+            if (runtime_constant->value->type() == ba_bool_mat &&
+                runtime_constant->value->as_bool()) {
+                found_folded_condition = true;
+            }
+        }
+    }
+
+    smoke_test::require(
+        found_folded_three,
+        "test0_1 优化后应包含由 1 + 2 折叠出的常量 3");
+    smoke_test::require(
+        found_folded_sin,
+        "test0_1 优化后应包含由 sin(3) 折叠出的常量");
+    smoke_test::require(
+        found_folded_condition,
+        "test0_1 优化后应包含由 b > 0 折叠出的 logical 常量");
+    smoke_test::require(
+        smoke_test::count_instructions(*unit, Instruction::Call) == 0,
+        "test0_1 优化后 sin(a) direct call 应被常量折叠删除");
+    smoke_test::require(
+        smoke_test::count_instructions(*unit, Instruction::Branch) == 0,
+        "test0_1 优化后常量分支应被死分支消除删除");
 }
 
 void print_optimized_ir(const MFileUnit& mfile) {
@@ -292,6 +357,7 @@ int main() {
         baltam::verify_core_focus(artifacts.result);
         baltam::verify_other_important_checks(artifacts.result);
         baltam::optimize_ir(*artifacts.result.module);
+        baltam::verify_constant_folding_result(artifacts.result);
         baltam::print_optimized_ir(*artifacts.result.mfile);
         baltam::execute_optimized_ir(artifacts.result);
     } catch (const std::exception& ex) {

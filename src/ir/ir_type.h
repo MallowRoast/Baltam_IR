@@ -16,7 +16,7 @@ namespace baltam {
  * - 多 bit 表示 union。
  */
 struct TypeSet {
-    static constexpr std::size_t BitCount = 11;
+    static constexpr std::size_t BitCount = 18;
     static_assert(BitCount <= 64, "TypeSet::BitCount must fit in uint64_t");
 
     using bits_type = std::bitset<BitCount>;
@@ -104,8 +104,36 @@ struct TypeSet {
         return TypeSet(Int64Mask);
     }
 
+    [[nodiscard]] static constexpr TypeSet int8() noexcept {
+        return TypeSet(Int8Mask);
+    }
+
+    [[nodiscard]] static constexpr TypeSet int16() noexcept {
+        return TypeSet(Int16Mask);
+    }
+
+    [[nodiscard]] static constexpr TypeSet int32() noexcept {
+        return TypeSet(Int32Mask);
+    }
+
     [[nodiscard]] static constexpr TypeSet uint64() noexcept {
         return TypeSet(UInt64Mask);
+    }
+
+    [[nodiscard]] static constexpr TypeSet uint8() noexcept {
+        return TypeSet(UInt8Mask);
+    }
+
+    [[nodiscard]] static constexpr TypeSet uint16() noexcept {
+        return TypeSet(UInt16Mask);
+    }
+
+    [[nodiscard]] static constexpr TypeSet uint32() noexcept {
+        return TypeSet(UInt32Mask);
+    }
+
+    [[nodiscard]] static constexpr TypeSet float32() noexcept {
+        return TypeSet(Float32Mask);
     }
 
     [[nodiscard]] static constexpr TypeSet float64() noexcept {
@@ -141,11 +169,19 @@ struct TypeSet {
     }
 
     [[nodiscard]] static constexpr TypeSet integer() noexcept {
-        return TypeSet(Int64Mask | UInt64Mask);
+        return TypeSet(
+            Int8Mask |
+            Int16Mask |
+            Int32Mask |
+            Int64Mask |
+            UInt8Mask |
+            UInt16Mask |
+            UInt32Mask |
+            UInt64Mask);
     }
 
     [[nodiscard]] static constexpr TypeSet floating() noexcept {
-        return TypeSet(Float64Mask | ComplexMask);
+        return TypeSet(Float32Mask | Float64Mask | ComplexMask);
     }
 
     [[nodiscard]] static constexpr TypeSet text() noexcept {
@@ -163,8 +199,15 @@ struct TypeSet {
     [[nodiscard]] static constexpr TypeSet numeric() noexcept {
         return TypeSet(
             LogicalMask |
+            Int8Mask |
+            Int16Mask |
+            Int32Mask |
             Int64Mask |
+            UInt8Mask |
+            UInt16Mask |
+            UInt32Mask |
             UInt64Mask |
+            Float32Mask |
             Float64Mask |
             ComplexMask);
     }
@@ -173,16 +216,23 @@ struct TypeSet {
 
 private:
     static constexpr std::uint64_t LogicalMask = std::uint64_t{1} << 0;
-    static constexpr std::uint64_t Int64Mask = std::uint64_t{1} << 1;
-    static constexpr std::uint64_t UInt64Mask = std::uint64_t{1} << 2;
-    static constexpr std::uint64_t Float64Mask = std::uint64_t{1} << 3;
-    static constexpr std::uint64_t ComplexMask = std::uint64_t{1} << 4;
-    static constexpr std::uint64_t CharMask = std::uint64_t{1} << 5;
-    static constexpr std::uint64_t StringMask = std::uint64_t{1} << 6;
-    static constexpr std::uint64_t CellMask = std::uint64_t{1} << 7;
-    static constexpr std::uint64_t StructMask = std::uint64_t{1} << 8;
-    static constexpr std::uint64_t FunctionHandleMask = std::uint64_t{1} << 9;
-    static constexpr std::uint64_t ExternalObjectMask = std::uint64_t{1} << 10;
+    static constexpr std::uint64_t Int8Mask = std::uint64_t{1} << 1;
+    static constexpr std::uint64_t Int16Mask = std::uint64_t{1} << 2;
+    static constexpr std::uint64_t Int32Mask = std::uint64_t{1} << 3;
+    static constexpr std::uint64_t Int64Mask = std::uint64_t{1} << 4;
+    static constexpr std::uint64_t UInt8Mask = std::uint64_t{1} << 5;
+    static constexpr std::uint64_t UInt16Mask = std::uint64_t{1} << 6;
+    static constexpr std::uint64_t UInt32Mask = std::uint64_t{1} << 7;
+    static constexpr std::uint64_t UInt64Mask = std::uint64_t{1} << 8;
+    static constexpr std::uint64_t Float32Mask = std::uint64_t{1} << 9;
+    static constexpr std::uint64_t Float64Mask = std::uint64_t{1} << 10;
+    static constexpr std::uint64_t ComplexMask = std::uint64_t{1} << 11;
+    static constexpr std::uint64_t CharMask = std::uint64_t{1} << 12;
+    static constexpr std::uint64_t StringMask = std::uint64_t{1} << 13;
+    static constexpr std::uint64_t CellMask = std::uint64_t{1} << 14;
+    static constexpr std::uint64_t StructMask = std::uint64_t{1} << 15;
+    static constexpr std::uint64_t FunctionHandleMask = std::uint64_t{1} << 16;
+    static constexpr std::uint64_t ExternalObjectMask = std::uint64_t{1} << 17;
     static constexpr std::uint64_t AnyMask =
         BitCount >= 64
             ? ~std::uint64_t{0}

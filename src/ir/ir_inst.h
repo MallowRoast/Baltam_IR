@@ -2,6 +2,8 @@
 
 #include "ir/ir_base_types.h"
 
+#include "core.h"
+
 #include <cstdint>
 #include <variant>
 #include <vector>
@@ -68,6 +70,17 @@ struct StringLiteralConstant {
 struct EmptyDoubleMatrixConstant {};
 
 /**
+ * @brief 运行时对象常量。
+ *
+ * 该常量用于承载优化 pass 通过 builtin 计算出的结果。`value` 被视为 IR literal，
+ * executor 取值时应返回副本，避免后续运行时写入修改 IR 中保存的常量对象。
+ */
+struct RuntimeObjectConstant {
+    const_ba_obj_ptr value;
+    bool folded = true;
+};
+
+/**
  * @brief 第一版立即数常量集合。
  */
 using Constant = std::variant<
@@ -78,7 +91,8 @@ using Constant = std::variant<
     Complex128Constant,
     CharLiteralConstant,
     StringLiteralConstant,
-    EmptyDoubleMatrixConstant>;
+    EmptyDoubleMatrixConstant,
+    RuntimeObjectConstant>;
 
 /**
  * @brief 一元操作类型。

@@ -2,8 +2,12 @@
 
 #include "ir/ir_units.h"
 
+#include "ba_obj/ba_obj.h"
+#include "print/obj2str.h"
+
 #include <algorithm>
 #include <cctype>
+#include <exception>
 #include <fstream>
 #include <optional>
 #include <sstream>
@@ -90,6 +94,27 @@ std::string format_symbol(std::string_view text) {
     return "@\"" + escape_text(text) + '"';
 }
 
+std::string format_runtime_object_constant(const RuntimeObjectConstant& constant) {
+    if (constant.value == nullptr) {
+        return "<null>";
+    }
+
+    try {
+        return internal::obj2str_one_line(*constant.value);
+    } catch (const std::exception&) {
+        try {
+            return constant.value->brief_type_str();
+        } catch (const std::exception&) {
+            return "<unprintable>";
+        }
+    }
+}
+
+bool is_folded_runtime_constant(const Constant& constant) noexcept {
+    const auto* value = std::get_if<RuntimeObjectConstant>(&constant);
+    return value != nullptr && value->folded;
+}
+
 std::string format_value_id(ValueId value_id) {
     if (!value_id.is_valid()) {
         return "%<invalid>";
@@ -133,6 +158,8 @@ std::string format_constant(const Constant& constant) {
                 return '\'' + escape_text(value.value, '\'') + '\'';
             } else if constexpr (std::is_same_v<T, StringLiteralConstant>) {
                 return '"' + escape_text(value.value) + '"';
+            } else if constexpr (std::is_same_v<T, RuntimeObjectConstant>) {
+                return format_runtime_object_constant(value);
             } else {
                 return "[]";
             }
@@ -1324,8 +1351,12 @@ private:
         switch (instruction.type()) {
             case Instruction::Const: {
                 const auto& inst = static_cast<const ConstInst&>(instruction);
-                return format_value_result(unit, inst.result) +
+                std::string text = format_value_result(unit, inst.result) +
                     " = const " + format_constant(inst.value);
+                if (is_folded_runtime_constant(inst.value)) {
+                    text += " ; folded";
+                }
+                return text;
             }
             case Instruction::LoadSlot: {
                 const auto& inst = static_cast<const LoadSlotInst&>(instruction);
