@@ -4,6 +4,7 @@
 #include "pass/constant_deduplication_pass.h"
 #include "pass/constant_folding_pass.h"
 #include "pass/dead_branch_elimination_pass.h"
+#include "pass/dead_code_elimination_pass.h"
 #include "pass/ir_pass_manager.h"
 #include "pass/load_forwarding_pass.h"
 #include "print/obj2str.h"
@@ -17,7 +18,9 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace baltam {
@@ -169,24 +172,127 @@ void optimize_ir(IRModule& module) {
     options.verify_after_pipeline = true;
 
     IRPassManager manager(options);
-    manager.add_pass<ConstantDeduplicationPass>();
     manager.add_pass<LoadForwardingPass>();
     manager.add_pass<ConstantFoldingPass>();
     manager.add_pass<DeadBranchEliminationPass>();
-    manager.add_pass<ConstantDeduplicationPass>();
     manager.add_pass<CFGSimplificationPass>();
+    manager.add_pass<LoadForwardingPass>();
+    manager.add_pass<ConstantFoldingPass>();
+    manager.add_pass<ConstantDeduplicationPass>();
+    manager.add_pass<DeadCodeEliminationPass>();
 
     const IRPassManagerResult result = manager.run(module);
     require_pass_manager_ok(result);
+}
+
+void mark_value_used(ValueId value, std::unordered_set<ValueId>& values) {
+    if (value.is_valid()) {
+        values.insert(value);
+    }
+}
+
+void collect_operand_uses(const Operand& operand, std::unordered_set<ValueId>& values) {
+    if (const auto* value = std::get_if<ValueId>(&operand)) {
+        mark_value_used(*value, values);
+    }
+}
+
+void collect_operand_uses(
+    const std::vector<Operand>& operands,
+    std::unordered_set<ValueId>& values) {
+    for (const Operand& operand : operands) {
+        collect_operand_uses(operand, values);
+    }
+}
+
+void collect_instruction_uses(
+    const Instruction& instruction,
+    std::unordered_set<ValueId>& values) {
+    switch (instruction.type()) {
+        case Instruction::StoreSlot:
+            mark_value_used(static_cast<const StoreSlotInst&>(instruction).value, values);
+            break;
+        case Instruction::CreateAnonymousFunctionHandle:
+            for (const auto& capture :
+                 static_cast<const CreateAnonymousFunctionHandleInst&>(instruction).captures) {
+                mark_value_used(capture.captured_value, values);
+            }
+            break;
+        case Instruction::Apply: {
+            const auto& inst = static_cast<const ApplyInst&>(instruction);
+            collect_operand_uses(inst.callee_or_base, values);
+            collect_operand_uses(inst.arguments, values);
+            break;
+        }
+        case Instruction::ValueApply: {
+            const auto& inst = static_cast<const ValueApplyInst&>(instruction);
+            mark_value_used(inst.base, values);
+            collect_operand_uses(inst.arguments, values);
+            break;
+        }
+        case Instruction::MagicEnd:
+            for (const auto& context :
+                 static_cast<const MagicEndInst&>(instruction).candidate_contexts) {
+                collect_operand_uses(context.callee_or_base, values);
+            }
+            break;
+        case Instruction::Call: {
+            const auto& inst = static_cast<const CallInst&>(instruction);
+            collect_operand_uses(inst.callee, values);
+            collect_operand_uses(inst.arguments, values);
+            break;
+        }
+        case Instruction::Unary:
+            collect_operand_uses(static_cast<const UnaryInst&>(instruction).operand, values);
+            break;
+        case Instruction::Binary: {
+            const auto& inst = static_cast<const BinaryInst&>(instruction);
+            collect_operand_uses(inst.lhs, values);
+            collect_operand_uses(inst.rhs, values);
+            break;
+        }
+        case Instruction::Branch:
+            collect_operand_uses(static_cast<const BranchInst&>(instruction).condition, values);
+            break;
+        case Instruction::Return:
+            for (ValueId value : static_cast<const ReturnInst&>(instruction).values) {
+                mark_value_used(value, values);
+            }
+            break;
+        case Instruction::Const:
+        case Instruction::LoadSlot:
+        case Instruction::GlobalDecl:
+        case Instruction::PersistentDecl:
+        case Instruction::CreateNamedFunctionHandle:
+        case Instruction::Goto:
+            break;
+    }
+}
+
+std::unordered_set<ValueId> collect_used_values(const CodeUnit& unit) {
+    std::unordered_set<ValueId> values;
+    for (const auto& block_ptr : unit.basic_blocks) {
+        if (block_ptr == nullptr) {
+            continue;
+        }
+
+        for (const auto& inst_ptr : block_ptr->instructions) {
+            if (inst_ptr != nullptr) {
+                collect_instruction_uses(*inst_ptr, values);
+            }
+        }
+    }
+    return values;
 }
 
 void verify_constant_folding_result(const IRBuildResult& result) {
     const CodeUnit* unit = result.mfile->entry_unit;
     smoke_test::require(unit != nullptr, "常量折叠检查需要入口代码单元");
 
+    const std::unordered_set<ValueId> used_values = collect_used_values(*unit);
     bool found_folded_three = false;
     bool found_folded_sin = false;
-    bool found_folded_condition = false;
+    bool found_folded_product = false;
     for (const auto& block_ptr : unit->basic_blocks) {
         if (block_ptr == nullptr) {
             continue;
@@ -198,6 +304,10 @@ void verify_constant_folding_result(const IRBuildResult& result) {
             }
 
             const auto& inst = static_cast<const ConstInst&>(*inst_ptr);
+            smoke_test::require(
+                used_values.find(inst.result) != used_values.end(),
+                "test0_1 优化后不应保留未使用的 const");
+
             const auto* runtime_constant =
                 std::get_if<RuntimeObjectConstant>(&inst.value);
             if (runtime_constant == nullptr ||
@@ -215,9 +325,9 @@ void verify_constant_folding_result(const IRBuildResult& result) {
                 std::abs(value - std::sin(3.0)) < 1e-12) {
                 found_folded_sin = true;
             }
-            if (runtime_constant->value->type() == ba_bool_mat &&
-                runtime_constant->value->as_bool()) {
-                found_folded_condition = true;
+            if (runtime_constant->value->type() == ba_double_mat &&
+                std::abs(value - (std::sin(3.0) * 2.0)) < 1e-12) {
+                found_folded_product = true;
             }
         }
     }
@@ -229,11 +339,17 @@ void verify_constant_folding_result(const IRBuildResult& result) {
         found_folded_sin,
         "test0_1 优化后应包含由 sin(3) 折叠出的常量");
     smoke_test::require(
-        found_folded_condition,
-        "test0_1 优化后应包含由 b > 0 折叠出的 logical 常量");
+        found_folded_product,
+        "test0_1 优化后应包含由 sin(3) * 2 折叠出的常量");
     smoke_test::require(
         smoke_test::count_instructions(*unit, Instruction::Call) == 0,
         "test0_1 优化后 sin(a) direct call 应被常量折叠删除");
+    smoke_test::require(
+        smoke_test::count_instructions(*unit, Instruction::Binary) == 0,
+        "test0_1 优化后 mul 应被常量折叠删除");
+    smoke_test::require(
+        smoke_test::count_instructions(*unit, Instruction::LoadSlot) == 0,
+        "test0_1 优化后不应残留 load");
     smoke_test::require(
         smoke_test::count_instructions(*unit, Instruction::Branch) == 0,
         "test0_1 优化后常量分支应被死分支消除删除");

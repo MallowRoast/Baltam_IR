@@ -72,14 +72,19 @@ br label L1
 默认 cleanup pipeline 中放在 constant folding 之后、CFG simplification 之前：
 
 ```text
-constant-deduplication
 load-forwarding
 constant-folding
 dead-branch-elimination
-constant-deduplication
 cfg-simplification
+load-forwarding
+constant-folding
+constant-deduplication
+dead-code-elimination
 ```
 
 `constant-folding` 负责把比较结果、`sin` 等白名单 direct call 结果折叠为常量；
 `dead-branch-elimination` 把常量条件分支改成无条件跳转；
-`cfg-simplification` 随后删除不可达块并合并线性 CFG。
+`cfg-simplification` 随后删除不可达块并合并线性 CFG；
+后置 `load-forwarding` 清理合并后暴露的 `store; load`；
+后置 `constant-folding` 折叠 load forwarding 进一步暴露出的常量运算；
+`dead-code-elimination` 清理不再被使用的常量。

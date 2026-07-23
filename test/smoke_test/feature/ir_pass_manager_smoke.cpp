@@ -1,6 +1,7 @@
 #include "pass/cfg_simplification_pass.h"
 #include "pass/constant_deduplication_pass.h"
 #include "pass/dead_branch_elimination_pass.h"
+#include "pass/dead_code_elimination_pass.h"
 #include "pass/ir_pass_manager.h"
 #include "pass/load_forwarding_pass.h"
 #include "pass/unreachable_block_elimination_pass.h"
@@ -705,6 +706,143 @@ void verify_dead_branch_elimination_rewrites_constant_branch() {
                         "dead branch elimination should remove dead predecessor");
 }
 
+void verify_dead_code_elimination_removes_unused_constants() {
+    auto module = std::make_unique<IRModule>();
+    auto file = std::make_unique<MFileUnit>();
+    file->module = module.get();
+    file->path = NormalizedPath("dead_code_const.m");
+
+    auto script = std::make_unique<ScriptUnit>();
+    script->name = "dead_code_const";
+    script->file = file.get();
+
+    BasicBlock* entry = script->create_block("entry", SourceSpan::invalid());
+    smoke_test::require(entry != nullptr, "dead code const test block should be created");
+    smoke_test::require(script->set_entry_block(entry), "dead code const test should set entry");
+
+    script->value_table.values.push_back({ValueId(0), 0, {}, nullptr});
+    script->value_table.values.push_back({ValueId(1), 0, {}, nullptr});
+
+    ConstInst* dead_const = append_const(*entry, ValueId(0), 1);
+    ConstInst* live_const = append_const(*entry, ValueId(1), 2);
+    script->value_table.values[0].def = dead_const;
+    script->value_table.values[1].def = live_const;
+
+    auto ret = std::make_unique<ReturnInst>();
+    ret->values.push_back(ValueId(1));
+    ret->parent = entry;
+    entry->instructions.push_back(std::move(ret));
+
+    file->entry_unit = script.get();
+    file->code_units.push_back(std::move(script));
+    module->files.push_back(std::move(file));
+
+    IRPassManagerOptions options;
+    options.verify_after_pipeline = true;
+
+    IRPassManager manager(options);
+    manager.add_pass<DeadCodeEliminationPass>();
+
+    IRPassManagerResult result = manager.run(*module);
+    smoke_test::require(result.ok(), "dead code elimination should keep const case verifier-clean");
+    smoke_test::require(result.changed, "dead code elimination should remove unused const");
+    smoke_test::require(result.pass_runs.size() == 1, "dead code elimination should record one summary");
+    smoke_test::require(result.pass_runs[0].pass_name == "dead-code-elimination",
+                        "dead code elimination pass name mismatch");
+
+    CodeUnit& unit = *module->files[0]->entry_unit;
+    BasicBlock& block = *unit.entry_block;
+    smoke_test::require(block.instructions.size() == 2,
+                        "dead code elimination should keep live const and return");
+    smoke_test::require(block.instructions[0]->type() == Instruction::Const,
+                        "dead code elimination should keep live const");
+    const auto& remaining_const = static_cast<const ConstInst&>(*block.instructions[0]);
+    smoke_test::require(remaining_const.result == ValueId(1),
+                        "dead code elimination should remove only the unused const");
+    smoke_test::require(unit.value_table.values[0].def == nullptr,
+                        "dead code elimination should clear removed const def");
+    smoke_test::require(unit.value_table.values[1].def == block.instructions[0].get(),
+                        "dead code elimination should keep live const def");
+}
+
+void verify_dead_code_elimination_removes_overwritten_store() {
+    auto module = std::make_unique<IRModule>();
+    auto file = std::make_unique<MFileUnit>();
+    file->module = module.get();
+    file->path = NormalizedPath("dead_store.m");
+
+    auto script = std::make_unique<ScriptUnit>();
+    script->name = "dead_store";
+    script->file = file.get();
+
+    BasicBlock* entry = script->create_block("entry", SourceSpan::invalid());
+    smoke_test::require(entry != nullptr, "dead store test block should be created");
+    smoke_test::require(script->set_entry_block(entry), "dead store test should set entry");
+
+    const Slot slot{SlotId(0), SlotTag::Local};
+    script->slot_table.slots.push_back({
+        slot,
+        InternedString("x"),
+        SourceSpan::invalid(),
+        SlotValueType::Unknown,
+    });
+
+    script->value_table.values.push_back({ValueId(0), 0, {}, nullptr});
+    script->value_table.values.push_back({ValueId(1), 0, {}, nullptr});
+    script->value_table.values.push_back({ValueId(2), 0, {}, nullptr});
+
+    ConstInst* dead_value = append_const(*entry, ValueId(0), 10);
+    ConstInst* live_value = append_const(*entry, ValueId(1), 20);
+    script->value_table.values[0].def = dead_value;
+    script->value_table.values[1].def = live_value;
+    append_store(*entry, slot, ValueId(0));
+    append_store(*entry, slot, ValueId(1));
+    LoadSlotInst* load = append_load(*entry, slot, ValueId(2));
+    script->value_table.values[2].def = load;
+
+    auto ret = std::make_unique<ReturnInst>();
+    ret->values.push_back(ValueId(2));
+    ret->parent = entry;
+    entry->instructions.push_back(std::move(ret));
+
+    file->entry_unit = script.get();
+    file->code_units.push_back(std::move(script));
+    module->files.push_back(std::move(file));
+
+    IRPassManagerOptions options;
+    options.verify_after_pipeline = true;
+
+    IRPassManager manager(options);
+    manager.add_pass<DeadCodeEliminationPass>();
+
+    IRPassManagerResult result = manager.run(*module);
+    smoke_test::require(result.ok(), "dead code elimination should keep store case verifier-clean");
+    smoke_test::require(result.changed, "dead code elimination should remove overwritten store");
+
+    CodeUnit& unit = *module->files[0]->entry_unit;
+    BasicBlock& block = *unit.entry_block;
+    smoke_test::require(block.instructions.size() == 4,
+                        "dead code elimination should remove dead const and overwritten store");
+    smoke_test::require(block.instructions[0]->type() == Instruction::Const,
+                        "dead code elimination should keep live store value const");
+    const auto& remaining_const = static_cast<const ConstInst&>(*block.instructions[0]);
+    smoke_test::require(remaining_const.result == ValueId(1),
+                        "dead code elimination should drop const used only by removed store");
+    smoke_test::require(block.instructions[1]->type() == Instruction::StoreSlot,
+                        "dead code elimination should keep final store before load");
+    const auto& remaining_store = static_cast<const StoreSlotInst&>(*block.instructions[1]);
+    smoke_test::require(remaining_store.value == ValueId(1),
+                        "dead code elimination should keep the overwritten store value");
+    smoke_test::require(block.instructions[2]->type() == Instruction::LoadSlot,
+                        "dead code elimination should keep load consuming final store");
+    smoke_test::require(block.instructions[3]->type() == Instruction::Return,
+                        "dead code elimination should keep return");
+    smoke_test::require(unit.value_table.values[0].def == nullptr,
+                        "dead code elimination should clear const used only by removed store");
+    smoke_test::require(unit.value_table.values[1].def == block.instructions[0].get(),
+                        "dead code elimination should keep live const def");
+}
+
 void verify_constant_deduplication_merges_duplicate_constants() {
     auto module = std::make_unique<IRModule>();
     auto file = std::make_unique<MFileUnit>();
@@ -983,6 +1121,8 @@ int main() {
         baltam::verify_cfg_simplification_merges_return_block_with_body();
         baltam::verify_cfg_simplification_ignores_source_boundary();
         baltam::verify_dead_branch_elimination_rewrites_constant_branch();
+        baltam::verify_dead_code_elimination_removes_unused_constants();
+        baltam::verify_dead_code_elimination_removes_overwritten_store();
         baltam::verify_constant_deduplication_merges_duplicate_constants();
         baltam::verify_constant_deduplication_hoists_loop_constants();
         baltam::verify_load_forwarding_eliminates_redundant_load();

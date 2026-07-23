@@ -236,23 +236,28 @@ IR printer 保留现有 `const` 格式，不新增 `const.runtime_object` 语法
 
 ## Pass 顺序
 
-默认 cleanup pipeline 中放在 load forwarding 之后、第二次 constant deduplication 之前：
+默认 cleanup pipeline 中在 load forwarding 之后运行，当前运行两轮：
 
 ```text
-constant-deduplication
 load-forwarding
 constant-folding
 dead-branch-elimination
-constant-deduplication
 cfg-simplification
+load-forwarding
+constant-folding
+constant-deduplication
+dead-code-elimination
 ```
 
 原因：
 
 - `load-forwarding` 可以先把 `store; load` 形状改成直接引用常量。
-- `constant-folding` 获得更多常量 operand。
-- `constant-deduplication` 再合并折叠出来的重复常量。
-- `cfg-simplification` 后续可以消费常量条件带来的 CFG 简化机会。
+- 第一轮 `constant-folding` 获得更多常量 operand，并暴露常量分支。
+- `dead-branch-elimination` 和 `cfg-simplification` 消费常量条件带来的 CFG 简化机会。
+- 后置 `load-forwarding` 清理 CFG 合并后暴露出的同 block `store; load`。
+- 后置 `constant-folding` 继续折叠 load forwarding 暴露出的常量运算，例如 `mul`。
+- `constant-deduplication` 再合并折叠出来的重复常量，并处理 loop constant hoist。
+- `dead-code-elimination` 删除常量折叠、死分支和 CFG 简化后遗留的 unused const。
 
 后续可以把这组 pass 做成固定点循环。
 

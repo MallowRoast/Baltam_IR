@@ -143,15 +143,15 @@ ScriptVar / BaseVar / Global / Persistent / Capture
 一条 `store %slot_s, %v` 可以删除，当且仅当：
 
 - `%slot_s` 是允许 DSE 的 frame-local slot。
-- 从该 store 到下一次同 slot store 或 block 结束之间，没有 `load %slot_s`。
+- 从该 store 到下一次同 slot store 之间，没有 `load %slot_s`。
 - 中间没有可能观察当前 frame local 的 barrier。
-- 如果 `%slot_s` 是 `Ret`，函数返回已经通过 `ReturnInst::values` 直接返回 ValueId，不依赖退出时扫描
-  ret slot。
 - 删除后 verifier 仍然通过，且所有 ValueId use 保持合法。
 
-第一版不跨 basic block 做 DSE。跨 block 版本需要 CFG、dominator/post-dominator 或 slot liveness。
+当前 `DeadCodeEliminationPass` 的第一版只删除被后续同 slot store 覆盖的前一条 store，不删除
+block 末尾最后一次 store。跨 block 版本、以及 block 末尾 dead store 删除，需要 CFG、
+dominator/post-dominator 或 slot liveness。
 
-### 4.3 `Ret` slot 的特殊情况
+### 4.3 `Ret` slot 的后续特殊情况
 
 对于：
 
@@ -161,7 +161,7 @@ ret %v
 ```
 
 如果后面没有 `load %slot_ret`，且 `ReturnInst` 已直接返回 `%v`，这条 ret slot store 对返回值已经不是
-必要条件，可以删除。
+必要条件，后续 block 末尾 dead store 删除可以处理它。
 
 但如果 IR 形态是：
 
@@ -178,7 +178,7 @@ store %slot_ret, %v
 ret %v
 ```
 
-再由 DSE 删除 store。
+再由后续更完整的 DSE 删除 store。
 
 ## 5. 与 CodeObject 阶段优化的关系
 
@@ -215,7 +215,8 @@ ret %0
 ## 6. 后续实现顺序
 
 1. 保持 `LoadForwardingPass` 为 single-block pass，并按本文表格维护 barrier。
-2. 新增 single-block `DeadStoreEliminationPass`，只处理 `Local / Ret / InternalLocal`。
+2. 在 `DeadCodeEliminationPass` 中实现 single-block 被覆盖 store 删除，只处理
+   `Local / Ret / InternalLocal`。
 3. 增加 pure internal call 白名单，允许部分 `CallInst(dispatch_type = Internal)` 不清 environment
    slot 状态。
 4. 在 CodeObject 构建期加入 resolver-aware constant folding，再重复运行 load forwarding / DSE。

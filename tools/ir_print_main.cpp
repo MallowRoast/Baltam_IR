@@ -5,6 +5,7 @@
 #include "pass/constant_deduplication_pass.h"
 #include "pass/constant_folding_pass.h"
 #include "pass/dead_branch_elimination_pass.h"
+#include "pass/dead_code_elimination_pass.h"
 #include "pass/ir_pass_manager.h"
 #include "pass/load_forwarding_pass.h"
 
@@ -236,12 +237,14 @@ bool run_default_pass_pipeline(baltam::IRModule& module) {
     pass_options.verify_after_pipeline = true;
 
     baltam::IRPassManager pass_manager(pass_options);
-    pass_manager.add_pass<baltam::ConstantDeduplicationPass>();
     pass_manager.add_pass<baltam::LoadForwardingPass>();
     pass_manager.add_pass<baltam::ConstantFoldingPass>();
     pass_manager.add_pass<baltam::DeadBranchEliminationPass>();
-    pass_manager.add_pass<baltam::ConstantDeduplicationPass>();
     pass_manager.add_pass<baltam::CFGSimplificationPass>();
+    pass_manager.add_pass<baltam::LoadForwardingPass>();
+    pass_manager.add_pass<baltam::ConstantFoldingPass>();
+    pass_manager.add_pass<baltam::ConstantDeduplicationPass>();
+    pass_manager.add_pass<baltam::DeadCodeEliminationPass>();
 
     return report_pass_result(pass_manager.run(module));
 }

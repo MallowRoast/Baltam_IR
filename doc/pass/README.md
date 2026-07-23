@@ -8,6 +8,7 @@
 - [Constant Deduplication Pass](./constant_deduplication_pass.md)
 - [Constant Folding Pass](./constant_folding_pass.md)
 - [Dead Branch Elimination Pass](./dead_branch_elimination_pass.md)
+- [Dead Code Elimination Pass](./dead_code_elimination_pass.md)
 - [Load Forwarding Pass](./load_forwarding_pass.md)
 - [Unreachable Block Elimination Pass](./unreachable_block_elimination_pass.md)
 - [CFG Simplification Pass](./cfg_simplification_pass.md)
@@ -22,12 +23,14 @@
 当前工具 `ir_print --run-passes` 使用的默认 cleanup pipeline 是：
 
 ```text
-constant-deduplication
 load-forwarding
 constant-folding
 dead-branch-elimination
-constant-deduplication
 cfg-simplification
+load-forwarding
+constant-folding
+constant-deduplication
+dead-code-elimination
 ```
 
 其中 `cfg-simplification` 内部会调用 unreachable block elimination。

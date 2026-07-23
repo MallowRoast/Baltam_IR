@@ -66,4 +66,5 @@ ScriptVar / BaseVar / Global / Persistent
 
 - lowering 后的基础 cleanup
 - 常量去重后消除 `store; load` 形状
+- CFG simplification 后再次清理合并 block 暴露出的 `store; load`
 - CodeObject 构建期常量折叠或 DSE 前后重复运行

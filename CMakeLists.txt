@@ -13,6 +13,7 @@ add_library(BALTAM_IR STATIC
     src/pass/cfg_simplification_pass.cpp
     src/pass/constant_deduplication_pass.cpp
     src/pass/constant_folding_pass.cpp
+    src/pass/dead_code_elimination_pass.cpp
     src/pass/dead_branch_elimination_pass.cpp
     src/pass/load_forwarding_pass.cpp
     src/pass/ir_pass_manager.cpp

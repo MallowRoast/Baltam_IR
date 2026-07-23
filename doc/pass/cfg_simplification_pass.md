@@ -59,18 +59,20 @@ entry:
 
 ## 与其它 pass 的关系
 
-`cfg-simplification` 内部会调用 `UnreachableBlockEliminationPass`。因此它适合放在会改写 CFG 的 pass
-后面，作为收尾清理。
+`cfg-simplification` 内部会调用 `UnreachableBlockEliminationPass`。因此它适合放在
+`dead-branch-elimination` 后面，先删除不可达块并合并线性 CFG，再交给后续数据流 cleanup。
 
-当前默认 cleanup pipeline 末尾使用它：
+当前默认 cleanup pipeline 中的使用顺序：
 
 ```text
-constant-deduplication
 load-forwarding
 constant-folding
 dead-branch-elimination
-constant-deduplication
 cfg-simplification
+load-forwarding
+constant-folding
+constant-deduplication
+dead-code-elimination
 ```
 
 ## 推荐使用场景
