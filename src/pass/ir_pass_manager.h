@@ -17,7 +17,6 @@ namespace baltam {
  * @brief IR pass 的调度作用域。
  */
 enum class IRPassScope : std::uint8_t {
-    Module,
     File,
     CodeUnit,
 };
@@ -71,7 +70,6 @@ struct IRPassResult {
  * @brief 当前 pass invocation 的上下文。
  */
 struct IRPassContext {
-    IRModule* module = nullptr;
     MFileUnit* file = nullptr;
     CodeUnit* unit = nullptr;
 };
@@ -92,18 +90,6 @@ public:
      * @brief pass 的调度作用域。
      */
     [[nodiscard]] virtual IRPassScope scope() const noexcept = 0;
-};
-
-/**
- * @brief 运行在整个 IR module 上的 pass。
- */
-class IRModulePass : public IRPass {
-public:
-    [[nodiscard]] IRPassScope scope() const noexcept final {
-        return IRPassScope::Module;
-    }
-
-    virtual IRPassResult run(IRModule& module, IRPassContext& context) = 0;
 };
 
 /**
@@ -146,7 +132,7 @@ struct IRPassManagerOptions {
  */
 struct IRPassRunSummary {
     InternedString pass_name;
-    IRPassScope scope = IRPassScope::Module;
+    IRPassScope scope = IRPassScope::File;
     std::size_t invocations = 0;
     std::size_t changed_invocations = 0;
     bool changed = false;
@@ -212,9 +198,9 @@ public:
     }
 
     /**
-     * @brief 在整个 module 上运行已注册 pass pipeline。
+     * @brief 在单个文件级 IR 单元上运行已注册 pass pipeline。
      */
-    [[nodiscard]] IRPassManagerResult run(IRModule& module);
+    [[nodiscard]] IRPassManagerResult run(MFileUnit& mfile);
 
 private:
     IRPassManagerOptions options_;

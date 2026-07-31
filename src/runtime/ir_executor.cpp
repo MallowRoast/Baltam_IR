@@ -146,6 +146,12 @@ namespace {
         }
     }
 
+    if (frame.context != nullptr && info.slot.tag == SlotTag::BaseVar) {
+        if (ba_obj_ptr value = frame.context->base_workspace.find(info.name)) {
+            return value;
+        }
+    }
+
     throw std::runtime_error("运行时 slot 未绑定: " + info.name);
 }
 
@@ -176,6 +182,16 @@ void store_slot(RuntimeFrame& frame, Slot slot, ba_obj_ptr value) {
             frame.code->persistent.values[info.slot.id] = value;
             return;
         case SlotTag::ScriptVar:
+            frame.slot_values[slot_index] = value;
+            if (frame.dynamic_bindings != nullptr) {
+                frame.dynamic_bindings->values[info.name] = value;
+            } else if (frame.context != nullptr &&
+                       frame.code != nullptr &&
+                       frame.code->unit != nullptr &&
+                       frame.code->unit->is_script()) {
+                frame.context->base_workspace.values[info.name] = value;
+            }
+            return;
         case SlotTag::Local:
         case SlotTag::Arg:
         case SlotTag::Ret:
@@ -259,10 +275,62 @@ void eval_persistent_decl(RuntimeFrame& frame, const PersistentDeclInst& inst) {
         std::to_string(static_cast<int>(inst.type())));
 }
 
-[[noreturn]] void eval_apply(RuntimeFrame&, const ApplyInst& inst) {
-    throw std::runtime_error(
-        "暂不支持的运行时指令: " +
-        std::to_string(static_cast<int>(inst.type())));
+[[nodiscard]] std::vector<const_ba_obj_ptr> eval_call_arguments(
+    RuntimeFrame& frame,
+    const std::vector<Operand>& operands);
+
+[[nodiscard]] std::vector<ba_obj_ptr> invoke_target(
+    RuntimeFrame& caller,
+    const RuntimeFunctionLookup& target,
+    std::vector<const_ba_obj_ptr>& arguments,
+    std::size_t output_count,
+    const char* not_callable_prefix);
+
+void store_call_outputs(
+    RuntimeFrame& frame,
+    const std::vector<ValueId>& results,
+    const std::vector<ba_obj_ptr>& outputs);
+
+[[nodiscard]] ba_obj_ptr lookup_dynamic_value(
+    RuntimeFrame& frame,
+    const InternedString& name) {
+    if (frame.dynamic_bindings != nullptr) {
+        const auto it = frame.dynamic_bindings->values.find(name);
+        if (it != frame.dynamic_bindings->values.end()) {
+            return it->second;
+        }
+    }
+    if (frame.context != nullptr) {
+        return frame.context->base_workspace.find(name);
+    }
+    return {};
+}
+
+void eval_apply(RuntimeFrame& frame, const ApplyInst& inst) {
+    if (const auto* name = std::get_if<InternedString>(&inst.callee_or_base)) {
+        if (lookup_dynamic_value(frame, *name) != nullptr) {
+            throw std::runtime_error("暂不支持变量圆括号应用: " + *name);
+        }
+
+        const RuntimeFunctionLookup target = lookup_function(frame, *name);
+        if (!target.found()) {
+            throw std::runtime_error("未找到运行时 apply 目标: " + *name);
+        }
+
+        std::vector<const_ba_obj_ptr> arguments =
+            eval_call_arguments(frame, inst.arguments);
+        std::vector<ba_obj_ptr> outputs = invoke_target(
+            frame,
+            target,
+            arguments,
+            inst.results.size(),
+            "运行时 apply 目标暂不可调用: ");
+        store_call_outputs(frame, inst.results, outputs);
+        return;
+    }
+
+    (void)eval_operand(frame, inst.callee_or_base);
+    throw std::runtime_error("暂不支持值圆括号应用");
 }
 
 [[noreturn]] void eval_value_apply(RuntimeFrame&, const ValueApplyInst& inst) {
@@ -361,6 +429,111 @@ void store_call_outputs(
     return outputs;
 }
 
+[[nodiscard]] std::shared_ptr<CodeObject> code_for_m_function(
+    InterpreterContext& context,
+    FunctionUnit& function) {
+    const NormalizedPath source_file =
+        function.file != nullptr ? function.file->path : NormalizedPath{};
+    if (!source_file.empty()) {
+        const CodeCacheKey key{source_file, function.name};
+        if (std::shared_ptr<CodeObject> cached = context.code_cache.find(key);
+            cached != nullptr && cached->unit == &function) {
+            return cached;
+        }
+    }
+
+    auto code = std::make_shared<CodeObject>();
+    code->unit = &function;
+    if (!source_file.empty()) {
+        context.code_cache.insert({source_file, function.name}, code);
+    }
+    return code;
+}
+
+void initialize_function_runtime_slots(RuntimeFrame& frame) {
+    if (frame.code == nullptr || frame.code->unit == nullptr) {
+        return;
+    }
+
+    for (const SlotInfo& info : frame.code->unit->slot_table.slots) {
+        if (!info.slot.id.is_valid() || info.slot.id.value() >= frame.slot_values.size()) {
+            continue;
+        }
+
+        ba_obj_ptr value;
+        switch (info.slot.tag) {
+            case SlotTag::Nargin:
+                value = std::make_shared<ba_obj>(static_cast<double>(frame.actual_nargin));
+                break;
+            case SlotTag::Nargout:
+                value = std::make_shared<ba_obj>(static_cast<double>(frame.requested_nargout));
+                break;
+            default:
+                break;
+        }
+
+        if (value != nullptr) {
+            frame.slot_values[info.slot.id.value()] = std::move(value);
+        }
+    }
+}
+
+void bind_function_arguments(
+    RuntimeFrame& frame,
+    const FunctionUnit& function,
+    const std::vector<const_ba_obj_ptr>& arguments) {
+    if (arguments.size() > function.param_slots.size()) {
+        throw std::runtime_error(
+            "运行时 M 函数输入参数数量过多: " + function.name);
+    }
+
+    for (std::size_t i = 0; i < arguments.size(); ++i) {
+        if (arguments[i] == nullptr) {
+            throw std::runtime_error(
+                "运行时 M 函数输入参数未绑定: " + function.name);
+        }
+        frame.slot_value(function.param_slots[i].id) =
+            std::make_shared<ba_obj>(*arguments[i]);
+    }
+}
+
+[[nodiscard]] std::vector<ba_obj_ptr> invoke_m_function(
+    RuntimeFrame& caller,
+    FunctionUnit& function,
+    std::vector<const_ba_obj_ptr>& arguments,
+    std::size_t output_count) {
+    if (caller.context == nullptr) {
+        throw std::runtime_error("运行时 M 函数调用需要 InterpreterContext: " + function.name);
+    }
+    if (exceeds_max_call_depth(&caller)) {
+        throw std::runtime_error("运行时 M 函数调用深度超过限制: " + function.name);
+    }
+
+    std::shared_ptr<CodeObject> code = code_for_m_function(*caller.context, function);
+
+    RuntimeFrame frame;
+    frame.code = code.get();
+    frame.actual_nargin = static_cast<std::uint32_t>(arguments.size());
+    frame.requested_nargout = static_cast<std::uint32_t>(output_count);
+    frame.initialize_storage();
+    bind_function_arguments(frame, function, arguments);
+    initialize_function_runtime_slots(frame);
+
+    std::vector<ba_obj_ptr> outputs;
+    {
+        FrameScope scope(*caller.context, frame);
+        outputs = execute_frame(frame);
+    }
+
+    if (outputs.size() < output_count) {
+        throw std::runtime_error("运行时 M 函数返回值数量少于请求数量: " + function.name);
+    }
+    if (outputs.size() > output_count) {
+        outputs.resize(output_count);
+    }
+    return outputs;
+}
+
 [[nodiscard]] std::vector<ba_obj_ptr> invoke_entry_point(
     const RuntimeFunctionLookup& target,
     std::vector<const_ba_obj_ptr>& arguments,
@@ -376,18 +549,21 @@ void store_call_outputs(
 }
 
 [[nodiscard]] std::vector<ba_obj_ptr> invoke_target(
+    RuntimeFrame& caller,
     const RuntimeFunctionLookup& target,
     std::vector<const_ba_obj_ptr>& arguments,
     std::size_t output_count,
-    const char* unsupported_m_function_prefix,
     const char* not_callable_prefix) {
     if (target.entry_point != nullptr) {
         return invoke_entry_point(target, arguments, output_count);
     }
 
     if (target.m_function_target != nullptr) {
-        throw std::runtime_error(
-            std::string(unsupported_m_function_prefix) + target.name);
+        return invoke_m_function(
+            caller,
+            *target.m_function_target,
+            arguments,
+            output_count);
     }
 
     throw std::runtime_error(std::string(not_callable_prefix) + target.name);
@@ -409,10 +585,10 @@ void eval_call(RuntimeFrame& frame, const CallInst& inst) {
     std::vector<const_ba_obj_ptr> arguments =
         eval_call_arguments(frame, inst.arguments);
     std::vector<ba_obj_ptr> outputs = invoke_target(
+        frame,
         target,
         arguments,
         inst.results.size(),
-        "暂不支持 M 函数运行时调用: ",
         "运行时函数目标暂不可调用: ");
     store_call_outputs(frame, inst.results, outputs);
 }
@@ -476,10 +652,10 @@ void eval_call(RuntimeFrame& frame, const CallInst& inst) {
         "运行时一元运算操作数未绑定");
 
     std::vector<ba_obj_ptr> outputs = invoke_target(
+        frame,
         target,
         arguments,
         1U,
-        "暂不支持 M 函数一元运算: ",
         "运行时一元运算符目标暂不可调用: ");
     return require_single_output(
         outputs,
@@ -510,10 +686,10 @@ void eval_call(RuntimeFrame& frame, const CallInst& inst) {
         "运行时二元运算右操作数未绑定");
 
     std::vector<ba_obj_ptr> outputs = invoke_target(
+        frame,
         target,
         arguments,
         1U,
-        "暂不支持 M 函数二元运算: ",
         "运行时二元运算符目标暂不可调用: ");
     return require_single_output(
         outputs,

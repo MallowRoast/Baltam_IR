@@ -1,115 +1,59 @@
-#include "smoke_test_common.h"
+#include "runtime_smoke_test_common.h"
 
+#include <cmath>
 #include <iostream>
+#include <memory>
 
 namespace baltam {
 namespace {
 
-void require_value_type(
-    const CodeUnit& unit,
-    ValueId value_id,
-    TypeSet expected_types,
-    bool expected_scalar,
-    const char* message) {
-    const ValueInfo* value_info = unit.value_table.find(value_id);
-    smoke_test::require(value_info != nullptr, message);
-    smoke_test::require(value_info->value_id == value_id, message);
-    smoke_test::require(value_info->def != nullptr, message);
-    smoke_test::require(!value_info->type_fact.is_unknown, message);
-    smoke_test::require(value_info->type_fact.types == expected_types, message);
-    smoke_test::require(value_info->type_fact.is_scalar == expected_scalar, message);
-}
+void verify_command_lookup_and_execute_test0() {
+    const NormalizedPath expected_path = smoke_test::normalize_test_path(TEST0_MFILE_PATH);
+    smoke_test::require(expected_path.filename() == "test0.m",
+                        "test0 smoke 应使用 test0.m");
 
-void require_value_unknown(
-    const CodeUnit& unit,
-    ValueId value_id,
-    const char* message) {
-    const ValueInfo* value_info = unit.value_table.find(value_id);
-    smoke_test::require(value_info != nullptr, message);
-    smoke_test::require(value_info->value_id == value_id, message);
-    smoke_test::require(value_info->def != nullptr, message);
-    smoke_test::require(value_info->type_fact.is_unknown, message);
-    smoke_test::require(!value_info->type_fact.is_scalar, message);
-}
+    smoke_test::ScopedWorkerPwd pwd(expected_path.parent_path());
 
-void verify_complete_ir(const IRBuildResult& result) {
-    smoke_test::require_ir_is_complete(result);
-    smoke_test::require(result.mfile->is_script_file(), "test0 应构造成脚本文件");
-    smoke_test::require(result.mfile->code_units.size() == 1, "应只生成一个代码单元");
-    smoke_test::require(result.mfile->file_stem() == "test0", "文件 stem 应为 test0");
-}
+    InterpreterContext context;
+    context.command = std::make_unique<CommandUnit>();
+    context.command->name = "__command";
 
-void verify_core_focus(const IRBuildResult& result) {
-    const CodeUnit* unit = result.mfile->entry_unit;
-    smoke_test::require(unit != nullptr, "入口代码单元不能为空");
-    smoke_test::require(unit->slot_table.slots.size() == 3, "脚本 lowering 应创建 a/b/c 三个脚本槽位");
+    const RuntimeFunctionLookup command_lookup =
+        smoke_test::lookup_from_command(context, "test0");
+    smoke_test::require(command_lookup.found(),
+                        "命令行输入 test0 应能找到当前文件夹下的 test0.m");
+    smoke_test::require(command_lookup.kind == RuntimeFunctionKind::MFunctionFile,
+                        "未解析缓存前，M 文件路径 lookup 应保持为 MFunctionFile");
     smoke_test::require(
-        smoke_test::find_slot_by_name(*unit, "a") != nullptr &&
-            smoke_test::find_slot_by_name(*unit, "b") != nullptr &&
-            smoke_test::find_slot_by_name(*unit, "c") != nullptr,
-        "脚本 lowering 应为静态出现的变量创建 slot");
+        smoke_test::normalize_test_path(command_lookup.source_file) == expected_path,
+        "命令行输入 test0 应解析到 test0.m");
 
+    IRBuildResult ir = parse_and_lower_mfile_to_ir(command_lookup.source_file.string());
+    smoke_test::require_ir_is_complete(ir);
+    smoke_test::require(ir.mfile->is_script_file(), "test0.m 应 lower 成脚本文件");
+
+    MFileUnit* mfile = smoke_test::install_mfile_ir(context, ir);
+    smoke_test::require(mfile != nullptr, "Context MFile cache 应持有 test0.m IR");
+
+    smoke_test::ScopedBuiltinDefinitions builtins;
+
+    const RuntimeFunctionLookup cached_lookup =
+        smoke_test::lookup_from_command(context, "test0");
+    smoke_test::require(cached_lookup.kind == RuntimeFunctionKind::ScriptFile,
+                        "Context 缓存中已有 IR 后，test0 应解析为 ScriptFile");
     smoke_test::require(
-        smoke_test::count_instructions(*unit, Instruction::LoadSlot) == 3,
-        "脚本 lowering 应生成 3 条 load");
-    smoke_test::require(
-        smoke_test::count_instructions(*unit, Instruction::StoreSlot) == 4,
-        "脚本 lowering 应生成 4 条 store");
-    smoke_test::require(
-        smoke_test::count_instructions(*unit, Instruction::Apply) == 1,
-        "脚本 lowering 应保留一条 apply");
-    smoke_test::require(
-        smoke_test::count_instructions(*unit, Instruction::Call) == 0,
-        "脚本 lowering 不应生成 call");
+        smoke_test::normalize_test_path(cached_lookup.source_file) == expected_path,
+        "缓存后的 test0 lookup 仍应指向同一路径");
 
-    const Instruction* apply_inst =
-        smoke_test::find_first_instruction(*unit, Instruction::Apply);
-    smoke_test::require(apply_inst != nullptr, "脚本中应存在 apply 指令");
+    smoke_test::require_default_runtime_builtins(context);
+    smoke_test::execute_script(context, *mfile);
 
-    const auto* apply = static_cast<const ApplyInst*>(apply_inst);
-    smoke_test::require(apply->results.size() == 1, "脚本中的 apply 应产生一个结果");
-    smoke_test::require(apply->arguments.size() == 1, "脚本中的 apply 应只有一个参数");
-    smoke_test::require(
-        std::holds_alternative<InternedString>(apply->callee_or_base) &&
-            std::get<InternedString>(apply->callee_or_base) == "sin",
-        "脚本中的 sin(a) 应保持为按名字的 apply");
-}
-
-void verify_value_types(const IRBuildResult& result) {
-    const CodeUnit* unit = result.mfile->entry_unit;
-    smoke_test::require(unit != nullptr, "入口代码单元不能为空");
-    smoke_test::require(unit->value_table.values.size() == 12, "test0 应为 12 个 ValueId 持有类型信息");
-
-    require_value_type(*unit, ValueId(0), TypeSet::float64(), true, "%0 应是 float64 标量常量");
-    require_value_type(*unit, ValueId(1), TypeSet::float64(), true, "%1 应是 float64 标量常量");
-    require_value_unknown(*unit, ValueId(2), "动态 add 结果在类型推导前应保持 unknown");
-
-    require_value_unknown(*unit, ValueId(3), "脚本 apply 结果在类型推导前应保持 unknown");
-    require_value_unknown(*unit, ValueId(4), "脚本 workspace 读取在类型推导前应保持 unknown");
-    require_value_unknown(*unit, ValueId(5), "b 的 workspace 读取在类型推导前应保持 unknown");
-
-    require_value_type(*unit, ValueId(6), TypeSet::float64(), true, "if 比较中的 0 应是 float64 标量");
-    require_value_unknown(*unit, ValueId(7), "动态比较结果在类型推导前应保持 unknown");
-
-    require_value_unknown(*unit, ValueId(8), "then 分支读取 b 在类型推导前应保持 unknown");
-    require_value_type(*unit, ValueId(9), TypeSet::float64(), true, "then 分支中的 2 应是 float64 标量");
-    require_value_unknown(*unit, ValueId(10), "b * 2 的结果在类型推导前应保持 unknown");
-    require_value_type(*unit, ValueId(11), TypeSet::float64(), true, "else 分支中的 0 应是 float64 标量");
-}
-
-void verify_other_important_checks(const IRBuildResult& result) {
-    const CodeUnit* unit = result.mfile->entry_unit;
-    smoke_test::require(unit->basic_blocks.size() == 4, "if/else 脚本应生成 4 个基本块");
-    smoke_test::require(
-        unit->basic_blocks[0]->terminator()->type() == Instruction::Branch,
-        "入口基本块应以条件分支结束");
-    smoke_test::require(
-        unit->basic_blocks[1]->terminator()->type() == Instruction::Goto &&
-            unit->basic_blocks[2]->terminator()->type() == Instruction::Goto,
-        "then/else 基本块应以跳转结束");
-    smoke_test::require(
-        unit->basic_blocks[3]->terminator()->type() == Instruction::Return,
-        "exit 基本块应以返回结束");
+    const double b = std::sin(3.0);
+    smoke_test::require_base_workspace_double(context, "a", 3.0);
+    smoke_test::require_base_workspace_double(context, "b", b);
+    smoke_test::require_base_workspace_double(context, "c", b * 2.0);
+    smoke_test::require_base_workspace_double(context, "d", 3.0);
+    smoke_test::require_default_runtime_builtin_counts();
 }
 
 } // namespace
@@ -117,12 +61,7 @@ void verify_other_important_checks(const IRBuildResult& result) {
 
 int main() {
     try {
-        const baltam::smoke_test::SmokeArtifacts artifacts =
-            baltam::smoke_test::build_ir(TEST0_MFILE_PATH);
-        baltam::verify_complete_ir(artifacts.result);
-        baltam::verify_core_focus(artifacts.result);
-        baltam::verify_value_types(artifacts.result);
-        baltam::verify_other_important_checks(artifacts.result);
+        baltam::verify_command_lookup_and_execute_test0();
     } catch (const std::exception& ex) {
         std::cerr << "test0_smoke 失败: " << ex.what() << '\n';
         return 1;

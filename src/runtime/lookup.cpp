@@ -2,10 +2,14 @@
 
 #include "runtime/interpreter_context.h"
 
+#include "baltam_worker/path.h"
 #include "baltam_worker/builtin_manager.h"
 #include "extension/extension.h"
 
+#include <filesystem>
 #include <mutex>
+#include <optional>
+#include <system_error>
 #include <utility>
 
 namespace baltam {
@@ -41,6 +45,91 @@ namespace {
     return result;
 }
 
+[[nodiscard]] NormalizedPath normalize_lookup_path(const std::filesystem::path& path) {
+    std::error_code ec;
+    std::filesystem::path normalized = std::filesystem::weakly_canonical(path, ec);
+    if (!ec) {
+        return normalized.lexically_normal();
+    }
+
+    normalized = std::filesystem::absolute(path, ec);
+    if (!ec) {
+        return normalized.lexically_normal();
+    }
+
+    return path.lexically_normal();
+}
+
+[[nodiscard]] bool same_path(
+    const std::filesystem::path& lhs,
+    const std::filesystem::path& rhs) {
+    if (lhs == rhs || lhs.lexically_normal() == rhs.lexically_normal()) {
+        return true;
+    }
+
+    std::error_code ec;
+    return std::filesystem::equivalent(lhs, rhs, ec) && !ec;
+}
+
+[[nodiscard]] std::optional<NormalizedPath> existing_m_file_path(
+    const std::filesystem::path& path) {
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(path, ec) && path.extension() == ".m") {
+        return normalize_lookup_path(path);
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] RuntimeFunctionKind classify_cached_m_file(const MFileUnit* file) noexcept {
+    if (file == nullptr) {
+        return RuntimeFunctionKind::MFunctionFile;
+    }
+    if (file->is_script_file()) {
+        return RuntimeFunctionKind::ScriptFile;
+    }
+    if (file->is_function_file()) {
+        return RuntimeFunctionKind::MFunctionFile;
+    }
+    return RuntimeFunctionKind::MFunctionFile;
+}
+
+[[nodiscard]] MFileUnit* find_cached_m_file(
+    const InterpreterContext* context,
+    const NormalizedPath& path) {
+    if (context == nullptr) {
+        return nullptr;
+    }
+
+    if (const auto it = context->mfiles.find(path); it != context->mfiles.end()) {
+        return it->second.file.get();
+    }
+
+    for (const auto& entry : context->mfiles) {
+        if (same_path(entry.second.path, path)) {
+            return entry.second.file.get();
+        }
+    }
+
+    return nullptr;
+}
+
+[[nodiscard]] RuntimeFunctionLookup make_m_file_lookup(
+    const RuntimeFrame& frame,
+    const InternedString& name,
+    NormalizedPath path) {
+    MFileUnit* cached_file = find_cached_m_file(frame.context, path);
+    RuntimeFunctionLookup result =
+        make_function_lookup(classify_cached_m_file(cached_file), MFunction, name);
+    result.source_file = std::move(path);
+    if (cached_file != nullptr &&
+        cached_file->is_function_file() &&
+        cached_file->entry_unit != nullptr &&
+        cached_file->entry_unit->name == name) {
+        result.m_function_target = static_cast<FunctionUnit*>(cached_file->entry_unit);
+    }
+    return result;
+}
+
 void ensure_builtin_library_loaded() {
     static std::once_flag once;
     std::call_once(once, [] {
@@ -51,6 +140,10 @@ void ensure_builtin_library_loaded() {
 [[nodiscard]] RuntimeFunctionLookup lookup_local_m_function(
     const RuntimeFrame& frame,
     const InternedString& name) {
+    if (frame.code == nullptr || frame.code->unit == nullptr) {
+        return {};
+    }
+
     MFileUnit* file = owning_file(frame.code->unit);
     if (file == nullptr) {
         return {};
@@ -66,6 +159,41 @@ void ensure_builtin_library_loaded() {
     result.m_function_target = function;
     result.source_file = file->path;
     return result;
+}
+
+[[nodiscard]] RuntimeFunctionLookup lookup_m_file_in_current_directory(
+    const RuntimeFrame& frame,
+    const InternedString& name) {
+    std::string pwd;
+    if (!lookup_path("PWD", pwd) || pwd.empty()) {
+        return {};
+    }
+
+    const std::filesystem::path candidate = std::filesystem::path(pwd) / (name + ".m");
+    std::optional<NormalizedPath> path = existing_m_file_path(candidate);
+    if (!path.has_value()) {
+        return {};
+    }
+    return make_m_file_lookup(frame, name, std::move(*path));
+}
+
+[[nodiscard]] RuntimeFunctionLookup lookup_m_file_on_path(
+    const RuntimeFrame& frame,
+    const InternedString& name) {
+    std::string resolved_path;
+    if (!lookup_path(name, resolved_path) || resolved_path.empty()) {
+        return {};
+    }
+
+    std::optional<NormalizedPath> path = existing_m_file_path(resolved_path);
+    if (!path.has_value()) {
+        path = existing_m_file_path(std::filesystem::path(resolved_path) / (name + ".m"));
+    }
+    if (!path.has_value()) {
+        return {};
+    }
+
+    return make_m_file_lookup(frame, name, std::move(*path));
 }
 
 [[nodiscard]] baFunPtr lookup_plugin_call_entry_point() {
@@ -113,11 +241,12 @@ void ensure_builtin_library_loaded() {
 
 [[nodiscard]] RuntimeFunctionLookup lookup_builtin_registered_function(
     const InternedString& name) {
-    ensure_builtin_library_loaded();
-
     baFunPtr entry_point = nullptr;
     if (!lookup_builtin_function(name, entry_point)) {
-        return {};
+        ensure_builtin_library_loaded();
+        if (!lookup_builtin_function(name, entry_point)) {
+            return {};
+        }
     }
 
     RuntimeFunctionLookup result =
@@ -141,8 +270,16 @@ void ensure_builtin_library_loaded() {
     // 第 6 项：private function，当前 runtime 尚未实现 private 目录查找，暂不支持。
     // 第 7 项：object function / constructor，需要结合实参类型分派，暂不支持。
     // 第 8 项：已加载的 Simulink model，暂不支持。
-    // 第 9/10 项：current folder / path function。该层需要 worker PathLoader 初始化；
-    // standalone runtime 当前不启用，避免在未初始化 worker runtime 时触发不稳定依赖。
+    // 第 9/10 项：current folder / path function。当前先解析到 `.m` 文件路径，
+    // 由上层加载流程决定是否解析成 Script/Function 静态 IR 并解释执行。
+    if (RuntimeFunctionLookup result =
+            lookup_m_file_in_current_directory(frame, name);
+        result.found()) {
+        return result;
+    }
+    if (RuntimeFunctionLookup result = lookup_m_file_on_path(frame, name); result.found()) {
+        return result;
+    }
 
     // 运行时注册函数不属于 MATLAB 文档里的独立优先级层级；当前作为 path 查找
     // 尚未接入前的内建/扩展函数兜底。
@@ -190,9 +327,16 @@ RuntimeFunctionLookup lookup_function(
         case Internal:
             return lookup_internal_registered_function(name);
         case MFunction:
-            // 当前 MFunction 显式分派只支持本文件 local function；PathLoader
-            // 查找需要 worker runtime 初始化，暂不在这里启用。
-            return lookup_local_m_function(frame, name);
+            if (RuntimeFunctionLookup result = lookup_local_m_function(frame, name);
+                result.found()) {
+                return result;
+            }
+            if (RuntimeFunctionLookup result =
+                    lookup_m_file_in_current_directory(frame, name);
+                result.found()) {
+                return result;
+            }
+            return lookup_m_file_on_path(frame, name);
     }
 
     return {};

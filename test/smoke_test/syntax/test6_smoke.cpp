@@ -80,16 +80,15 @@ void verify_short_circuit_cfg(const FunctionUnit& function) {
 
 int main() {
     try {
-        const baltam::smoke_test::SmokeArtifacts artifacts =
-            baltam::smoke_test::build_ir(TEST6_MFILE_PATH);
-        baltam::smoke_test::require_ir_is_complete(artifacts.result);
-        baltam::smoke_test::require(artifacts.result.mfile->is_function_file(), "test6 应为函数文件");
+        const baltam::IRBuildResult ir = baltam::smoke_test::build_ir(TEST6_MFILE_PATH);
+        baltam::smoke_test::require_ir_is_complete(ir);
+        baltam::smoke_test::require(ir.mfile->is_function_file(), "test6 应为函数文件");
         baltam::smoke_test::require(
-            artifacts.result.mfile->code_units.size() == 1,
+            ir.mfile->code_units.size() == 1,
             "test6 文件应只包含主函数单元");
 
         const baltam::FunctionUnit* function =
-            baltam::find_function(*artifacts.result.mfile, "test6");
+            baltam::find_function(*ir.mfile, "test6");
         baltam::smoke_test::require(function != nullptr, "应找到 test6 函数单元");
 
         baltam::verify_short_circuit_cfg(*function);

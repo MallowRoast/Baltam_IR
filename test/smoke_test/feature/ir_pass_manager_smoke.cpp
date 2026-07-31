@@ -16,55 +16,24 @@
 namespace baltam {
 namespace {
 
-std::unique_ptr<IRModule> make_module() {
-    auto module = std::make_unique<IRModule>();
-    auto file = std::make_unique<MFileUnit>();
-    file->module = module.get();
-    file->path = NormalizedPath("test.m");
+std::unique_ptr<MFileUnit> make_mfile() {
+    auto mfile = std::make_unique<MFileUnit>();
+    mfile->path = NormalizedPath("test.m");
 
     auto script = std::make_unique<ScriptUnit>();
     script->name = "script";
-    script->file = file.get();
+    script->file = mfile.get();
     ScriptUnit* script_ptr = script.get();
 
     auto function = std::make_unique<FunctionUnit>();
     function->name = "f";
-    function->file = file.get();
-    FunctionUnit* function_ptr = function.get();
+    function->file = mfile.get();
 
-    file->entry_unit = script_ptr;
-    file->code_units.push_back(std::move(script));
-    file->code_units.push_back(std::move(function));
-
-    auto anonymous_function = std::make_unique<AnonymousFunctionUnit>();
-    anonymous_function->name = "anon";
-    anonymous_function->id = AnonymousFunctionId(0);
-    anonymous_function->lexical_parent = function_ptr;
-
-    module->anonymous_functions.functions.push_back(std::move(anonymous_function));
-    module->files.push_back(std::move(file));
-    return module;
+    mfile->entry_unit = script_ptr;
+    mfile->code_units.push_back(std::move(script));
+    mfile->code_units.push_back(std::move(function));
+    return mfile;
 }
-
-class RecordingModulePass final : public IRModulePass {
-public:
-    explicit RecordingModulePass(std::vector<std::string>& log) : log_(log) {}
-
-    [[nodiscard]] std::string_view name() const noexcept override {
-        return "record.module";
-    }
-
-    IRPassResult run(IRModule& module, IRPassContext& context) override {
-        smoke_test::require(context.module == &module, "module context should point to module");
-        smoke_test::require(context.file == nullptr, "module context should not have file");
-        smoke_test::require(context.unit == nullptr, "module context should not have unit");
-        log_.push_back("module");
-        return {};
-    }
-
-private:
-    std::vector<std::string>& log_;
-};
 
 class RecordingFilePass final : public IRFilePass {
 public:
@@ -75,7 +44,6 @@ public:
     }
 
     IRPassResult run(MFileUnit& mfile, IRPassContext& context) override {
-        smoke_test::require(context.module == mfile.module, "file context should point to module");
         smoke_test::require(context.file == &mfile, "file context should point to mfile");
         smoke_test::require(context.unit == nullptr, "file context should not have unit");
         log_.push_back("file:" + mfile.path.string());
@@ -95,12 +63,8 @@ public:
     }
 
     IRPassResult run(CodeUnit& unit, IRPassContext& context) override {
-        smoke_test::require(context.module != nullptr, "unit context should have module");
+        smoke_test::require(context.file != nullptr, "unit context should have file");
         smoke_test::require(context.unit == &unit, "unit context should point to unit");
-
-        if (unit.is_script() || unit.is_function() || unit.is_anonymous_function()) {
-            smoke_test::require(context.file != nullptr, "normal unit context should have file");
-        }
 
         IRPassResult result;
         result.changed = unit.is_function();
@@ -132,15 +96,15 @@ private:
     std::vector<std::string>& log_;
 };
 
-class UnreachedModulePass final : public IRModulePass {
+class UnreachedFilePass final : public IRFilePass {
 public:
-    explicit UnreachedModulePass(std::vector<std::string>& log) : log_(log) {}
+    explicit UnreachedFilePass(std::vector<std::string>& log) : log_(log) {}
 
     [[nodiscard]] std::string_view name() const noexcept override {
-        return "unreached.module";
+        return "unreached.file";
     }
 
-    IRPassResult run(IRModule&, IRPassContext&) override {
+    IRPassResult run(MFileUnit&, IRPassContext&) override {
         log_.push_back("unreached");
         return {};
     }
@@ -151,41 +115,34 @@ private:
 
 void verify_successful_pipeline() {
     std::vector<std::string> log;
-    std::unique_ptr<IRModule> module = make_module();
+    std::unique_ptr<MFileUnit> mfile = make_mfile();
 
     IRPassManager manager;
-    manager.add_pass<RecordingModulePass>(log);
     manager.add_pass<RecordingFilePass>(log);
     manager.add_pass<RecordingCodeUnitPass>(log);
 
-    const IRPassManagerResult result = manager.run(*module);
+    const IRPassManagerResult result = manager.run(*mfile);
     smoke_test::require(result.ok(), "pass manager result should be ok");
     smoke_test::require(result.changed, "function invocation should mark pipeline changed");
     smoke_test::require(result.diagnostics.empty(), "successful pipeline should not emit diagnostics");
-    smoke_test::require(result.pass_runs.size() == 3, "pipeline should record three pass summaries");
+    smoke_test::require(result.pass_runs.size() == 2, "pipeline should record two pass summaries");
 
-    smoke_test::require(result.pass_runs[0].pass_name == "record.module", "module pass name mismatch");
-    smoke_test::require(result.pass_runs[0].scope == IRPassScope::Module, "module pass scope mismatch");
-    smoke_test::require(result.pass_runs[0].invocations == 1, "module pass should run once");
+    smoke_test::require(result.pass_runs[0].pass_name == "record.file", "file pass name mismatch");
+    smoke_test::require(result.pass_runs[0].scope == IRPassScope::File, "file pass scope mismatch");
+    smoke_test::require(result.pass_runs[0].invocations == 1, "file pass should run once");
 
-    smoke_test::require(result.pass_runs[1].pass_name == "record.file", "file pass name mismatch");
-    smoke_test::require(result.pass_runs[1].scope == IRPassScope::File, "file pass scope mismatch");
-    smoke_test::require(result.pass_runs[1].invocations == 1, "file pass should run once");
-
-    smoke_test::require(result.pass_runs[2].pass_name == "record.unit", "unit pass name mismatch");
-    smoke_test::require(result.pass_runs[2].scope == IRPassScope::CodeUnit, "unit pass scope mismatch");
-    smoke_test::require(result.pass_runs[2].invocations == 3, "unit pass should visit normal and anon units");
-    smoke_test::require(result.pass_runs[2].changed, "unit pass summary should be changed");
+    smoke_test::require(result.pass_runs[1].pass_name == "record.unit", "unit pass name mismatch");
+    smoke_test::require(result.pass_runs[1].scope == IRPassScope::CodeUnit, "unit pass scope mismatch");
+    smoke_test::require(result.pass_runs[1].invocations == 2, "unit pass should visit file code units");
+    smoke_test::require(result.pass_runs[1].changed, "unit pass summary should be changed");
     smoke_test::require(
-        result.pass_runs[2].changed_invocations == 1,
+        result.pass_runs[1].changed_invocations == 1,
         "only the function unit invocation should be changed");
 
     const std::vector<std::string> expected_log = {
-        "module",
         "file:test.m",
         "unit:script",
         "unit:f",
-        "unit:anon",
     };
     smoke_test::require(log == expected_log, "pass invocation order mismatch");
     smoke_test::require(ir_pass_scope_name(IRPassScope::CodeUnit) == "code-unit",
@@ -194,13 +151,13 @@ void verify_successful_pipeline() {
 
 void verify_error_stops_pipeline() {
     std::vector<std::string> log;
-    std::unique_ptr<IRModule> module = make_module();
+    std::unique_ptr<MFileUnit> mfile = make_mfile();
 
     IRPassManager manager;
     manager.add_pass<FailingCodeUnitPass>(log);
-    manager.add_pass<UnreachedModulePass>(log);
+    manager.add_pass<UnreachedFilePass>(log);
 
-    const IRPassManagerResult result = manager.run(*module);
+    const IRPassManagerResult result = manager.run(*mfile);
     smoke_test::require(!result.ok(), "failing pass should make result not ok");
     smoke_test::require(!result.changed, "failing pass did not report changes");
     smoke_test::require(result.diagnostics.size() == 1, "failing pass should emit one diagnostic");
@@ -282,14 +239,12 @@ void append_call(BasicBlock& block, std::string callee, const std::vector<ValueI
 }
 
 void verify_ube_removes_unreachable_blocks() {
-    auto module = std::make_unique<IRModule>();
-    auto file = std::make_unique<MFileUnit>();
-    file->module = module.get();
-    file->path = NormalizedPath("ube.m");
+    auto mfile = std::make_unique<MFileUnit>();
+    mfile->path = NormalizedPath("ube.m");
 
     auto script = std::make_unique<ScriptUnit>();
     script->name = "ube";
-    script->file = file.get();
+    script->file = mfile.get();
 
     BasicBlock* entry = script->create_block("entry", SourceSpan::invalid());
     BasicBlock* exit = script->create_block("exit", SourceSpan::invalid());
@@ -304,9 +259,8 @@ void verify_ube_removes_unreachable_blocks() {
     append_goto(*dead, *dead_exit);
     append_return(*dead_exit);
 
-    file->entry_unit = script.get();
-    file->code_units.push_back(std::move(script));
-    module->files.push_back(std::move(file));
+    mfile->entry_unit = script.get();
+    mfile->code_units.push_back(std::move(script));
 
     IRPassManagerOptions options;
     options.verify_after_pipeline = true;
@@ -314,7 +268,7 @@ void verify_ube_removes_unreachable_blocks() {
     IRPassManager manager(options);
     manager.add_pass<UnreachableBlockEliminationPass>();
 
-    IRPassManagerResult result = manager.run(*module);
+    IRPassManagerResult result = manager.run(*mfile);
     smoke_test::require(result.ok(), "UBE should keep IR verifier-clean");
     smoke_test::require(result.changed, "UBE should report changed when blocks are removed");
     smoke_test::require(result.pass_runs.size() == 1, "UBE should record one summary");
@@ -323,7 +277,7 @@ void verify_ube_removes_unreachable_blocks() {
     smoke_test::require(result.pass_runs[0].changed_invocations == 1,
                         "UBE changed invocation count mismatch");
 
-    const CodeUnit& unit = *module->files[0]->entry_unit;
+    const CodeUnit& unit = *mfile->entry_unit;
     smoke_test::require(unit.basic_blocks.size() == 2, "UBE should keep only reachable blocks");
     smoke_test::require(unit.basic_blocks[0].get() == entry, "UBE should preserve entry block object");
     smoke_test::require(unit.basic_blocks[1].get() == exit, "UBE should preserve reachable exit block");
@@ -379,14 +333,12 @@ void verify_ube_skips_value_escape() {
 }
 
 void verify_cfg_simplification_removes_empty_goto_blocks() {
-    auto module = std::make_unique<IRModule>();
-    auto file = std::make_unique<MFileUnit>();
-    file->module = module.get();
-    file->path = NormalizedPath("cfg_simplify.m");
+    auto mfile = std::make_unique<MFileUnit>();
+    mfile->path = NormalizedPath("cfg_simplify.m");
 
     auto script = std::make_unique<ScriptUnit>();
     script->name = "cfg_simplify";
-    script->file = file.get();
+    script->file = mfile.get();
 
     BasicBlock* entry = script->create_block("entry", SourceSpan::invalid());
     BasicBlock* bridge = script->create_block("bridge", SourceSpan::invalid());
@@ -399,9 +351,8 @@ void verify_cfg_simplification_removes_empty_goto_blocks() {
     append_goto(*bridge, *exit);
     append_return(*exit);
 
-    file->entry_unit = script.get();
-    file->code_units.push_back(std::move(script));
-    module->files.push_back(std::move(file));
+    mfile->entry_unit = script.get();
+    mfile->code_units.push_back(std::move(script));
 
     IRPassManagerOptions options;
     options.verify_after_pipeline = true;
@@ -409,14 +360,14 @@ void verify_cfg_simplification_removes_empty_goto_blocks() {
     IRPassManager manager(options);
     manager.add_pass<CFGSimplificationPass>();
 
-    IRPassManagerResult result = manager.run(*module);
+    IRPassManagerResult result = manager.run(*mfile);
     smoke_test::require(result.ok(), "CFG simplify should keep IR verifier-clean");
     smoke_test::require(result.changed, "CFG simplify should remove bridge block");
     smoke_test::require(result.pass_runs.size() == 1, "CFG simplify should record one summary");
     smoke_test::require(result.pass_runs[0].pass_name == "cfg-simplification",
                         "CFG simplify pass name mismatch");
 
-    const CodeUnit& unit = *module->files[0]->entry_unit;
+    const CodeUnit& unit = *mfile->entry_unit;
     smoke_test::require(unit.basic_blocks.size() == 2,
                         "CFG simplify should keep entry and exit only");
     smoke_test::require(unit.basic_blocks[0].get() == entry, "CFG simplify should keep entry");
@@ -649,14 +600,12 @@ void verify_cfg_simplification_ignores_source_boundary() {
 }
 
 void verify_dead_branch_elimination_rewrites_constant_branch() {
-    auto module = std::make_unique<IRModule>();
-    auto file = std::make_unique<MFileUnit>();
-    file->module = module.get();
-    file->path = NormalizedPath("dead_branch.m");
+    auto mfile = std::make_unique<MFileUnit>();
+    mfile->path = NormalizedPath("dead_branch.m");
 
     auto script = std::make_unique<ScriptUnit>();
     script->name = "dead_branch";
-    script->file = file.get();
+    script->file = mfile.get();
 
     BasicBlock* entry = script->create_block("entry", SourceSpan::invalid());
     BasicBlock* then_block = script->create_block("then", SourceSpan::invalid());
@@ -673,9 +622,8 @@ void verify_dead_branch_elimination_rewrites_constant_branch() {
     append_return(*then_block);
     append_return(*else_block);
 
-    file->entry_unit = script.get();
-    file->code_units.push_back(std::move(script));
-    module->files.push_back(std::move(file));
+    mfile->entry_unit = script.get();
+    mfile->code_units.push_back(std::move(script));
 
     IRPassManagerOptions options;
     options.verify_after_pipeline = true;
@@ -683,14 +631,14 @@ void verify_dead_branch_elimination_rewrites_constant_branch() {
     IRPassManager manager(options);
     manager.add_pass<DeadBranchEliminationPass>();
 
-    IRPassManagerResult result = manager.run(*module);
+    IRPassManagerResult result = manager.run(*mfile);
     smoke_test::require(result.ok(), "dead branch elimination should keep IR verifier-clean");
     smoke_test::require(result.changed, "dead branch elimination should report changed");
     smoke_test::require(result.pass_runs.size() == 1, "dead branch elimination should record one summary");
     smoke_test::require(result.pass_runs[0].pass_name == "dead-branch-elimination",
                         "dead branch elimination pass name mismatch");
 
-    CodeUnit& unit = *module->files[0]->entry_unit;
+    CodeUnit& unit = *mfile->entry_unit;
     smoke_test::require(unit.basic_blocks.size() == 3,
                         "dead branch elimination should not remove blocks by itself");
     smoke_test::require(entry->instructions.back()->type() == Instruction::Goto,
@@ -707,14 +655,12 @@ void verify_dead_branch_elimination_rewrites_constant_branch() {
 }
 
 void verify_dead_code_elimination_removes_unused_constants() {
-    auto module = std::make_unique<IRModule>();
-    auto file = std::make_unique<MFileUnit>();
-    file->module = module.get();
-    file->path = NormalizedPath("dead_code_const.m");
+    auto mfile = std::make_unique<MFileUnit>();
+    mfile->path = NormalizedPath("dead_code_const.m");
 
     auto script = std::make_unique<ScriptUnit>();
     script->name = "dead_code_const";
-    script->file = file.get();
+    script->file = mfile.get();
 
     BasicBlock* entry = script->create_block("entry", SourceSpan::invalid());
     smoke_test::require(entry != nullptr, "dead code const test block should be created");
@@ -733,9 +679,8 @@ void verify_dead_code_elimination_removes_unused_constants() {
     ret->parent = entry;
     entry->instructions.push_back(std::move(ret));
 
-    file->entry_unit = script.get();
-    file->code_units.push_back(std::move(script));
-    module->files.push_back(std::move(file));
+    mfile->entry_unit = script.get();
+    mfile->code_units.push_back(std::move(script));
 
     IRPassManagerOptions options;
     options.verify_after_pipeline = true;
@@ -743,14 +688,14 @@ void verify_dead_code_elimination_removes_unused_constants() {
     IRPassManager manager(options);
     manager.add_pass<DeadCodeEliminationPass>();
 
-    IRPassManagerResult result = manager.run(*module);
+    IRPassManagerResult result = manager.run(*mfile);
     smoke_test::require(result.ok(), "dead code elimination should keep const case verifier-clean");
     smoke_test::require(result.changed, "dead code elimination should remove unused const");
     smoke_test::require(result.pass_runs.size() == 1, "dead code elimination should record one summary");
     smoke_test::require(result.pass_runs[0].pass_name == "dead-code-elimination",
                         "dead code elimination pass name mismatch");
 
-    CodeUnit& unit = *module->files[0]->entry_unit;
+    CodeUnit& unit = *mfile->entry_unit;
     BasicBlock& block = *unit.entry_block;
     smoke_test::require(block.instructions.size() == 2,
                         "dead code elimination should keep live const and return");
@@ -766,14 +711,12 @@ void verify_dead_code_elimination_removes_unused_constants() {
 }
 
 void verify_dead_code_elimination_removes_overwritten_store() {
-    auto module = std::make_unique<IRModule>();
-    auto file = std::make_unique<MFileUnit>();
-    file->module = module.get();
-    file->path = NormalizedPath("dead_store.m");
+    auto mfile = std::make_unique<MFileUnit>();
+    mfile->path = NormalizedPath("dead_store.m");
 
     auto script = std::make_unique<ScriptUnit>();
     script->name = "dead_store";
-    script->file = file.get();
+    script->file = mfile.get();
 
     BasicBlock* entry = script->create_block("entry", SourceSpan::invalid());
     smoke_test::require(entry != nullptr, "dead store test block should be created");
@@ -805,9 +748,8 @@ void verify_dead_code_elimination_removes_overwritten_store() {
     ret->parent = entry;
     entry->instructions.push_back(std::move(ret));
 
-    file->entry_unit = script.get();
-    file->code_units.push_back(std::move(script));
-    module->files.push_back(std::move(file));
+    mfile->entry_unit = script.get();
+    mfile->code_units.push_back(std::move(script));
 
     IRPassManagerOptions options;
     options.verify_after_pipeline = true;
@@ -815,11 +757,11 @@ void verify_dead_code_elimination_removes_overwritten_store() {
     IRPassManager manager(options);
     manager.add_pass<DeadCodeEliminationPass>();
 
-    IRPassManagerResult result = manager.run(*module);
+    IRPassManagerResult result = manager.run(*mfile);
     smoke_test::require(result.ok(), "dead code elimination should keep store case verifier-clean");
     smoke_test::require(result.changed, "dead code elimination should remove overwritten store");
 
-    CodeUnit& unit = *module->files[0]->entry_unit;
+    CodeUnit& unit = *mfile->entry_unit;
     BasicBlock& block = *unit.entry_block;
     smoke_test::require(block.instructions.size() == 4,
                         "dead code elimination should remove dead const and overwritten store");
@@ -844,14 +786,12 @@ void verify_dead_code_elimination_removes_overwritten_store() {
 }
 
 void verify_constant_deduplication_merges_duplicate_constants() {
-    auto module = std::make_unique<IRModule>();
-    auto file = std::make_unique<MFileUnit>();
-    file->module = module.get();
-    file->path = NormalizedPath("const_dedup.m");
+    auto mfile = std::make_unique<MFileUnit>();
+    mfile->path = NormalizedPath("const_dedup.m");
 
     auto script = std::make_unique<ScriptUnit>();
     script->name = "const_dedup";
-    script->file = file.get();
+    script->file = mfile.get();
 
     BasicBlock* entry = script->create_block("entry", SourceSpan::invalid());
     smoke_test::require(entry != nullptr, "constant dedup test block should be created");
@@ -884,9 +824,8 @@ void verify_constant_deduplication_merges_duplicate_constants() {
     ret->parent = entry;
     entry->instructions.push_back(std::move(ret));
 
-    file->entry_unit = script.get();
-    file->code_units.push_back(std::move(script));
-    module->files.push_back(std::move(file));
+    mfile->entry_unit = script.get();
+    mfile->code_units.push_back(std::move(script));
 
     IRPassManagerOptions options;
     options.verify_after_pipeline = true;
@@ -894,14 +833,14 @@ void verify_constant_deduplication_merges_duplicate_constants() {
     IRPassManager manager(options);
     manager.add_pass<ConstantDeduplicationPass>();
 
-    IRPassManagerResult result = manager.run(*module);
+    IRPassManagerResult result = manager.run(*mfile);
     smoke_test::require(result.ok(), "constant dedup should keep IR verifier-clean");
     smoke_test::require(result.changed, "constant dedup should report changed");
     smoke_test::require(result.pass_runs.size() == 1, "constant dedup should record one summary");
     smoke_test::require(result.pass_runs[0].pass_name == "constant-deduplication",
                         "constant dedup pass name mismatch");
 
-    CodeUnit& unit = *module->files[0]->entry_unit;
+    CodeUnit& unit = *mfile->entry_unit;
     BasicBlock& block = *unit.entry_block;
     smoke_test::require(block.instructions.size() == 4,
                         "constant dedup should remove one duplicate const");
@@ -941,14 +880,12 @@ void verify_constant_deduplication_merges_duplicate_constants() {
 }
 
 void verify_constant_deduplication_hoists_loop_constants() {
-    auto module = std::make_unique<IRModule>();
-    auto file = std::make_unique<MFileUnit>();
-    file->module = module.get();
-    file->path = NormalizedPath("const_hoist.m");
+    auto mfile = std::make_unique<MFileUnit>();
+    mfile->path = NormalizedPath("const_hoist.m");
 
     auto script = std::make_unique<ScriptUnit>();
     script->name = "const_hoist";
-    script->file = file.get();
+    script->file = mfile.get();
     ScriptUnit* script_ptr = script.get();
 
     BasicBlock* entry = script->create_block("entry", SourceSpan::invalid());
@@ -971,9 +908,8 @@ void verify_constant_deduplication_hoists_loop_constants() {
     append_goto(*body, *header);
     append_return(*exit);
 
-    file->entry_unit = script.get();
-    file->code_units.push_back(std::move(script));
-    module->files.push_back(std::move(file));
+    mfile->entry_unit = script.get();
+    mfile->code_units.push_back(std::move(script));
 
     IRPassManagerOptions options;
     options.verify_after_pipeline = true;
@@ -981,7 +917,7 @@ void verify_constant_deduplication_hoists_loop_constants() {
     IRPassManager manager(options);
     manager.add_pass<ConstantDeduplicationPass>();
 
-    IRPassManagerResult result = manager.run(*module);
+    IRPassManagerResult result = manager.run(*mfile);
     smoke_test::require(result.ok(), "constant hoist should keep IR verifier-clean");
     smoke_test::require(result.changed, "constant hoist should report changed");
     smoke_test::require(entry->instructions.size() == 3,
@@ -1014,14 +950,12 @@ void verify_constant_deduplication_hoists_loop_constants() {
 }
 
 void verify_load_forwarding_eliminates_redundant_load() {
-    auto module = std::make_unique<IRModule>();
-    auto file = std::make_unique<MFileUnit>();
-    file->module = module.get();
-    file->path = NormalizedPath("load_forward.m");
+    auto mfile = std::make_unique<MFileUnit>();
+    mfile->path = NormalizedPath("load_forward.m");
 
     auto script = std::make_unique<ScriptUnit>();
     script->name = "load_forward";
-    script->file = file.get();
+    script->file = mfile.get();
 
     BasicBlock* entry = script->create_block("entry", SourceSpan::invalid());
     smoke_test::require(entry != nullptr, "load forwarding test block should be created");
@@ -1060,9 +994,8 @@ void verify_load_forwarding_eliminates_redundant_load() {
     ret->parent = entry;
     entry->instructions.push_back(std::move(ret));
 
-    file->entry_unit = script.get();
-    file->code_units.push_back(std::move(script));
-    module->files.push_back(std::move(file));
+    mfile->entry_unit = script.get();
+    mfile->code_units.push_back(std::move(script));
 
     IRPassManagerOptions options;
     options.verify_after_pipeline = true;
@@ -1070,7 +1003,7 @@ void verify_load_forwarding_eliminates_redundant_load() {
     IRPassManager manager(options);
     manager.add_pass<LoadForwardingPass>();
 
-    IRPassManagerResult result = manager.run(*module);
+    IRPassManagerResult result = manager.run(*mfile);
     smoke_test::require(result.ok(), "load forwarding should keep IR verifier-clean");
     smoke_test::require(result.changed, "load forwarding should report changed");
     smoke_test::require(result.pass_runs.size() == 1, "load forwarding should record one summary");
@@ -1079,7 +1012,7 @@ void verify_load_forwarding_eliminates_redundant_load() {
     smoke_test::require(result.pass_runs[0].changed_invocations == 1,
                         "load forwarding changed invocation count mismatch");
 
-    CodeUnit& unit = *module->files[0]->entry_unit;
+    CodeUnit& unit = *mfile->entry_unit;
     BasicBlock& block = *unit.entry_block;
     smoke_test::require(block.instructions.size() == 4,
                         "load forwarding should remove the redundant load");

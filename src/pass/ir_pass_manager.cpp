@@ -88,73 +88,25 @@ void append_verify_result(
     return options.stop_on_error && !result.ok();
 }
 
-[[nodiscard]] MFileUnit* source_file_for(CodeUnit& unit) noexcept {
-    if (unit.is_script()) {
-        return static_cast<ScriptUnit&>(unit).file;
-    }
-
-    if (unit.is_function()) {
-        return static_cast<FunctionUnit&>(unit).file;
-    }
-
-    if (unit.is_anonymous_function()) {
-        auto& function = static_cast<AnonymousFunctionUnit&>(unit);
-        return function.lexical_parent != nullptr
-            ? source_file_for(*function.lexical_parent)
-            : nullptr;
-    }
-
-    return nullptr;
-}
-
-void run_module_pass(
-    IRModulePass& pass,
-    IRModule& module,
+void run_file_pass(
+    IRFilePass& pass,
+    MFileUnit& mfile,
     IRPassManagerResult& result,
     IRPassRunSummary& summary) {
     IRPassContext context;
-    context.module = &module;
+    context.file = &mfile;
 
     ++summary.invocations;
-    append_pass_result(result, summary, pass.name(), pass.run(module, context));
-}
-
-void run_file_pass(
-    IRFilePass& pass,
-    IRModule& module,
-    const IRPassManagerOptions& options,
-    IRPassManagerResult& result,
-    IRPassRunSummary& summary) {
-    for (const auto& file_ptr : module.files) {
-        if (file_ptr == nullptr) {
-            report_manager_error(result, "IR module contains a null file unit");
-            if (should_stop(result, options)) {
-                return;
-            }
-            continue;
-        }
-
-        IRPassContext context;
-        context.module = &module;
-        context.file = file_ptr.get();
-
-        ++summary.invocations;
-        append_pass_result(result, summary, pass.name(), pass.run(*file_ptr, context));
-        if (should_stop(result, options)) {
-            return;
-        }
-    }
+    append_pass_result(result, summary, pass.name(), pass.run(mfile, context));
 }
 
 void run_code_unit_invocation(
     IRCodeUnitPass& pass,
-    IRModule& module,
     MFileUnit* file,
     CodeUnit& unit,
     IRPassManagerResult& result,
     IRPassRunSummary& summary) {
     IRPassContext context;
-    context.module = &module;
     context.file = file;
     context.unit = &unit;
 
@@ -164,44 +116,13 @@ void run_code_unit_invocation(
 
 void run_code_unit_pass(
     IRCodeUnitPass& pass,
-    IRModule& module,
+    MFileUnit& mfile,
     const IRPassManagerOptions& options,
     IRPassManagerResult& result,
     IRPassRunSummary& summary) {
-    for (const auto& file_ptr : module.files) {
-        if (file_ptr == nullptr) {
-            report_manager_error(result, "IR module contains a null file unit");
-            if (should_stop(result, options)) {
-                return;
-            }
-            continue;
-        }
-
-        for (const auto& unit_ptr : file_ptr->code_units) {
-            if (unit_ptr == nullptr) {
-                report_manager_error(result, "IR file contains a null code unit");
-                if (should_stop(result, options)) {
-                    return;
-                }
-                continue;
-            }
-
-            run_code_unit_invocation(
-                pass,
-                module,
-                file_ptr.get(),
-                *unit_ptr,
-                result,
-                summary);
-            if (should_stop(result, options)) {
-                return;
-            }
-        }
-    }
-
-    for (const auto& function_ptr : module.anonymous_functions.functions) {
-        if (function_ptr == nullptr) {
-            report_manager_error(result, "IR module contains a null anonymous function unit");
+    for (const auto& unit_ptr : mfile.code_units) {
+        if (unit_ptr == nullptr) {
+            report_manager_error(result, "IR file contains a null code unit");
             if (should_stop(result, options)) {
                 return;
             }
@@ -210,9 +131,8 @@ void run_code_unit_pass(
 
         run_code_unit_invocation(
             pass,
-            module,
-            source_file_for(*function_ptr),
-            *function_ptr,
+            &mfile,
+            *unit_ptr,
             result,
             summary);
         if (should_stop(result, options)) {
@@ -223,27 +143,18 @@ void run_code_unit_pass(
 
 void run_pass(
     IRPass& pass,
-    IRModule& module,
+    MFileUnit& mfile,
     const IRPassManagerOptions& options,
     IRPassManagerResult& result,
     IRPassRunSummary& summary) {
     switch (pass.scope()) {
-        case IRPassScope::Module: {
-            auto* module_pass = dynamic_cast<IRModulePass*>(&pass);
-            if (module_pass == nullptr) {
-                report_manager_error(result, "module pass has an incompatible concrete type");
-                return;
-            }
-            run_module_pass(*module_pass, module, result, summary);
-            return;
-        }
         case IRPassScope::File: {
             auto* file_pass = dynamic_cast<IRFilePass*>(&pass);
             if (file_pass == nullptr) {
                 report_manager_error(result, "file pass has an incompatible concrete type");
                 return;
             }
-            run_file_pass(*file_pass, module, options, result, summary);
+            run_file_pass(*file_pass, mfile, result, summary);
             return;
         }
         case IRPassScope::CodeUnit: {
@@ -252,7 +163,7 @@ void run_pass(
                 report_manager_error(result, "code unit pass has an incompatible concrete type");
                 return;
             }
-            run_code_unit_pass(*code_unit_pass, module, options, result, summary);
+            run_code_unit_pass(*code_unit_pass, mfile, options, result, summary);
             return;
         }
     }
@@ -264,8 +175,6 @@ void run_pass(
 
 std::string_view ir_pass_scope_name(IRPassScope scope) noexcept {
     switch (scope) {
-        case IRPassScope::Module:
-            return "module";
         case IRPassScope::File:
             return "file";
         case IRPassScope::CodeUnit:
@@ -301,14 +210,14 @@ void IRPassManager::add_pass(std::unique_ptr<IRPass> pass) {
     passes_.push_back(std::move(pass));
 }
 
-IRPassManagerResult IRPassManager::run(IRModule& module) {
+IRPassManagerResult IRPassManager::run(MFileUnit& mfile) {
     IRPassManagerResult result;
 
     if (options_.verify_before_pipeline) {
         append_verify_result(
             result,
             "before pipeline",
-            verify_ir(module, options_.verify_options));
+            verify_ir(mfile, options_.verify_options));
         if (should_stop(result, options_)) {
             return result;
         }
@@ -327,7 +236,7 @@ IRPassManagerResult IRPassManager::run(IRModule& module) {
         summary.pass_name = std::string(pass_ptr->name());
         summary.scope = pass_ptr->scope();
 
-        run_pass(*pass_ptr, module, options_, result, summary);
+        run_pass(*pass_ptr, mfile, options_, result, summary);
         result.pass_runs.push_back(std::move(summary));
         if (should_stop(result, options_)) {
             return result;
@@ -337,7 +246,7 @@ IRPassManagerResult IRPassManager::run(IRModule& module) {
             append_verify_result(
                 result,
                 "after pass " + result.pass_runs.back().pass_name,
-                verify_ir(module, options_.verify_options));
+                verify_ir(mfile, options_.verify_options));
             if (should_stop(result, options_)) {
                 return result;
             }
@@ -348,7 +257,7 @@ IRPassManagerResult IRPassManager::run(IRModule& module) {
         append_verify_result(
             result,
             "after pipeline",
-            verify_ir(module, options_.verify_options));
+            verify_ir(mfile, options_.verify_options));
     }
 
     return result;

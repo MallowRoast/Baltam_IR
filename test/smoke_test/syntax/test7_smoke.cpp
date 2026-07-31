@@ -152,17 +152,16 @@ void verify_returns(const FunctionUnit& function, const FunctionUnit& pair_ops) 
 
 int main() {
     try {
-        const baltam::smoke_test::SmokeArtifacts artifacts =
-            baltam::smoke_test::build_ir(TEST7_MFILE_PATH);
-        baltam::smoke_test::require_ir_is_complete(artifacts.result);
-        baltam::smoke_test::require(artifacts.result.mfile->is_function_file(), "test7 应为函数文件");
+        const baltam::IRBuildResult ir = baltam::smoke_test::build_ir(TEST7_MFILE_PATH);
+        baltam::smoke_test::require_ir_is_complete(ir);
+        baltam::smoke_test::require(ir.mfile->is_function_file(), "test7 应为函数文件");
         baltam::smoke_test::require(
-            artifacts.result.mfile->code_units.size() == 2,
+            ir.mfile->code_units.size() == 2,
             "test7 文件应包含主函数和一个 local function");
 
-        const baltam::FunctionUnit* function = baltam::find_function(*artifacts.result.mfile, "test7");
+        const baltam::FunctionUnit* function = baltam::find_function(*ir.mfile, "test7");
         const baltam::FunctionUnit* pair_ops =
-            baltam::find_function(*artifacts.result.mfile, "pair_ops");
+            baltam::find_function(*ir.mfile, "pair_ops");
         baltam::smoke_test::require(function != nullptr, "应找到 test7 函数单元");
         baltam::smoke_test::require(pair_ops != nullptr, "应找到 pair_ops local function");
 

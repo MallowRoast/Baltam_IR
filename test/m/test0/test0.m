@@ -5,8 +5,8 @@
 % 2. sin(a) 在脚本中保留源码层圆括号应用歧义，因此应生成 apply，而不是直接变成 call
 % 3. 继续覆盖基本算术、if / else，以及源码行号注释打印
 %
-% 这个文件会和 test0_1.m 保持接近的源码骨架，只改变“脚本 vs 函数”这一点，
-% 以便更清楚地对比两种工作区语义下的 lowering 差异。
+% 文件尾部的 local 函数用于让 runtime smoke 在保留单一 test0.m 夹具的同时，
+% 覆盖脚本执行期间创建函数栈帧的路径。
 
 a = 1 + 2;
 b = sin(a);
@@ -15,4 +15,10 @@ if b > 0
     c = b * 2;
 else
     c = 0;
+end
+
+d = test0_local(a);
+
+function y = test0_local(x)
+y = x;
 end

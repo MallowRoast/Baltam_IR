@@ -5,7 +5,11 @@
 #include "ba_obj/ba_obj.h"
 
 #include <atomic>
+#include <cstdint>
+#include <filesystem>
+#include <memory>
 #include <unordered_map>
+#include <vector>
 
 namespace baltam {
 
@@ -25,8 +29,19 @@ struct GlobalRegistry {
     void clear(InternedString name);
 };
 
+struct MFileCache {
+    NormalizedPath path;
+    std::uint64_t epoch = 0;
+    std::filesystem::file_time_type mtime{};
+    std::unique_ptr<MFileUnit> file;
+};
+
 class InterpreterContext final {
 public:
+    std::unordered_map<NormalizedPath, MFileCache> mfiles;
+    std::unique_ptr<CommandUnit> command;
+    std::vector<std::shared_ptr<AnonymousFunctionUnit>> anonymous_functions;
+
     BaseWorkspace base_workspace;
     GlobalRegistry globals;
 

@@ -31,7 +31,6 @@ struct PrivateFunctionTable {
 
 class CodeObject final {
 public:
-    std::shared_ptr<IRModule> ir_owner;
     CodeUnit* unit = nullptr;
 
     PersistentTable persistent;
@@ -55,8 +54,7 @@ struct CodeCacheKeyHash {
 };
 
 struct AnonymousCodeKey {
-    const IRModule* module = nullptr;
-    AnonymousFunctionId function_id = InvalidAnonymousFunctionId;
+    const AnonymousFunctionUnit* function = nullptr;
 
     [[nodiscard]] friend bool operator==(
         AnonymousCodeKey lhs,
@@ -87,7 +85,7 @@ public:
     [[nodiscard]] std::shared_ptr<CodeObject> find(AnonymousCodeKey key) const;
 
     void insert(AnonymousCodeKey key, std::shared_ptr<CodeObject> code);
-    void invalidate_module(const IRModule* module);
+    void invalidate_function(const AnonymousFunctionUnit* function);
     void invalidate_all();
     void collect_retired(const RuntimeFrame* current_frame);
 

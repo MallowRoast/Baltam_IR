@@ -1971,8 +1971,15 @@ ValueId IRLowerer::lower_anonymous_function_handle(const ast_ptr& node) {
         });
     }
 
-    AnonymousFunctionUnit& anonymous_unit =
+    std::shared_ptr<AnonymousFunctionUnit> anonymous_owner =
         builder_.begin_anonymous_function_unit(source_span_from(node));
+    if (anonymous_owner == nullptr) {
+        builder_.set_current_unit(outer_unit);
+        builder_.set_insert_point(outer_block);
+        return InvalidValueId;
+    }
+
+    AnonymousFunctionUnit& anonymous_unit = *anonymous_owner;
     unit_name_bindings_.try_emplace(&anonymous_unit);
     BasicBlock* entry_block = anonymous_unit.create_block("entry", source_span_from(node));
     if (!anonymous_unit.set_entry_block(entry_block)) {
@@ -2020,7 +2027,6 @@ ValueId IRLowerer::lower_anonymous_function_handle(const ast_ptr& node) {
     ret->source_span = source_span_from(body_node);
     builder_.append_instruction(std::move(ret));
 
-    const AnonymousFunctionId function_id = anonymous_unit.id;
     builder_.set_current_unit(outer_unit);
     builder_.set_insert_point(outer_block);
 
@@ -2030,7 +2036,7 @@ ValueId IRLowerer::lower_anonymous_function_handle(const ast_ptr& node) {
     if (!inst->result.is_valid()) {
         return InvalidValueId;
     }
-    inst->function_id = function_id;
+    inst->target = std::move(anonymous_owner);
     inst->captures = std::move(captures);
     inst->source_span = source_span_from(node);
 
@@ -2634,9 +2640,9 @@ IRBuildResult parse_and_lower_mfile_to_ir(
     IRLowerer lowerer;
     IRBuildResult lowered = lowerer.lower_parsed_units(parsed_units);
 
-    result.module = std::move(lowered.module);
-    result.mfile = lowered.mfile;
-    lowered.mfile = nullptr;
+    result.mfile = std::move(lowered.mfile);
+    result.command = std::move(lowered.command);
+    result.anonymous_functions = std::move(lowered.anonymous_functions);
     result.diagnostics.insert(
         result.diagnostics.end(),
         std::make_move_iterator(lowered.diagnostics.begin()),

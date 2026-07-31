@@ -399,24 +399,22 @@ void bind_instruction_results(CodeUnit* unit, Instruction* instruction) {
 } // namespace
 
 void IRBuilder::reset() noexcept {
-    owned_module_.reset();
+    owned_file_.reset();
+    owned_command_.reset();
     current_file_ = nullptr;
     unit_states_.clear();
     current_unit_state_ = nullptr;
     next_anonymous_function_ = 0;
+    anonymous_functions_.clear();
     diagnostics_.clear();
 }
 
 MFileUnit& IRBuilder::begin_file(NormalizedPath path) {
     reset();
 
-    owned_module_ = std::make_unique<IRModule>();
-    auto file = std::make_unique<MFileUnit>();
-    file->module = owned_module_.get();
-    file->path = std::move(path);
-
-    current_file_ = file.get();
-    owned_module_->files.push_back(std::move(file));
+    owned_file_ = std::make_unique<MFileUnit>();
+    owned_file_->path = std::move(path);
+    current_file_ = owned_file_.get();
 
     return *current_file_;
 }
@@ -431,13 +429,8 @@ UnitT& IRBuilder::begin_unit(
             IRBuildDiagnostic::Error,
             missing_file_message,
             source_span);
-        if (owned_module_ == nullptr) {
-            owned_module_ = std::make_unique<IRModule>();
-        }
-        auto file = std::make_unique<MFileUnit>();
-        file->module = owned_module_.get();
-        current_file_ = file.get();
-        owned_module_->files.push_back(std::move(file));
+        owned_file_ = std::make_unique<MFileUnit>();
+        current_file_ = owned_file_.get();
     }
 
     auto unit = std::make_unique<UnitT>();
@@ -479,15 +472,25 @@ FunctionUnit& IRBuilder::begin_function_unit(std::string_view name, SourceSpan s
         "创建函数代码单元前必须先创建文件");
 }
 
-AnonymousFunctionUnit& IRBuilder::begin_anonymous_function_unit(SourceSpan source_span) {
-    if (owned_module_ == nullptr) {
-        report(
-            IRBuildDiagnostic::Error,
-            "创建匿名函数体单元前必须先创建 module",
-            source_span);
-        owned_module_ = std::make_unique<IRModule>();
-    }
+CommandUnit& IRBuilder::begin_command_unit(SourceSpan source_span) {
+    reset();
 
+    owned_command_ = std::make_unique<CommandUnit>();
+    owned_command_->name = "__command";
+    owned_command_->source_span = source_span;
+
+    CommandUnit* unit_ptr = owned_command_.get();
+
+    auto state = std::make_unique<IRUnitBuildState>();
+    state->unit = unit_ptr;
+    current_unit_state_ = state.get();
+    unit_states_[unit_ptr] = std::move(state);
+
+    return *unit_ptr;
+}
+
+std::shared_ptr<AnonymousFunctionUnit> IRBuilder::begin_anonymous_function_unit(
+    SourceSpan source_span) {
     CodeUnit* lexical_parent = current_unit();
     if (lexical_parent == nullptr) {
         report(
@@ -496,21 +499,20 @@ AnonymousFunctionUnit& IRBuilder::begin_anonymous_function_unit(SourceSpan sourc
             source_span);
     }
 
-    auto unit = std::make_unique<AnonymousFunctionUnit>();
+    auto unit = std::make_shared<AnonymousFunctionUnit>();
     unit->lexical_parent = lexical_parent;
-    unit->id = create_anonymous_function_id();
-    unit->name = "__anon" + std::to_string(unit->id.value());
+    unit->name = "__anon" + std::to_string(next_anonymous_function_++);
     unit->source_span = source_span;
 
     AnonymousFunctionUnit* unit_ptr = unit.get();
-    owned_module_->anonymous_functions.functions.push_back(std::move(unit));
+    anonymous_functions_.push_back(unit);
 
     auto state = std::make_unique<IRUnitBuildState>();
     state->unit = unit_ptr;
     current_unit_state_ = state.get();
     unit_states_[unit_ptr] = std::move(state);
 
-    return *unit_ptr;
+    return unit;
 }
 
 void IRBuilder::set_current_unit(CodeUnit* unit) {
@@ -631,18 +633,6 @@ ValueId IRBuilder::create_value() {
     return value_id;
 }
 
-AnonymousFunctionId IRBuilder::create_anonymous_function_id() {
-    if (owned_module_ == nullptr) {
-        report(
-            IRBuildDiagnostic::Error,
-            "没有活动 module，无法创建匿名函数 ID",
-            SourceSpan::invalid());
-        return InvalidAnonymousFunctionId;
-    }
-
-    return AnonymousFunctionId(next_anonymous_function_++);
-}
-
 void IRBuilder::append_instruction(std::unique_ptr<Instruction> instruction) {
     if (current_unit_state_ == nullptr || current_unit_state_->unit == nullptr) {
         report(
@@ -755,13 +745,15 @@ void IRBuilder::append_instruction(std::unique_ptr<Instruction> instruction) {
 
 IRBuildResult IRBuilder::finish() {
     IRBuildResult result;
-    result.mfile = current_file_;
-    result.module = std::move(owned_module_);
+    result.mfile = std::move(owned_file_);
+    result.command = std::move(owned_command_);
+    result.anonymous_functions = std::move(anonymous_functions_);
     result.diagnostics = std::move(diagnostics_);
 
     unit_states_.clear();
     current_unit_state_ = nullptr;
     current_file_ = nullptr;
+    anonymous_functions_.clear();
     diagnostics_.clear();
 
     return result;

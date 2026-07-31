@@ -129,13 +129,6 @@ std::string format_slot_id(SlotId slot_id) {
     return "%slot" + std::to_string(slot_id.value());
 }
 
-std::string format_anonymous_function_id(AnonymousFunctionId function_id) {
-    if (!function_id.is_valid()) {
-        return "#anon<invalid>";
-    }
-    return "#anon" + std::to_string(function_id.value());
-}
-
 std::string format_constant(const Constant& constant) {
     return std::visit(
         [](const auto& value) -> std::string {
@@ -387,30 +380,7 @@ public:
         build_source_line_offsets();
     }
 
-    void render_module(const IRModule& module) {
-        for (std::size_t i = 0; i < module.files.size(); ++i) {
-            const MFileUnit* file = module.files[i].get();
-            if (file != nullptr) {
-                render_file(*file, nullptr);
-            }
-
-            if (i + 1U < module.files.size()) {
-                lines_.push_back({});
-            }
-        }
-
-        render_anonymous_functions(module.anonymous_functions);
-    }
-
     void render_file(const MFileUnit& mfile) {
-        render_file(
-            mfile,
-            mfile.module != nullptr ? &mfile.module->anonymous_functions : nullptr);
-    }
-
-    void render_file(
-        const MFileUnit& mfile,
-        const AnonymousFunctionTable* anonymous_functions) {
         if (options_.print_file_header) {
             lines_.push_back({"; mfile \"" + escape_text(mfile.path.string()) + '"', {}});
             if (!mfile.code_units.empty()) {
@@ -428,10 +398,6 @@ public:
             if (i + 1U < units.size()) {
                 lines_.push_back({});
             }
-        }
-
-        if (anonymous_functions != nullptr) {
-            render_anonymous_functions(*anonymous_functions);
         }
     }
 
@@ -494,27 +460,6 @@ private:
         return units;
     }
 
-    void render_anonymous_functions(const AnonymousFunctionTable& anonymous_functions) {
-        if (anonymous_functions.empty()) {
-            return;
-        }
-
-        if (!lines_.empty() && !lines_.back().text.empty()) {
-            lines_.push_back({});
-        }
-
-        for (std::size_t i = 0; i < anonymous_functions.functions.size(); ++i) {
-            const AnonymousFunctionUnit* unit = anonymous_functions.functions[i].get();
-            if (unit != nullptr) {
-                render_unit(*unit);
-            }
-
-            if (i + 1U < anonymous_functions.functions.size()) {
-                lines_.push_back({});
-            }
-        }
-    }
-
     void render_unit(const CodeUnit& unit) {
         assign_slot_refs(unit.slot_table);
 
@@ -532,8 +477,7 @@ private:
             emit_raw(std::move(header));
         } else if (unit.is_anonymous_function()) {
             const auto& function = static_cast<const AnonymousFunctionUnit&>(unit);
-            std::string header = "anon ";
-            header += format_anonymous_function_id(function.id);
+            std::string header = "anon " + format_symbol(function.name);
             header += '(';
             header += join_signature_slots(function.slot_table, function.param_slots);
             header += ')';
@@ -1298,7 +1242,9 @@ private:
         const CreateAnonymousFunctionHandleInst& inst) const {
         std::string text = format_value_result(unit, inst.result);
         text += " = create_anon_func ";
-        text += format_anonymous_function_id(inst.function_id);
+        text += inst.target != nullptr
+            ? format_symbol(inst.target->name)
+            : std::string("<null>");
         if (inst.captures.empty()) {
             return text;
         }
@@ -1475,59 +1421,11 @@ private:
 } // namespace
 
 std::string format_ir(
-    const IRModule& module,
-    const IRPrintOptions& options) {
-    const MFileUnit* owner = nullptr;
-    for (const auto& file : module.files) {
-        if (file != nullptr) {
-            owner = file.get();
-            break;
-        }
-    }
-
-    if (owner == nullptr) {
-        MFileUnit empty_owner;
-        IRPrinter printer(options, empty_owner);
-        printer.render_module(module);
-        return printer.str();
-    }
-
-    IRPrinter printer(options, *owner);
-    printer.render_module(module);
-    return printer.str();
-}
-
-std::string format_ir(
     const MFileUnit& mfile,
     const IRPrintOptions& options) {
     IRPrinter printer(options, mfile);
     printer.render_file(mfile);
     return printer.str();
-}
-
-void print_ir(
-    std::ostream& os,
-    const IRModule& module,
-    const IRPrintOptions& options) {
-    const MFileUnit* owner = nullptr;
-    for (const auto& file : module.files) {
-        if (file != nullptr) {
-            owner = file.get();
-            break;
-        }
-    }
-
-    if (owner == nullptr) {
-        MFileUnit empty_owner;
-        IRPrinter printer(options, empty_owner);
-        printer.render_module(module);
-        printer.print(os);
-        return;
-    }
-
-    IRPrinter printer(options, *owner);
-    printer.render_module(module);
-    printer.print(os);
 }
 
 void print_ir(

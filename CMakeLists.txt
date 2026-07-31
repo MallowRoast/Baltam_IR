@@ -34,15 +34,56 @@ target_include_directories(BALTAM_IR
 
 target_compile_features(BALTAM_IR PUBLIC cxx_std_17)
 
+set(BALTAM_SYSTEM_LIB_DIR "/opt/Baltamatica/lib" CACHE PATH
+    "Directory containing the installed Baltamatica runtime libraries")
+set(BALTAM_DEPS_CORE_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/deps/core/lib" CACHE PATH
+    "Fallback directory containing vendored core runtime libraries")
+set(BALTAM_DEPS_LOGGER_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/deps/logger/lib" CACHE PATH
+    "Fallback directory containing vendored logger runtime libraries")
+
+function(resolve_baltam_library output_var library_name fallback_dir)
+    set(primary_lib "${BALTAM_SYSTEM_LIB_DIR}/lib${library_name}.so")
+    set(fallback_lib "${fallback_dir}/lib${library_name}.so")
+
+    if (EXISTS "${primary_lib}")
+        set(${output_var} "${primary_lib}" PARENT_SCOPE)
+    elseif (EXISTS "${fallback_lib}")
+        message(WARNING
+            "Using vendored fallback library for ${library_name}: ${fallback_lib}")
+        set(${output_var} "${fallback_lib}" PARENT_SCOPE)
+    else()
+        message(FATAL_ERROR
+            "Could not find lib${library_name}.so in ${BALTAM_SYSTEM_LIB_DIR}"
+            " or ${fallback_dir}")
+    endif()
+endfunction()
+
+resolve_baltam_library(BALTAM_BT_CORE_LIB bt_core "${BALTAM_DEPS_CORE_LIB_DIR}")
+resolve_baltam_library(BALTAM_BT_WORKER_LIB bt_worker "${BALTAM_DEPS_CORE_LIB_DIR}")
+resolve_baltam_library(BALTAM_BT_AST_LIB bt_ast "${BALTAM_DEPS_CORE_LIB_DIR}")
+resolve_baltam_library(BALTAM_BT_AST_BASE_LIB bt_ast_base "${BALTAM_DEPS_CORE_LIB_DIR}")
+resolve_baltam_library(BALTAM_BT_LOGGER_LIB bt_logger "${BALTAM_DEPS_LOGGER_LIB_DIR}")
+
+set(BALTAM_RUNTIME_RPATH "${BALTAM_SYSTEM_LIB_DIR}")
+foreach(runtime_lib
+        ${BALTAM_BT_CORE_LIB}
+        ${BALTAM_BT_WORKER_LIB}
+        ${BALTAM_BT_AST_LIB}
+        ${BALTAM_BT_AST_BASE_LIB}
+        ${BALTAM_BT_LOGGER_LIB})
+    get_filename_component(runtime_lib_dir "${runtime_lib}" DIRECTORY)
+    list(APPEND BALTAM_RUNTIME_RPATH "${runtime_lib_dir}")
+endforeach()
+list(REMOVE_DUPLICATES BALTAM_RUNTIME_RPATH)
+list(JOIN BALTAM_RUNTIME_RPATH ":" BALTAM_RUNTIME_LD_LIBRARY_PATH)
+
 target_link_libraries(BALTAM_IR
     PUBLIC
-        # 当前统一链接本机 `/opt/Baltamatica/lib` 下的运行库，避免和仓库 `deps/`
-        # 目录中的旧版 `.so` 混用。`deps/` 只保留头文件用途。
-        /opt/Baltamatica/lib/libbt_core.so
-        /opt/Baltamatica/lib/libbt_worker.so
-        /opt/Baltamatica/lib/libbt_ast.so
-        /opt/Baltamatica/lib/libbt_ast_base.so
-        /opt/Baltamatica/lib/libbt_logger.so
+        ${BALTAM_BT_CORE_LIB}
+        ${BALTAM_BT_WORKER_LIB}
+        ${BALTAM_BT_AST_LIB}
+        ${BALTAM_BT_AST_BASE_LIB}
+        ${BALTAM_BT_LOGGER_LIB}
 )
 
 add_executable(ir_cfg_dot
@@ -56,7 +97,7 @@ target_include_directories(ir_cfg_dot
 )
 
 set_target_properties(ir_cfg_dot PROPERTIES
-    BUILD_RPATH "/opt/Baltamatica/lib"
+    BUILD_RPATH "${BALTAM_RUNTIME_RPATH}"
 )
 
 target_link_libraries(ir_cfg_dot
@@ -69,7 +110,7 @@ add_executable(ir_print
 )
 
 set_target_properties(ir_print PROPERTIES
-    BUILD_RPATH "/opt/Baltamatica/lib"
+    BUILD_RPATH "${BALTAM_RUNTIME_RPATH}"
 )
 
 target_link_libraries(ir_print
@@ -77,9 +118,8 @@ target_link_libraries(ir_print
         BALTAM_IR
 )
 
-# 这里统一指向 `/opt/Baltamatica/lib`，保证主库与后续 builtin/plugin 使用同一套 runtime。
 set(CMAKE_BUILD_RPATH
-    "/opt/Baltamatica/lib")
+    "${BALTAM_RUNTIME_RPATH}")
 
 if (BUILD_TESTING)
     add_subdirectory(test)

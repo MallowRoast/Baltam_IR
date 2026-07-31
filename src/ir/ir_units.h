@@ -9,7 +9,6 @@
 
 namespace baltam {
 
-struct IRModule;
 struct MFileUnit;
 struct AnonymousFunctionUnit;
 struct CodeUnit;
@@ -80,6 +79,15 @@ struct CodeUnit {
      */
     [[nodiscard]] bool is_anonymous_function() const noexcept {
         return type() == AnonymousFunction;
+    }
+
+    /**
+     * @brief 判断当前单元是否为命令行 / REPL 输入单元。
+     *
+     * @return `type() == Command` 时返回 true。
+     */
+    [[nodiscard]] bool is_command() const noexcept {
+        return type() == Command;
     }
 
     /**
@@ -175,11 +183,12 @@ struct FunctionUnit : CodeUnit {
 };
 
 /**
- * @brief 命令行 / REPL 输入对应的代码单元占位。
+ * @brief 命令行 / REPL 输入对应的代码单元。
  *
- * 当前仅保留类型定义和 `CodeUnit::Command` 类型标记，不接入 lowering、builder、
- * printer、verifier，也不由 `IRModule` 拥有。后续真正接入 REPL 时再定义 owner、
- * session workspace 和匿名函数句柄生命周期。
+ * `CommandUnit` 不是 `.m` 文件的一部分。当前 runtime 只保留一个当前命令单元，
+ * 由 `InterpreterContext::command` 拥有。命令中的普通用户名字按 base workspace
+ * 语义建模，后续 lowering 应使用 `SlotTag::BaseVar` 表达静态可见的 base workspace
+ * binding。
  */
 struct CommandUnit : CodeUnit {
     /**
@@ -219,56 +228,22 @@ struct AnonymousFunctionUnit : CodeUnit {
         return CodeUnit::AnonymousFunction;
     }
 
-    AnonymousFunctionId id = InvalidAnonymousFunctionId;
     CodeUnit* lexical_parent = nullptr;
     std::vector<Slot> param_slots;
     std::vector<Slot> capture_slots;
 };
 
 /**
- * @brief 匿名函数体全局表。
- *
- * 第一阶段把“全局”限定在 IR module / build session 中，由该表拥有所有匿名函数体。
- * 普通 IR 指令通过 `AnonymousFunctionId` 间接引用表内单元。
- */
-struct AnonymousFunctionTable {
-    std::vector<std::unique_ptr<AnonymousFunctionUnit>> functions;
-
-    [[nodiscard]] bool empty() const noexcept {
-        return functions.empty();
-    }
-
-    [[nodiscard]] AnonymousFunctionUnit* find(AnonymousFunctionId id) noexcept {
-        return const_cast<AnonymousFunctionUnit*>(std::as_const(*this).find(id));
-    }
-
-    [[nodiscard]] const AnonymousFunctionUnit* find(AnonymousFunctionId id) const noexcept {
-        if (!id.is_valid()) {
-            return nullptr;
-        }
-
-        for (const auto& function : functions) {
-            if (function != nullptr && function->id == id) {
-                return function.get();
-            }
-        }
-        return nullptr;
-    }
-};
-
-/**
  * @brief 文件级 IR 单元。
  *
  * `MFileUnit` 对应一个 `.m` 文件，直接拥有该文件中的脚本 / 具名函数 `CodeUnit`，并通过
- * `entry_unit` 指向入口代码单元。匿名函数体不由 `MFileUnit` 拥有，而是放在更大的
- * `IRModule::anonymous_functions` 表中，并通过 `AnonymousFunctionUnit::lexical_parent`
- * 记录定义位置。
+ * `entry_unit` 指向入口代码单元。匿名函数体由 `InterpreterContext::anonymous_functions`
+ * 持有；匿名函数构造指令通过 `std::shared_ptr<AnonymousFunctionUnit>` 直接引用目标。
  *
  * 文件是脚本文件还是函数文件，不再额外缓存一份 `file_type` 状态，而是从入口代码单元的
  * 实际类型推导。
  */
 struct MFileUnit {
-    IRModule* module = nullptr;
     NormalizedPath path;
     std::vector<std::unique_ptr<CodeUnit>> code_units;
     CodeUnit* entry_unit = nullptr;
@@ -309,21 +284,6 @@ struct MFileUnit {
     [[nodiscard]] const FunctionUnit* find_local_function(std::string_view name) const noexcept {
         const auto it = local_function_map.find(InternedString(name));
         return it != local_function_map.end() ? it->second : nullptr;
-    }
-};
-
-/**
- * @brief IR module 单元。
- *
- * `IRModule` 是比单个 `.m` 文件更大的组织边界，负责拥有一组文件单元以及 module 级的
- * 匿名函数表。匿名函数 ID 在该 module 内全局唯一。
- */
-struct IRModule {
-    std::vector<std::unique_ptr<MFileUnit>> files;
-    AnonymousFunctionTable anonymous_functions;
-
-    [[nodiscard]] bool empty() const noexcept {
-        return files.empty();
     }
 };
 

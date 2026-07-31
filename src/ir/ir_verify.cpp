@@ -15,19 +15,15 @@ class IRVerifier final {
 public:
     explicit IRVerifier(const IRVerifyOptions& options) : options_(options) {}
 
-    [[nodiscard]] IRVerifyResult verify(const IRModule& module) {
+    [[nodiscard]] IRVerifyResult verify(const MFileUnit& mfile) {
         result_ = {};
-        verify_module(module);
+        verify_mfile(mfile);
         return std::move(result_);
     }
 
-    [[nodiscard]] IRVerifyResult verify(const MFileUnit& mfile) {
+    [[nodiscard]] IRVerifyResult verify(const CodeUnit& unit, const MFileUnit* mfile) {
         result_ = {};
-        if (mfile.module != nullptr) {
-            verify_module(*mfile.module);
-        } else {
-            verify_mfile(mfile);
-        }
+        verify_code_unit(unit, mfile);
         return std::move(result_);
     }
 
@@ -60,42 +56,6 @@ private:
                 });
     }
 
-    [[nodiscard]] bool contains_anonymous_unit(
-        const IRModule& module,
-        const CodeUnit* unit) const {
-        return unit != nullptr &&
-            std::any_of(
-                module.anonymous_functions.functions.begin(),
-                module.anonymous_functions.functions.end(),
-                [unit](const std::unique_ptr<AnonymousFunctionUnit>& candidate) {
-                    return candidate.get() == unit;
-                });
-    }
-
-    [[nodiscard]] bool contains_module_unit(
-        const IRModule& module,
-        const CodeUnit* unit) const {
-        if (unit == nullptr) {
-            return false;
-        }
-
-        for (const auto& file_ptr : module.files) {
-            if (file_ptr != nullptr && contains_non_anonymous_unit(*file_ptr, unit)) {
-                return true;
-            }
-        }
-
-        return contains_anonymous_unit(module, unit);
-    }
-
-    [[nodiscard]] bool contains_unit(
-        const IRModule& module,
-        const MFileUnit& mfile,
-        const CodeUnit* unit) const {
-        return contains_non_anonymous_unit(mfile, unit) ||
-            contains_anonymous_unit(module, unit);
-    }
-
     [[nodiscard]] bool contains_block(const CodeUnit& unit, const BasicBlock* block) const {
         return block != nullptr &&
             std::any_of(
@@ -126,66 +86,7 @@ private:
         return value_id.is_valid() && defined_values_.find(value_id) != defined_values_.end();
     }
 
-    [[nodiscard]] bool has_anonymous_function(
-        const IRModule& module,
-        AnonymousFunctionId function_id) const {
-        return module.anonymous_functions.find(function_id) != nullptr;
-    }
-
-    [[nodiscard]] const IRModule* module_for(const CodeUnit& unit) const {
-        const MFileUnit* file = source_file_for(unit);
-        return file != nullptr ? file->module : nullptr;
-    }
-
-    void verify_module(const IRModule& module) {
-        if (module.files.empty()) {
-            error("IR module 至少应包含一个文件单元");
-        }
-
-        for (const auto& file_ptr : module.files) {
-            if (file_ptr == nullptr) {
-                error("IR module 不能包含空文件单元");
-                continue;
-            }
-            if (file_ptr->module != &module) {
-                error("文件单元 module 必须指回所属 IR module");
-            }
-            verify_mfile(*file_ptr);
-        }
-
-        std::unordered_set<AnonymousFunctionId> seen_anonymous_functions;
-        for (const auto& function_ptr : module.anonymous_functions.functions) {
-            if (function_ptr == nullptr) {
-                error("匿名函数表不能包含空函数体");
-                continue;
-            }
-
-            if (function_ptr->lexical_parent == nullptr) {
-                error("匿名函数体 lexical_parent 不能为空", function_ptr->source_span);
-            } else if (module_for(*function_ptr->lexical_parent) != &module) {
-                error("匿名函数体 lexical_parent 必须属于当前 IR module", function_ptr->source_span);
-            } else if (!contains_module_unit(module, function_ptr->lexical_parent)) {
-                error("匿名函数体 lexical_parent 必须由当前 IR module 拥有", function_ptr->source_span);
-            }
-            if (!function_ptr->id.is_valid()) {
-                error("匿名函数体 ID 不能为空", function_ptr->source_span);
-            } else if (!seen_anonymous_functions.insert(function_ptr->id).second) {
-                error("匿名函数体 ID 不能重复", function_ptr->source_span);
-            }
-        }
-
-        for (const auto& function_ptr : module.anonymous_functions.functions) {
-            if (function_ptr != nullptr) {
-                const MFileUnit* source_file = function_ptr->lexical_parent != nullptr
-                    ? source_file_for(*function_ptr->lexical_parent)
-                    : nullptr;
-                verify_code_unit(*function_ptr, source_file);
-            }
-        }
-    }
-
     void verify_mfile(const MFileUnit& mfile) {
-        const IRModule* module = mfile.module;
         if (mfile.entry_unit == nullptr) {
             error("文件入口代码单元不能为空");
         } else if (!contains_non_anonymous_unit(mfile, mfile.entry_unit)) {
@@ -216,9 +117,7 @@ private:
                 error("local_function_map 不能包含空函数目标");
                 continue;
             }
-            if (module != nullptr && !contains_unit(*module, mfile, function)) {
-                error("local_function_map 的函数目标必须属于当前文件", function->source_span);
-            } else if (module == nullptr && !contains_non_anonymous_unit(mfile, function)) {
+            if (!contains_non_anonymous_unit(mfile, function)) {
                 error("local_function_map 的函数目标必须属于当前文件", function->source_span);
             }
             if (function->name != name) {
@@ -265,6 +164,10 @@ private:
             if (dynamic_cast<const AnonymousFunctionUnit*>(&unit) == nullptr) {
                 error("type() 为 AnonymousFunction 的代码单元必须是 AnonymousFunctionUnit",
                       unit.source_span);
+            }
+        } else if (unit.type() == CodeUnit::Command) {
+            if (dynamic_cast<const CommandUnit*>(&unit) == nullptr) {
+                error("type() 为 Command 的代码单元必须是 CommandUnit", unit.source_span);
             }
         } else {
             error("代码单元 type() 返回了未知类型", unit.source_span);
@@ -447,8 +350,8 @@ private:
     }
 
     void verify_anonymous_function_unit(const AnonymousFunctionUnit& function) {
-        if (!function.id.is_valid()) {
-            error("匿名函数体 ID 不能为空", function.source_span);
+        if (function.lexical_parent == nullptr) {
+            error("匿名函数体 lexical_parent 不能为空", function.source_span);
         }
 
         std::unordered_set<SlotId> seen_params;
@@ -978,16 +881,11 @@ private:
         const CodeUnit& unit,
         const MFileUnit* mfile) {
         (void)mfile;
-        if (!inst.function_id.is_valid()) {
-            error("create_anon_func 的 function_id 不能为空", inst.source_span);
-        } else {
-            const IRModule* module = module_for(unit);
-            if (module == nullptr) {
-                error("create_anon_func 需要所属 IR module", inst.source_span);
-            } else if (!has_anonymous_function(*module, inst.function_id)) {
-                error("create_anon_func 的 function_id 必须能在匿名函数表中解析",
-                      inst.source_span);
-            }
+        if (inst.target == nullptr) {
+            error("create_anon_func 的 target 不能为空", inst.source_span);
+        } else if (inst.target->lexical_parent != &unit) {
+            error("create_anon_func 的 target lexical_parent 必须指向当前代码单元",
+                  inst.source_span);
         }
 
         std::unordered_set<InternedString> seen_names;
@@ -1028,14 +926,17 @@ bool IRVerifyResult::ok() const noexcept {
         });
 }
 
-IRVerifyResult verify_ir(const IRModule& module, const IRVerifyOptions& options) {
-    IRVerifier verifier(options);
-    return verifier.verify(module);
-}
-
 IRVerifyResult verify_ir(const MFileUnit& mfile, const IRVerifyOptions& options) {
     IRVerifier verifier(options);
     return verifier.verify(mfile);
+}
+
+IRVerifyResult verify_ir(
+    const CodeUnit& unit,
+    const MFileUnit* mfile,
+    const IRVerifyOptions& options) {
+    IRVerifier verifier(options);
+    return verifier.verify(unit, mfile);
 }
 
 } // namespace baltam

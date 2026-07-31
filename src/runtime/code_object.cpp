@@ -83,13 +83,11 @@ std::size_t CodeCacheKeyHash::operator()(const CodeCacheKey& key) const noexcept
 }
 
 bool operator==(AnonymousCodeKey lhs, AnonymousCodeKey rhs) noexcept {
-    return lhs.module == rhs.module && lhs.function_id == rhs.function_id;
+    return lhs.function == rhs.function;
 }
 
 std::size_t AnonymousCodeKeyHash::operator()(AnonymousCodeKey key) const noexcept {
-    const std::size_t module_hash = std::hash<const IRModule*>{}(key.module);
-    const std::size_t function_hash = std::hash<AnonymousFunctionId>{}(key.function_id);
-    return module_hash ^ (function_hash << 1U);
+    return std::hash<const AnonymousFunctionUnit*>{}(key.function);
 }
 
 std::shared_ptr<CodeObject> CodeObjectCache::find(const CodeCacheKey& key) const {
@@ -162,9 +160,9 @@ void AnonymousCodeTable::insert(AnonymousCodeKey key, std::shared_ptr<CodeObject
     }
 }
 
-void AnonymousCodeTable::invalidate_module(const IRModule* module) {
+void AnonymousCodeTable::invalidate_function(const AnonymousFunctionUnit* function) {
     for (auto it = entries_.begin(); it != entries_.end();) {
-        if (it->first.module == module) {
+        if (it->first.function == function) {
             retire_code(std::move(it->second), retired_);
             it = entries_.erase(it);
         } else {

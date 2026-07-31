@@ -232,7 +232,7 @@ bool report_pass_result(const baltam::IRPassManagerResult& result) {
     return result.ok();
 }
 
-bool run_default_pass_pipeline(baltam::IRModule& module) {
+bool run_default_pass_pipeline(baltam::MFileUnit& mfile) {
     baltam::IRPassManagerOptions pass_options;
     pass_options.verify_after_pipeline = true;
 
@@ -246,7 +246,7 @@ bool run_default_pass_pipeline(baltam::IRModule& module) {
     pass_manager.add_pass<baltam::ConstantDeduplicationPass>();
     pass_manager.add_pass<baltam::DeadCodeEliminationPass>();
 
-    return report_pass_result(pass_manager.run(module));
+    return report_pass_result(pass_manager.run(mfile));
 }
 
 bool write_text_file(const std::filesystem::path& path, std::string_view text) {
@@ -287,9 +287,7 @@ bool verify_lowering_result(const baltam::IRBuildResult& result) {
         }
     }
 
-    const baltam::IRVerifyResult verify_result = result.module != nullptr
-        ? baltam::verify_ir(*result.module)
-        : baltam::verify_ir(*result.mfile);
+    const baltam::IRVerifyResult verify_result = baltam::verify_ir(*result.mfile);
     if (!verify_result.ok()) {
         for (const baltam::IRVerifyDiagnostic& diagnostic : verify_result.diagnostics) {
             if (diagnostic.severity == baltam::IRVerifyDiagnostic::Error) {
@@ -313,11 +311,7 @@ int run(const Options& options) {
     }
 
     if (options.run_passes) {
-        if (result.module == nullptr) {
-            std::cerr << "ir_print: pass pipeline requires an IR module\n";
-            return 1;
-        }
-        if (!run_default_pass_pipeline(*result.module)) {
+        if (!run_default_pass_pipeline(*result.mfile)) {
             return 1;
         }
     }
@@ -327,9 +321,7 @@ int run(const Options& options) {
         output = "-";
     }
 
-    const std::string ir = result.module != nullptr
-        ? baltam::format_ir(*result.module, options.print_options)
-        : baltam::format_ir(*result.mfile, options.print_options);
+    const std::string ir = baltam::format_ir(*result.mfile, options.print_options);
     if (!write_text_file(output, ir)) {
         return 1;
     }

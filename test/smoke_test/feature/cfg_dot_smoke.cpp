@@ -8,11 +8,10 @@ namespace baltam {
 namespace {
 
 void verify_cfg_dot_for_test3_3() {
-    const smoke_test::SmokeArtifacts artifacts =
-        smoke_test::build_ir(TEST3_3_MFILE_PATH);
-    smoke_test::require_ir_is_complete(artifacts.result);
+    const IRBuildResult ir = smoke_test::build_ir(TEST3_3_MFILE_PATH);
+    smoke_test::require_ir_is_complete(ir);
 
-    const std::string dot = format_cfg_dot(*artifacts.result.mfile);
+    const std::string dot = format_cfg_dot(*ir.mfile);
 
     smoke_test::require(
         dot.find("digraph \"test3_3\"") != std::string::npos,

@@ -13,10 +13,8 @@ function(add_ir_smoke_test target source macro_name mfile_relpath)
             ${CMAKE_CURRENT_SOURCE_DIR}
     )
 
-    # smoke test 统一使用 `/opt/Baltamatica/lib` 下的 runtime，避免与仓库 `deps/`
-    # 目录中的旧版共享库混用。
     set_target_properties(${target} PROPERTIES
-        BUILD_RPATH "/opt/Baltamatica/lib"
+        BUILD_RPATH "${BALTAM_RUNTIME_RPATH}"
     )
 
     target_link_libraries(${target}
@@ -29,11 +27,10 @@ function(add_ir_smoke_test target source macro_name mfile_relpath)
         COMMAND ${target}
     )
 
-    # 这里额外注入 `HOME=/tmp`、`XDG_CACHE_HOME=/tmp/.cache` 和 `/opt` 下的运行库路径，
-    # 以便测试进程与 builtin/plugin 使用同一套运行时环境。
+    # 这里额外注入 `HOME=/tmp`、`XDG_CACHE_HOME=/tmp/.cache` 和解析出的运行库路径。
     set_tests_properties(${target} PROPERTIES
         ENVIRONMENT
-            "HOME=/tmp;XDG_CACHE_HOME=/tmp/.cache;BALTAM_FRONTEND=console;LD_LIBRARY_PATH=/opt/Baltamatica/lib"
+            "HOME=/tmp;XDG_CACHE_HOME=/tmp/.cache;BALTAM_FRONTEND=console;LD_LIBRARY_PATH=${BALTAM_RUNTIME_LD_LIBRARY_PATH}"
     )
 endfunction()
 
@@ -55,7 +52,7 @@ add_ir_smoke_test(
     test0_1_smoke
     syntax/test0_1_smoke.cpp
     TEST0_1_MFILE_PATH
-    test/m/test0/test0_1.m
+    test/m/test0/test0.m
 )
 set_smoke_labels(test0_1_smoke smoke syntax runtime)
 
@@ -314,7 +311,7 @@ add_test(
             HOME=/tmp
             XDG_CACHE_HOME=/tmp/.cache
             BALTAM_FRONTEND=console
-            LD_LIBRARY_PATH=/opt/Baltamatica/lib
+            LD_LIBRARY_PATH=${BALTAM_RUNTIME_LD_LIBRARY_PATH}
             $<TARGET_FILE:ir_cfg_dot>
             "${CMAKE_SOURCE_DIR}/test/m/test3/test3_3.m"
             -o
@@ -337,7 +334,7 @@ add_test(
             HOME=/tmp
             XDG_CACHE_HOME=/tmp/.cache
             BALTAM_FRONTEND=console
-            LD_LIBRARY_PATH=/opt/Baltamatica/lib
+            LD_LIBRARY_PATH=${BALTAM_RUNTIME_LD_LIBRARY_PATH}
             $<TARGET_FILE:ir_print>
             "${CMAKE_SOURCE_DIR}/test/m/test4/test4.m"
             -o
@@ -381,7 +378,7 @@ foreach(case_name IN LISTS CFG_DOT_CASES)
             HOME=/tmp
             XDG_CACHE_HOME=/tmp/.cache
             BALTAM_FRONTEND=console
-            LD_LIBRARY_PATH=/opt/Baltamatica/lib
+            LD_LIBRARY_PATH=${BALTAM_RUNTIME_LD_LIBRARY_PATH}
             $<TARGET_FILE:ir_cfg_dot>
             "${input_mfile}"
             -o

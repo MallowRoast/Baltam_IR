@@ -2,9 +2,11 @@
 
 #include "ir/ir_base_types.h"
 
+#include "ba_obj/ba_obj.h"
 #include "core.h"
 
 #include <cstdint>
+#include <memory>
 #include <variant>
 #include <vector>
 
@@ -383,10 +385,9 @@ public:
 /**
  * @brief 构造匿名函数句柄指令。
  *
- * 该指令表达源码层 `@(args) expr` 的 closure 构造点。匿名函数体由
- * `function_id` 间接引用，捕获值使用当前外层 `CodeUnit` 中已经定义好的 `ValueId`
- * 表示。运行到该指令时，runtime 会把这些 `ValueId` 当前对应的运行时值保存进新建
- * closure 的 capture environment。
+ * 该指令表达源码层 `@(args) expr` 的 closure 构造点。匿名函数体通过 shared owner
+ * 直接引用，捕获值使用当前外层 `CodeUnit` 中已经定义好的 `ValueId` 表示。运行到该指令时，
+ * runtime 会把这些 `ValueId` 当前对应的运行时值保存进新建 closure 的 capture environment。
  */
 class CreateAnonymousFunctionHandleInst final : public Instruction {
 public:
@@ -414,7 +415,7 @@ public:
     }
 
     ValueId result = InvalidValueId;
-    AnonymousFunctionId function_id = InvalidAnonymousFunctionId;
+    std::shared_ptr<AnonymousFunctionUnit> target;
     std::vector<CaptureValue> captures;
 };
 

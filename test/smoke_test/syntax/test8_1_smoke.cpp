@@ -122,9 +122,8 @@ void verify_script_magic_end_context(const IRBuildResult& result) {
 
 int main() {
     try {
-        const baltam::smoke_test::SmokeArtifacts artifacts =
-            baltam::smoke_test::build_ir(TEST8_1_MFILE_PATH);
-        baltam::verify_script_magic_end_context(artifacts.result);
+        const baltam::IRBuildResult ir = baltam::smoke_test::build_ir(TEST8_1_MFILE_PATH);
+        baltam::verify_script_magic_end_context(ir);
     } catch (const std::exception& ex) {
         std::cerr << "test8_1_smoke 失败: " << ex.what() << '\n';
         return 1;

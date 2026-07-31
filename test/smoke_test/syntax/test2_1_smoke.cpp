@@ -71,10 +71,9 @@ void verify_core_focus(const IRBuildResult& result) {
 
 int main() {
     try {
-        const baltam::smoke_test::SmokeArtifacts artifacts =
-            baltam::smoke_test::build_ir(TEST2_1_MFILE_PATH);
-        baltam::verify_complete_ir(artifacts.result);
-        baltam::verify_core_focus(artifacts.result);
+        const baltam::IRBuildResult ir = baltam::smoke_test::build_ir(TEST2_1_MFILE_PATH);
+        baltam::verify_complete_ir(ir);
+        baltam::verify_core_focus(ir);
     } catch (const std::exception& ex) {
         std::cerr << "test2_1_smoke 失败: " << ex.what() << '\n';
         return 1;
