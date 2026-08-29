@@ -422,7 +422,13 @@ void store_call_outputs(
 
 [[nodiscard]] std::vector<ba_obj_ptr> make_call_outputs(std::size_t count) {
     std::vector<ba_obj_ptr> outputs;
-    outputs.reserve(count);
+    outputs.reserve(count == 0 ? 1 : count);
+    if (count == 0) {
+        // 零输出调用也要给 entry-point 一个 ans 占位，供 tic/toc 一类 builtin
+        // 通过 out_args[0]->is_ans() 判断真实输出是否为空。
+        outputs.push_back(ba_obj::make_void(V_ANS));
+        return outputs;
+    }
     for (std::size_t i = 0; i < count; ++i) {
         outputs.push_back(std::make_shared<ba_obj>());
     }
@@ -664,6 +670,47 @@ void eval_call(RuntimeFrame& frame, const CallInst& inst) {
 }
 
 [[nodiscard]] ba_obj_ptr eval_binary(RuntimeFrame& frame, const BinaryInst& inst) {
+    ba_obj_ptr lhs = eval_operand(frame, inst.lhs);
+    if (lhs == nullptr) {
+        throw std::runtime_error("运行时二元运算左操作数未绑定");
+    }
+    ba_obj_ptr rhs = eval_operand(frame, inst.rhs);
+    if (rhs == nullptr) {
+        throw std::runtime_error("运行时二元运算右操作数未绑定");
+    }
+
+    if (inst.dispatch_type == Internal) {
+        switch (inst.op) {
+            case Add:
+                return std::make_shared<ba_obj>(
+                    static_cast<std::int64_t>(lhs->as_int() + rhs->as_int()));
+            case Gt:
+                return std::make_shared<ba_obj>(lhs->as_int() > rhs->as_int());
+            case Or:
+                return std::make_shared<ba_obj>(lhs->as_bool() || rhs->as_bool());
+            case Sub:
+            case Mul:
+            case Rdiv:
+            case Ldiv:
+            case Pow:
+            case ElemMul:
+            case ElemRdiv:
+            case ElemLdiv:
+            case ElemPow:
+            case And:
+            case Lt:
+            case Le:
+            case Ge:
+            case Eq:
+            case Ne:
+                break;
+        }
+
+        throw std::runtime_error(
+            "未支持的内部二元运算符: " +
+            std::string(binary_function_name(inst.op)));
+    }
+
     const RuntimeFunctionLookup target =
         resolve_binary_function(frame, inst.op, inst.dispatch_type);
     if (!target.found()) {
@@ -674,17 +721,8 @@ void eval_call(RuntimeFrame& frame, const CallInst& inst) {
 
     std::vector<const_ba_obj_ptr> arguments;
     arguments.reserve(2);
-    append_argument(
-        arguments,
-        frame,
-        inst.lhs,
-        "运行时二元运算左操作数未绑定");
-    append_argument(
-        arguments,
-        frame,
-        inst.rhs,
-        "运行时二元运算右操作数未绑定");
-
+    arguments.push_back(std::move(lhs));
+    arguments.push_back(std::move(rhs));
     std::vector<ba_obj_ptr> outputs = invoke_target(
         frame,
         target,

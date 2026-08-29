@@ -64,8 +64,6 @@ FrameScope::FrameScope(InterpreterContext& context, RuntimeFrame& frame) noexcep
 FrameScope::~FrameScope() {
     if (context_ != nullptr) {
         context_->current_frame = previous_;
-        context_->code_cache.collect_retired(context_->current_frame);
-        context_->anonymous_codes.collect_retired(context_->current_frame);
     }
 }
 

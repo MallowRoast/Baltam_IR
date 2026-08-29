@@ -4,6 +4,7 @@
 
 #include "bt_ast_interface/ast/ast_base.h"
 #include "bt_ast_interface/pcdata.h"
+#include "bt_ast_interface/parser_opts.h"
 
 #include <memory>
 #include <string>
@@ -70,6 +71,7 @@ private:
     void lower_while_stmt(const std::shared_ptr<if_flow>& while_node);
     void lower_break_stmt(const ast_ptr& node);
     void lower_continue_stmt(const ast_ptr& node);
+    void lower_name_stmt(const ast_ptr& node);
     [[nodiscard]] ValueId lower_expr(const ast_ptr& node);
     [[nodiscard]] ValueId lower_short_circuit_expr(const ast_ptr& node);
     [[nodiscard]] ValueId lower_named_value(std::string_view name, SourceSpan source_span);

@@ -502,6 +502,9 @@ void IRLowerer::lower_stmt(const ast_ptr& node) {
         case node_continue:
             lower_continue_stmt(node);
             return;
+        case node_name:
+            lower_name_stmt(node);
+            return;
         case node_multiple_func:
             lower_call_stmt(std::static_pointer_cast<multipleFuncCall>(node));
             return;
@@ -1382,6 +1385,39 @@ void IRLowerer::lower_continue_stmt(const ast_ptr& node) {
     go->target = loop_stack_.back().continue_target;
     go->source_span = source_span_from(node);
     builder_.append_instruction(std::move(go));
+}
+
+void IRLowerer::lower_name_stmt(const ast_ptr& node) {
+    if (node == nullptr || node->nodetype != node_name) {
+        return;
+    }
+
+    const auto name_node = std::static_pointer_cast<symref>(node);
+    const std::string& name = name_node->name();
+    const SourceSpan source_span = source_span_from(node);
+
+    if (const Slot slot = lookup_var(name); slot.is_valid()) {
+        std::unique_ptr<LoadSlotInst> inst = std::make_unique<LoadSlotInst>();
+        inst->result = builder_.create_value();
+        inst->slot = slot;
+        inst->source_span = source_span;
+        builder_.append_instruction(std::move(inst));
+        return;
+    }
+
+    if (should_lower_direct_call(name)) {
+        std::unique_ptr<CallInst> inst = std::make_unique<CallInst>();
+        inst->callee_kind = CallInst::Direct;
+        inst->callee = InternedString(name);
+        inst->source_span = source_span;
+        builder_.append_instruction(std::move(inst));
+        return;
+    }
+
+    std::unique_ptr<ApplyInst> inst = std::make_unique<ApplyInst>();
+    inst->callee_or_base = InternedString(name);
+    inst->source_span = source_span;
+    builder_.append_instruction(std::move(inst));
 }
 
 bool IRLowerer::append_call_arguments(
