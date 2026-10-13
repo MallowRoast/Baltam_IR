@@ -101,7 +101,7 @@ global/persistent 和 deopt 相关文档视为后续设计约束。
 - [循环 Lowering 设计](./doc/loop_lowering_design.md)：`for` / `while`、循环 CFG 和
   `break` / `continue`。
 - [Switch Lowering 设计](./doc/switch_lowering_design.md)：`switch / case / otherwise` 的 CFG。
-- [Magic End Lowering 设计](./doc/magic_end_design.md)：索引上下文 `end` 和多层候选
+- [M 语法的统一 IR 设计](./doc/m_syntax_ir_design.md)：索引上下文 `end` 和多层候选
   `MagicEndInst`。
 - `&& / ||` 短路逻辑已在 [IR Lowering 设计](./doc/ir_lowering_design.md) 中记录，当前通过
   CFG 与内部 logical 结果 slot 表达按需求值。

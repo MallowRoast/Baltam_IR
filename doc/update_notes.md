@@ -156,7 +156,7 @@
 - 详细设计见 [internal_local_reuse_pass_design.md](./internal_local_reuse_pass_design.md)
 
 15. 增加圆括号索引上下文中的基础 `magic_end` lowering，见 `test8`。
-详细设计见 [magic_end_design.md](./magic_end_design.md)。
+详细设计见 [M 语法的统一 IR 设计](./m_syntax_ir_design.md)。
 
 当前支持：
 

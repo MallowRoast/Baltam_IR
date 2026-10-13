@@ -135,7 +135,7 @@ std::vector<std::shared_ptr<pcdata>>
   候选 Operand 的种类保留绑定状态：脚本 unresolved apply 可暂存 `InternedString`，函数内
   已绑定变量会通过 `ValueId` / `Slot` 锚定到变量上下文。后者遇到 cleared / unbound slot
   应报变量引用错误，不能回退到同名函数解析或外层候选。
-  详细设计见 [Magic End Lowering 设计](./magic_end_design.md)。
+  详细设计见 [M 语法的统一 IR 设计](./m_syntax_ir_design.md)。
 - `MFileUnit` 当前会记录入口单元之外的 local `FunctionUnit`，但基础 lowering 不会因为
   local 函数存在就把调用静态绑定成 `MFunction`。后续名字解析 pass 需要同时考虑
   `import`、`private`、路径和遮蔽规则，再决定是否把动态 direct call 收敛成 `call mfunc`。

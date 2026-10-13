@@ -392,7 +392,7 @@ slot 时应报变量引用错误，不能回退到同名函数解析或外层候
 文本 IR 将每个候选显示为 `(base, dim, nindices)`，方便和具体索引层对照。
 `MagicEndInst` 的构建期结果类型事实保持 `unknown`，后续只有在候选 base 和对象索引协议
 明确后才能收敛；基础 IR 不假设类自定义 `end` 方法的返回类型。
-更完整的语义说明见 [Magic End Lowering 设计](./magic_end_design.md)。
+更完整的语义说明见 [M 语法的统一 IR 设计](./m_syntax_ir_design.md)。
 
 `results` 允许保留空输出位：当源码写 `[~, b] = f()` 时，第一个输出位为
 `InvalidValueId`，printer 显示为 `[]`，verifier 和 value table 绑定会跳过该位。
