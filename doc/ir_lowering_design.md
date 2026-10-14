@@ -98,13 +98,15 @@ std::vector<std::shared_ptr<pcdata>>
   - `if / else`
   - `switch / case / otherwise`，当前采用 `switch.case /
     switch.body / switch.otherwise / switch.end` CFG 形状，详见
-    [switch_lowering_design.md](./switch_lowering_design.md)
+    [m_syntax_ir_design.md](./m_syntax_ir_design.md#switch--case--otherwise--end)
   - `for` 循环，当前采用 `for.preheader / for.header / for.body / for.latch / for.end`
-    五块 CFG 形状，详见 [loop_lowering_design.md](./loop_lowering_design.md)
+    五块 CFG 形状，详见 [m_syntax_ir_design.md](./m_syntax_ir_design.md#for--end)
   - `while` 循环，当前采用 `while.header / while.body / while.end`
-    三块 CFG 形状
+    三块 CFG 形状，详见 [m_syntax_ir_design.md](./m_syntax_ir_design.md#while--end)
   - 显式 `return`
   - 隐式 `return`
+
+当前 `for` lowering 只支持名字形式的循环变量，内部迭代下标使用固定 `Int64Scalar` 类型的 `InternalLocal` slot。冒号表达式目前 lower 为非 internal 的普通 `CallInst`；统一 IR 文档中的 `ColonInst` 是目标设计。
 
 ### script 与 function 的区别
 

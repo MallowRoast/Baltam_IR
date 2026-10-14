@@ -345,6 +345,143 @@ if.end:
 1. `if` 条件的转换规则不同于短路逻辑运算的标量检查。本机 MATLAB R2022b CLI 实测：`if [1 2]` 为真，`if [1 0]` 与 `if []` 为假，所有元素非零的矩阵为真，`if "x"` 报转换错误。因此不能直接使用短路运算中要求逻辑标量的 `internal.cast(value, Bool)` 规则处理 `if` 条件。
 2. 后续可能采用线性 IR。届时 `BranchInst` 的真、假目标和 `GotoInst` 的目标都不应继续保存 `BasicBlock*`，而应改为线性 IR 中可定位的标签或指令位置；上述字段形式仅对应当前基于基本块的 CFG。
 
+### `while / end`
+
+#### 简述
+
+`while` 在每轮开始时求值条件；条件为真才执行循环体，条件为假则执行 `end` 后的语句。循环体正常执行完毕或遇到 `continue` 时，返回条件处开始下一轮；遇到 `break` 时直接退出最近一层循环。源码中的 `end` 只标记循环体结束，不产生专用指令。
+
+#### non-SSA IR
+
+不设置专用的 `WhileInst`、`BreakInst` 或 `ContinueInst`，而是用 CFG 中的 `BranchInst` 和 `GotoInst` 表示。当前基本形状包含 `while.header`、`while.body` 和 `while.end` 三个块；进入循环前的当前块跳到 `while.header`。
+
+`while.header` 每次进入时重新求值条件，产生 `ValueId`，由 `BranchInst` 在 `while.body` 和 `while.end` 之间选择。`while.body` 中的语句使用普通 IR；若执行到循环体末尾且当前块尚未终止，就用 `GotoInst` 返回 `while.header`。`while.end` 是条件为假或执行 `break` 后的继续位置。
+
+lowering 阶段维护 `LoopControlContext` 栈，每项保存当前循环的 `break_target` 和 `continue_target`。构造循环体时将该循环的上下文压栈，循环体 lowering 结束后弹栈；它只用于选择跳转目标，不是 IR 指令或 runtime 对象。当前基于基本块的上下文结构为：
+
+```cpp
+struct LoopControlContext {
+    BasicBlock* break_target;
+    BasicBlock* continue_target;
+};
+```
+
+对应 `while` 的目标为：
+
+```text
+break_target    = while.end
+continue_target = while.header
+```
+
+`break` 和 `continue` 从栈顶读取目标，生成相应的 `GotoInst`，并终止当前基本块。嵌套循环进入内层时压入新上下文，退出内层后恢复外层上下文；`if`、`switch` 不改变循环上下文。`while` 无内部迭代下标更新，因此基础 CFG 不需要单独的 `while.latch` 块。
+
+例如 `while cond; body; end` 可表示为：
+
+```text
+current:
+  goto while.header
+
+while.header:
+  %cond = load @cond
+  branch %cond, while.body, while.end
+
+while.body:
+  // 执行 body
+  goto while.header
+
+while.end:
+  // end 后的语句
+```
+
+#### SSA IR
+
+保留相同的循环 CFG 和 `break / continue` 跳转语义。循环体中更新且在下一轮条件或循环体中使用的变量，需要在 `while.header` 汇合进入循环前的值与回边上的值，通常由 `phi` 节点表示；若 `while.end` 有来自条件假边和 `break` 等多条路径，退出后使用的值也按 SSA 汇合规则处理。具体 SSA 转换规则待 SSA 设计确定。
+
+#### runtime 结构
+
+执行到 `while.header` 时才求值本轮条件，并按条件结果进入循环体或退出。普通回边和 `continue` 都返回 `while.header` 重新求值条件；`break` 直接进入 `while.end`，不再求值条件。只有实际到达的循环体语句会执行。
+
+#### 注意事项
+
+1. `while` 条件应采用与 `if` 相同的 MATLAB 条件真假规则，不能套用短路逻辑运算要求逻辑标量的 `internal.cast(value, Bool)`；当前基础 lowering 直接将条件表达式结果交给 `BranchInst`，条件转换的具体实现需与 `if` 统一。
+2. `break`、`continue` 只能出现在循环内；循环上下文栈决定最近一层循环的目标。与 `for` 不同，`while` 的 `continue` 返回条件块，而 `for` 的 `continue` 需要先进入更新迭代下标的 `for.latch`。
+3. `while` 嵌套在 `for` 或另一层 `while` 中时，每层都有独立的循环上下文。内层 `break` 跳内层 `while.end`，内层 `continue` 跳内层 `while.header`；从内层循环退出后，继续执行外层循环体的后续语句，由外层循环自己的回边决定下一轮。
+4. 若后续采用线性 IR，跳转目标应改为可定位的标签或指令位置，不再保存 `BasicBlock*`。
+
+### `for / end`
+
+#### 简述
+
+`for x = iterable ... end` 在进入循环时求值一次 `iterable`，建立独立的迭代状态。每轮开始时从该状态取得一个迭代值，写给循环变量 `x`，然后执行循环体；迭代结束后执行 `end` 后的语句。矩阵输入按列迭代。循环体对 `x` 或迭代源变量的赋值，不改变已经建立的迭代次数及后续迭代值。
+
+#### non-SSA IR
+
+不设置专用的 `ForInst`、`BreakInst` 或 `ContinueInst`。使用 `for.preheader`、`for.header`、`for.body`、`for.latch`、`for.end` 五个基本块，并用 `BranchInst` / `GotoInst` 连接。
+
+`for.preheader` 求值迭代表达式，并调用 `internal.foreach_init(iterable)` 得到循环不变量 `state` 和 `max_iter`。两者在循环期间可直接作为 `ValueId` 跨块引用，不需要临时 slot。`for.header` 读取内部下标，通过内部整型比较判断 `iter_index > max_iter`：为真进入 `for.end`，否则进入 `for.body`。`for.body` 调用 `internal.foreach_iterate(state, iter_index)` 取得当前值，写入用户循环变量的 slot，再执行循环体。正常执行完毕后进入 `for.latch`；该块用内部整型加法将下标加一，再回到 `for.header`。内部比较与加法不参与 M 语言运算符分派。
+
+`iter_index` 每轮变化，而 `ValueId` 只能定义一次，因此 non-SSA 阶段为每个 `for` 创建一个 `SlotTag::InternalLocal`、`SlotValueType::Int64Scalar` 的临时 slot。它在 `for.preheader` 初始化为 1，在 `for.header` 和 `for.body` 读取，在 `for.latch` 加一后写回。该 slot 不参与用户名字查找，也不能用用户循环变量的 slot 代替：循环体可能修改用户循环变量，但不能据此改变迭代进度。嵌套的 `for` 各有不同的 `SlotId`；`__for_idx` 等打印名仅供调试，不用于区分 slot。
+
+`for` 沿用上述 `LoopControlContext` 栈。lowering 循环体时压入该循环的目标，结束后弹出，恢复外层循环的目标：
+
+```text
+break_target    = for.end
+continue_target = for.latch
+```
+
+`break` 和 `continue` 读取栈顶目标并生成 `GotoInst`。`break` 直接退出最近一层循环；`continue` 先经过 `for.latch` 更新内部下标，再判断下一轮是否存在。嵌套循环各有独立的迭代状态、内部下标和跳转目标。
+
+例如 `for x = A; body; end` 可表示为：
+
+```text
+; %iter_index_slot = internal_local @__for_idx : int64
+
+current:
+  goto for.preheader
+
+for.preheader:
+  %a = load @A
+  (%state, %max_iter) = call internal.foreach_init(%a)
+  %one = const 1
+  store %iter_index_slot, %one
+  goto for.header
+
+for.header:
+  %index = load %iter_index_slot
+  %done = internal.cmp_gt %index, %max_iter
+  branch %done, for.end, for.body
+
+for.body:
+  %current = call internal.foreach_iterate(%state, %index)
+  store @x, %current
+  // 执行 body
+  goto for.latch
+
+for.latch:
+  %latch_index = load %iter_index_slot
+  %next = internal.add %latch_index, %one
+  store %iter_index_slot, %next
+  goto for.header
+
+for.end:
+  // end 后的语句
+```
+
+#### SSA IR
+
+保留相同的迭代顺序和 CFG。`state` 与 `max_iter` 只在 `for.preheader` 定义一次；non-SSA 的内部下标 slot 可在 SSA 转换时由 `for.header` 的 `phi` 节点取代，汇合初始值与 `for.latch` 的更新值。循环体中更新的用户变量，以及从条件完成路径和 `break` 路径汇合的值，按 SSA 规则处理；具体转换规则待 SSA 设计确定。
+
+#### runtime 结构
+
+`internal.foreach_init` 根据一次求值的 `iterable` 建立迭代状态和迭代次数。执行 non-SSA IR 时，当前 frame 按 `SlotId` 保存内部 `iter_index`；每次进入 `for.preheader` 都将它重新初始化为 1。每次进入 `for.body` 前，`internal.foreach_iterate` 根据迭代状态和下标取得当前值并写给循环变量。循环体修改用户变量不会改变内部迭代状态；`continue` 推进下标，`break` 直接离开循环。
+
+#### 注意事项
+
+1. 内部 `iter_index` 是固定类型的整型循环状态，不是用户循环变量；它需要可跨回边传递的内部存储，不能重复定义同一个 `ValueId`。用户循环变量每轮进入循环体前重新赋值。
+2. `for i = 1:10` 中的 `1:10` 仍按上文 `ColonInst` 的目标设计处理，不能把冒号表达式的用户级分派误当成 `for` 协议的内部 helper。
+3. `for` 嵌套在 `while` 或另一层 `for` 中时，每层都有独立的迭代状态和循环上下文。内层 `break` 跳内层 `for.end`，内层 `continue` 跳内层 `for.latch`；从内层循环退出后，继续执行外层循环体的后续语句，不会直接退出外层循环。
+4. `continue` 的目标是 `for.latch`，与直接回到条件块的 `while` 不同。若后续采用线性 IR，跳转目标需改为可定位的标签或指令位置。
+
 ### `switch / case / otherwise / end`
 
 #### 简述
@@ -355,7 +492,7 @@ if.end:
 
 `switch` 表达式产生 `switch_value : ValueId`，供所有 case 判断块复用，不引入中间 slot。
 
-每个 `case` 生成一个判断块和一个执行块。判断块调用 `internal.switch_match` 后，真边进入当前执行块，假边进入下一个判断块、`otherwise` 或统一出口。执行块正常结束后跳到统一出口。
+每个 `case` 生成一个判断块和一个执行块。判断块调用 `internal.switch_match` 后，真边进入当前执行块，假边进入下一个判断块、`otherwise` 或统一出口。没有 `otherwise` 时，最后一个判断块的假边直接进入统一出口。执行块正常结束后跳到统一出口。
 
 例如 `switch x; case 1; body1; case 2; body2; otherwise; body3; end` 转为：
 
@@ -400,7 +537,8 @@ switch.end:
 #### 注意事项
 
 1. `case {a, b}` 的目标语义是其中任一元素匹配即可进入该 case；该形式尚需补充 lowering。
-2. 上述 `BasicBlock*` 跳转目标对应当前 CFG 形式；若以后采用线性 IR，需要改为可定位的标签或指令位置。
+2. `switch` 本身不是循环，不建立新的循环上下文；`case` 内的 `break / continue` 仍作用于包围它的最近一层循环。
+3. 上述 `BasicBlock*` 跳转目标对应当前 CFG 形式；若以后采用线性 IR，需要改为可定位的标签或指令位置。
 
 ### 短路逻辑运算
 
@@ -499,6 +637,42 @@ sc.end:
 
 对短路表达式的右操作数，仅在控制流真正进入右侧路径后调用 `cast`，不能提前检查被跳过的值。
 
+### `foreach_init`
+
+#### 简述
+
+初始化 `for` 的内部迭代协议，确定该次循环的迭代来源和次数。
+
+#### non-SSA IR
+
+调用 `internal.foreach_init(iterable)`，输入是已求值的迭代表达式 `ValueId`；调用产生循环不变量 `state` 和内部整型标量 `max_iter`。`state` 是 runtime 持有的不透明迭代状态，不是用户变量。
+
+#### SSA IR
+
+沿用相同的调用及两个结果；它们在进入循环前定义一次，供后续各块使用。
+
+#### runtime 结构
+
+从 `iterable` 建立独立于后续用户变量赋值的迭代状态，并确定最大迭代次数。对矩阵输入，迭代单位是列。
+
+### `foreach_iterate`
+
+#### 简述
+
+按内部迭代状态和下标取得 `for` 当前轮的值。
+
+#### non-SSA IR
+
+调用 `internal.foreach_iterate(state, iter_index)`，两个参数分别是 `foreach_init` 返回的状态和当前内部整型下标；结果为本轮写给用户循环变量的 `ValueId`。下标的更新由 `for.latch` 负责，此函数不推进下标。
+
+#### SSA IR
+
+沿用相同的调用语义；`iter_index` 由循环头的 SSA 汇合结果提供。
+
+#### runtime 结构
+
+按照 M 语言 `for` 的迭代规则读取当前位置的值。矩阵输入时返回当前列；结果的具体类型和形状由迭代来源决定。
+
 ### `switch_match`
 
 #### 简述
@@ -507,7 +681,7 @@ sc.end:
 
 #### non-SSA IR
 
-调用 `internal.switch_match(switch_value, case_value)`，两个参数均为已经求值的 `ValueId`，结果为 logical scalar `ValueId`，供 `BranchInst.condition` 使用。
+通过内部 `CallInst` 调用 `internal.switch_match(switch_value, case_value)`，不参与普通 M 函数名查找。两个参数均为已经求值的 `ValueId`，结果为 logical scalar `ValueId`，供 `BranchInst.condition` 使用。
 
 #### SSA IR
 

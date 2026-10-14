@@ -45,7 +45,7 @@
 - 提供 numeric、text、container、callable 等分类 helper，分类本身不作为独立 atom 存在
 - 提供稳定调试名和 `TypeSet` 输出格式，便于 smoke test、printer、verifier 和后续类型分析共享
 
-6. 增加 `for / while` 循环 lowering，见 [loop_lowering_design.md](./loop_lowering_design.md)。
+6. 增加 `for / while` 循环 lowering，见 [m_syntax_ir_design.md](./m_syntax_ir_design.md#for--end)。
 
 当前支持：
 
@@ -64,12 +64,12 @@
 - 可选 `--svg` / `--png` 通过 Graphviz `dot` 渲染图片
 - `generate_cfg_dot` 构建目标会为 `test/m` 下当前语法用例生成 DOT 到 `build/test/cfg_dot`
 
-8. 增加 `switch / case / otherwise` lowering，见 [switch_lowering_design.md](./switch_lowering_design.md)。
+8. 增加 `switch / case / otherwise` lowering，见 [m_syntax_ir_design.md](./m_syntax_ir_design.md#switch--case--otherwise--end)。
 
 当前支持：
 
 - `switch` 表达式只 lower 一次
-- 支持普通 `case` 和 cell 形式 `case {a, b}`
+- 支持普通 `case`；cell 形式 `case {a, b}` 尚未支持
 - 支持 `otherwise`
 - 支持没有 `otherwise` 的 `switch`
 - 支持 `switch` 嵌套
