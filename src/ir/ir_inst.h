@@ -248,8 +248,8 @@ public:
     }
 
     BasicBlock* parent = nullptr;
-    EffectClass effect = Pure;
     SourceSpan source_span;
+    EffectClass effect = Pure;
     InstAttrs attrs;
 
 protected:
@@ -276,8 +276,8 @@ public:
      */
     ConstInst() noexcept : Instruction(Instruction::Const) {}
 
-    ValueId result = InvalidValueId;
     Constant value;
+    ValueId result = InvalidValueId;
 };
 
 /**
@@ -375,11 +375,11 @@ public:
         effect = Env;
     }
 
-    ValueId result = InvalidValueId;
     InternedString name;
+    FunctionUnit* m_function_target = nullptr;
+    ValueId result = InvalidValueId;
     ResolutionMode resolution_mode = Runtime;
     DispatchType bound_dispatch_type = Dynamic;
-    FunctionUnit* m_function_target = nullptr;
 };
 
 /**
@@ -414,9 +414,9 @@ public:
         effect = Heap;
     }
 
-    ValueId result = InvalidValueId;
     std::shared_ptr<AnonymousFunctionUnit> target;
     std::vector<CaptureValue> captures;
+    ValueId result = InvalidValueId;
 };
 
 /**
@@ -456,8 +456,8 @@ public:
     }
 
     std::vector<ValueId> results;
-    ValueId base = InvalidValueId;
     std::vector<Operand> arguments;
+    ValueId base = InvalidValueId;
 };
 
 /**
@@ -490,8 +490,8 @@ public:
         effect = Opaque;
     }
 
-    ValueId result = InvalidValueId;
     std::vector<MagicEndContext> candidate_contexts;
+    ValueId result = InvalidValueId;
 };
 
 /**
@@ -522,11 +522,11 @@ public:
     }
 
     std::vector<ValueId> results;
+    Operand callee;
+    std::vector<Operand> arguments;
+    FunctionUnit* m_function_target = nullptr;
     CalleeKind callee_kind = Direct;
     DispatchType dispatch_type = Dynamic;
-    Operand callee;
-    FunctionUnit* m_function_target = nullptr;
-    std::vector<Operand> arguments;
 };
 
 /**
@@ -539,10 +539,10 @@ public:
      */
     UnaryInst() noexcept : Instruction(Instruction::Unary) {}
 
+    Operand operand;
     ValueId result = InvalidValueId;
     UnaryOp op = Uplus;
     DispatchType dispatch_type = Dynamic;
-    Operand operand;
 };
 
 /**
@@ -555,11 +555,11 @@ public:
      */
     BinaryInst() noexcept : Instruction(Instruction::Binary) {}
 
+    Operand lhs;
+    Operand rhs;
     ValueId result = InvalidValueId;
     BinaryOp op = Add;
     DispatchType dispatch_type = Dynamic;
-    Operand lhs;
-    Operand rhs;
 };
 
 /**

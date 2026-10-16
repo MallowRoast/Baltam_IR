@@ -87,12 +87,12 @@
 - 矩阵变量下标读取 `A(...)` 同样 lower 为 `load A` + `value_apply`
 - `ApplyInst` 继续保留脚本名字应用等尚未消歧的 `A(...)`
 - 新增 `CreateAnonymousFunctionHandleInst` 和 `AnonymousFunctionUnit`
-- 匿名函数体由 `IRModule::anonymous_functions` 拥有，普通 IR 通过 `AnonymousFunctionId`
-  间接引用
+- 匿名函数体由 `IRBuildResult::anonymous_functions` 保留共享所有权，构造指令通过
+  `target` 引用对应的 `AnonymousFunctionUnit`
 - 匿名函数捕获值由构造点的 `ValueId` 表达，函数体内部通过只读 capture slot 读取
 - 新增 `test5_1` 覆盖具名函数句柄、匿名函数句柄和捕获值 lowering
-- 增加匿名函数句柄设计记录，见
-  [anonymous_function_handle_design.md](./anonymous_function_handle_design.md)
+- 匿名函数句柄的统一设计见
+  [m_syntax_ir_design.md](./m_syntax_ir_design.md)
 
 10. 增加 `IRModule` 顶层组织。
 
@@ -123,12 +123,13 @@
 - 将根目录 [README](../README.md) 作为唯一文档入口，集中维护阅读路线、专题分类和术语边界。
 - 将当前源码事实统一指向 [IR Schema](./ir_schema.md)，runtime / workspace / deopt 文档作为
   后续设计约束阅读。
-- 增加变量、workspace、函数 frame、global/persistent、deopt 等 runtime 设计记录：
+- 增加变量、workspace、函数 frame、deopt 等 runtime 设计记录：
   [variable_model_design.md](./variable_model_design.md)、
   [workspace_design.md](./workspace_design.md)、
   [runtime_execution_objects_design.md](./runtime_execution_objects_design.md)、
-  [global_persistent_ir_design.md](./global_persistent_ir_design.md)、
   [deopt_runtime_references.md](./deopt_runtime_references.md)。
+- `global` / `persistent` 的语法 IR 内容现已合并到
+  [m_syntax_ir_design.md](./m_syntax_ir_design.md#变量声明)。
 - 明确当前脚本静态名字已经是 `ScriptVar` slot，文本 IR 打印仍是 `load` / `store`；
   runtime 文档中的 `load_workspace/store_workspace` 表示 workspace API 或未来 generic binding
   access，不是当前源码里的独立 IR 节点。

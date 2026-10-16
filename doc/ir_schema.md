@@ -2,7 +2,7 @@
 
 本文记录当前 `src/ir` 中实际存在的语义 IR schema。历史草案和已经删除的结构不再在这里展开；
 需要看设计背景时可参考 [ir_draft.md](./ir_draft.md)、[ir_lowering_design.md](./ir_lowering_design.md)
-和 [anonymous_function_handle_design.md](./anonymous_function_handle_design.md)。
+和 [m_syntax_ir_design.md](./m_syntax_ir_design.md)。
 
 ## 当前范围
 
@@ -452,7 +452,7 @@ slot 时应报变量引用错误，不能回退到同名函数解析或外层候
 - [IR Lowering 设计](./ir_lowering_design.md)
 - [IR Builder 设计](./ir_builder_design.md)
 - [IR Verifier 设计](./ir_verifier_design.md)
-- [匿名函数句柄设计](./anonymous_function_handle_design.md)
+- [M 语法的统一 IR 设计](./m_syntax_ir_design.md)
 - [M 变量模型设计](./variable_model_design.md)
 - [M 工作区设计](./workspace_design.md)
 - [InterpreterContext、CodeObject 与 Frame 设计](./runtime_execution_objects_design.md)

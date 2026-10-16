@@ -96,10 +96,8 @@ global/persistent 和 deopt 相关文档视为后续设计约束。
 
 ### 已实现特性与工具
 
-- [匿名函数句柄设计](./doc/anonymous_function_handle_design.md)：具名/匿名函数句柄、capture 和
-  `value_apply`。
-- [M 语法的统一 IR 设计](./doc/m_syntax_ir_design.md)：`for` / `while` 和 `switch` 的
-  CFG、`break` / `continue`、索引上下文 `end` 和多层候选 `MagicEndInst`。
+- [M 语法的统一 IR 设计](./doc/m_syntax_ir_design.md)：控制流、索引语法、具名/匿名函数句柄、
+  `global` / `persistent` 的 IR 与后续特化规则。
 - `&& / ||` 短路逻辑已在 [IR Lowering 设计](./doc/ir_lowering_design.md) 中记录，当前通过
   CFG 与内部 logical 结果 slot 表达按需求值。
 - [CFG DOT 输出设计](./doc/cfg_dot_design.md)：`ir_cfg_dot` 输出、节点和边的显示约定。
@@ -121,8 +119,6 @@ global/persistent 和 deopt 相关文档视为后续设计约束。
   会话状态、冻结代码对象、函数调用帧、所有权和执行流程。
 - [M 函数工作区中的静态 slot 与动态 env](./doc/function_workspace_env_design.md)：历史讨论归档，
   有效结论已合并到变量、workspace 和函数 frame 文档。
-- [Global / Persistent IR 节点设计](./doc/global_persistent_ir_design.md)：后续
-  `global` / `persistent` 专用节点。
 - [Matlab 执行策略与 Runtime 机制设计](./doc/execution_strategy.md)：interpreter、baseline JIT、
   optimizing JIT 和 deopt 分层。
 - [Deopt 与优化运行时参考资料](./doc/deopt_runtime_references.md)：deopt、stack map、guard 和

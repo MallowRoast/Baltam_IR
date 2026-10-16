@@ -522,5 +522,5 @@ builtin/plugin 继续使用项目已有机制。
 - [IR Schema](./ir_schema.md)
 - [M 工作区设计](./workspace_design.md)
 - [M 变量模型设计](./variable_model_design.md)
-- [Global / Persistent IR 节点设计](./global_persistent_ir_design.md)
+- [M 语法的统一 IR 设计](./m_syntax_ir_design.md)
 - [Matlab 执行策略与 Runtime 机制设计](./execution_strategy.md)

@@ -242,8 +242,8 @@ slot，并建立 live binding；后续 `y = b` 只有在 binding 仍 live 时才
   `persistent p` 访问同一份存储；它可以有静态 slot 位置，但值跨调用保留。
 
 workspace 层只需要能暴露这两类 binding，并在 `clear`、`clear global`、函数清理和文件失效时
-推进对应 epoch。它不负责定义专用 IR 节点、effect 或 runtime binding index；这些细节见
-[Global / Persistent IR 节点设计](./global_persistent_ir_design.md)。
+推进对应 epoch。专用 IR 节点及其 effect 见
+[M 语法的统一 IR 设计](./m_syntax_ir_design.md#变量声明)。
 
 ## 9. clear / who / exist
 
@@ -362,7 +362,7 @@ WorkspaceEpoch
 ## 相关文档
 
 - [M 变量模型设计](./variable_model_design.md)
-- [Global / Persistent IR 节点设计](./global_persistent_ir_design.md)
+- [M 语法的统一 IR 设计](./m_syntax_ir_design.md)
 - [InterpreterContext、CodeObject 与 Frame 设计](./runtime_execution_objects_design.md)
 - [M 函数工作区中的静态 slot 与动态 env](./function_workspace_env_design.md)
 - [IR Schema](./ir_schema.md)

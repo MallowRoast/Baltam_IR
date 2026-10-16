@@ -181,5 +181,5 @@ IR 应容易由解释器直接执行：
 - [M 变量模型设计](./variable_model_design.md)
 - [M 工作区设计](./workspace_design.md)
 - [InterpreterContext、CodeObject 与 Frame 设计](./runtime_execution_objects_design.md)
-- [Global / Persistent IR 节点设计](./global_persistent_ir_design.md)
+- [M 语法的统一 IR 设计](./m_syntax_ir_design.md)
 - [Deopt 与优化运行时参考资料](./deopt_runtime_references.md)

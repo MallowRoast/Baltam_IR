@@ -125,13 +125,13 @@ Binding liveness:
 visibility: 当前函数正文可见；其他函数不能通过同名 persistent 访问同一份存储
 scope: 当前 FunctionUnit
 lifetime: 随函数 code object / 函数清理规则存在，跨调用保留
-IR: 保守阶段使用 workspace/binding 语义；特化后使用 Slot::Persistent + load_persistent/store_persistent
+IR: 当前使用 Slot::Persistent + load_slot/store_slot；特化后使用 load_persistent/store_persistent
 runtime: CodeObject::persistent.values[SlotId]
 ```
 
 `persistent` 可以有静态 slot 身份，但它不是普通 per-call frame local。它的 slot 定位到当前
 函数 code object 的 persistent value table，递归和重入同一函数时共享同一份存储。专用节点、effect
-和 `clear` 细节见 [Global / Persistent IR 节点设计](./global_persistent_ir_design.md)。
+和 `clear` 细节见 [M 语法的统一 IR 设计](./m_syntax_ir_design.md#persistent)。
 
 ## 4. Global
 
@@ -142,14 +142,14 @@ runtime: CodeObject::persistent.values[SlotId]
 visibility: 所有声明同名 global 的 workspace 可见
 scope: session/global table
 lifetime: 随 session/global table 和 clear global 规则存在
-IR: Slot::Global + 保守 workspace/binding 语义；特化后使用 load_global/store_global
+IR: 当前使用 Slot::Global + load_slot/store_slot；特化后使用 load_global/store_global
 runtime: SlotId -> ba_obj_ptr in GlobalRegistry::values
 ```
 
 `global` 不属于任何函数 frame 的 per-call value，但源码中出现的 global 名字仍应有静态 `SlotId`。
 这个 slot 持有的 `ba_obj_ptr` 与 `GlobalRegistry::values[name]` 指向同一个变量地址，不是独立
 的 per-call frame value。专用节点、effect 和 `clear global` 细节见
-[Global / Persistent IR 节点设计](./global_persistent_ir_design.md)。
+[M 语法的统一 IR 设计](./m_syntax_ir_design.md#global)。
 
 ## 5. WorkspaceDynamic
 
@@ -475,8 +475,8 @@ store_slot 是否仍可用于后续赋值:
 
 同一个源码名字可能跨 `clear` 切换 binding kind。约束应是“同一程序点不能同时绑定成
 persistent 和 ordinary local”，而不是“整个 code unit 中同名永远不能出现两种 binding”。
-专用节点和 `clear_binding %slot_p` 细节见
-[Global / Persistent IR 节点设计](./global_persistent_ir_design.md#14-clear-对专用节点的影响)。
+专用节点和 `clear` 的 IR 约束见
+[M 语法的统一 IR 设计](./m_syntax_ir_design.md#persistent)。
 
 ### Global
 
@@ -486,8 +486,7 @@ value 本体。
 global binding。`clear global g` 更强，会影响 global value / registry 本体，并使相关 cache 失效。
 
 因此，`load_global/store_global` 只适用于仍证明绑定到 GlobalRegistry value 的程序点。专用节点和
-`clear_binding %slot_g` 细节见
-[Global / Persistent IR 节点设计](./global_persistent_ir_design.md#14-clear-对专用节点的影响)。
+`clear` 的 IR 约束见 [M 语法的统一 IR 设计](./m_syntax_ir_design.md#global)。
 
 ### WorkspaceDynamic 和 ScriptStaticWorkspaceName
 
@@ -574,6 +573,5 @@ invalidate affected binding facts
 
 - [M 工作区设计](./workspace_design.md)
 - [InterpreterContext、CodeObject 与 Frame 设计](./runtime_execution_objects_design.md)
-- [Global / Persistent IR 节点设计](./global_persistent_ir_design.md)
-- [匿名函数句柄设计](./anonymous_function_handle_design.md)
+- [M 语法的统一 IR 设计](./m_syntax_ir_design.md)
 - [IR 草案](./ir_draft.md)

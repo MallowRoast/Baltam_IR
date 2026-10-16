@@ -20,7 +20,7 @@
 - 变量类别、binding liveness、`clear` 对各类变量的影响：
   [M 变量模型设计](./variable_model_design.md)
 - `global` / `persistent` 不是普通 frame slot、后续专用节点和 effect：
-  [Global / Persistent IR 节点设计](./global_persistent_ir_design.md)
+  [M 语法的统一 IR 设计](./m_syntax_ir_design.md#变量声明)
 
 ## 保留边界
 
