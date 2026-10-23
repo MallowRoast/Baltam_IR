@@ -215,7 +215,7 @@ IRModule
 
 `MagicColonInst` 只保存 `result`，表示索引中单独 `:` 的占位值，不生成序列，也不参与普通 `colon` 函数分派。索引指令已能引用这个结果，`ValueInfo.constant_kind` 将其标为 `IndexColon`，与 `ConstInst` 的普通对象常量区分；运行时占位值表示尚未实现，执行时必须按索引位置解释其语义。
 
-`MagicEndInst` 保存按内层到外层排列的候选索引上下文及 `result`；每个上下文保存 `Operand callee_or_base`、从 1 开始的 `dim` 与 `nindices`。`Operand` 用 `std::variant<ValueId, SlotId, InternedString>` 区分已求出的值、已绑定的槽位和未解析名字，不能把已绑定槽位失效后重新作为名字查找。`SlotId` 与 `ValueId` 是各自保存一个 `std::uint32_t index` 的不同结构体，二者不能混用；槽位类别以 `SlotTable` 为准。`Slot` 仍用于匿名函数参数与捕获信息，以及函数句柄构造时的捕获来源。当前 `InternedString` 仍是 `std::string` 别名，并非真正的字符串池句柄；候选上下文的尺寸由该字符串备选类型主导，后续若引入字符串池可重新测量布局。
+`MagicEndInst` 保存按内层到外层排列的候选索引上下文及 `result`；每个上下文保存 `Operand callee_or_base`、从 1 开始的 `dim` 与 `nindices`。`Operand` 用 `std::variant<ValueId, InternedString>` 区分已求出的值与未解析名字。已确定为变量的引用先通过 `LoadSlotInst` 得到 `ValueId`，不得退回名字查找；运行时绑定失效时由槽位读取报告错误。`SlotId` 与 `ValueId` 是各自保存一个 `std::uint32_t index` 的不同结构体，二者不能混用；槽位类别以 `SlotTable` 为准。`Slot` 仍用于匿名函数参数与捕获信息，以及函数句柄构造时的捕获来源。当前 `InternedString` 仍是 `std::string` 别名，并非真正的字符串池句柄；候选上下文的尺寸由该字符串备选类型主导，后续若引入字符串池可重新测量布局。
 
 `LoadSlotInst` 保存 `result: ValueId` 和已绑定的 `slot: SlotId`，从该槽位读取并定义一个值；`StoreSlotInst` 保存 `slot: SlotId` 与已求值的 `value: ValueId`，写入槽位但不产生结果值。两者在 Non-SSA 与 SSA 阶段共用结构。指令构造时不检查编号是否存在；值的预留和绑定由 `ValueTable` 管理，槽位编号范围由所属代码单元的 `SlotTable` 查询。`SlotTag` 由 `SlotTable` 提供，使运行时能够区分局部、脚本、全局、持久及捕获存储；它们不能一概按普通 frame 局部访问或优化。当前没有指令 effect 元数据，槽位是否属于当前单元、当前程序点是否仍绑定到全局／持久存储，以及跨调用的可观察副作用，留给后续构建、验证与执行流程处理。
 
@@ -223,7 +223,7 @@ IRModule
 
 `BranchInst` 按条件值选择真假目标，`GotoInst` 直接指向目标块，`ReturnInst` 结束当前代码单元；脚本或命令输入可返回空 `values`。当前只建立跳转目标与基本块末尾的结构约束，条件真假转换、返回值读取和 CFG 边的验证由后续执行与构建流程负责。
 
-索引与成员访问按 [M 语法 IR 设计](m_syntax_ir_design.md)实现了 `ApplyInst`、`ValueApplyInst`、`CallInst`、`ParenReferenceInst`、`BraceReferenceInst`、`DotAccessInst`、`DotReferenceInst`、`ParenAssignInst`、`ParenDeleteInst`、`BraceAssignInst` 和 `DotAssignInst`。未消歧的圆括号和点号表达式保留 `Operand` 中名字、槽位或值的区别；`CallInst` 仅保存按名字调用的 `InternedString callee`，函数句柄等按值调用由 `ValueApplyInst` 处理。三种调用或应用指令的 `arguments` 均保存已求值的 `ValueId`。构造函数不再统一检查 `Operand` 中的空名字，名字有效性由语法与构建流程负责；独立的成员名等字符串字段仍各自检查。`CallInst.m_function_target` 仅指向同模块词法绑定的 M 函数，不保存外部 M 函数或插件的运行时缓存；局部函数与嵌套函数的工作区差异由词法关系处理，不增加分派类别。已确定的圆括号和花括号索引节点保存按源码顺序求值后的 `ValueId` 下标；索引与静态成员取值／赋值节点不保存 `DispatchType`，内置行为或对象协议由执行时的 base 决定。赋值与删除都输出 `updated_base`，调用处须为它分配新的值编号并负责将根变量写回。编号归属、值定义顺序和 SSA 唯一性由表及后续构建流程处理。
+索引与成员访问按 [M 语法 IR 设计](m_syntax_ir_design.md)实现了 `ApplyInst`、`ValueApplyInst`、`CallInst`、`ParenReferenceInst`、`BraceReferenceInst`、`DotAccessInst`、`DotReferenceInst`、`ParenAssignInst`、`ParenDeleteInst`、`BraceAssignInst` 和 `DotAssignInst`。圆括号和点号表达式的 `Operand` 只保留未消歧名字或已求值结果；已绑定变量先生成 `LoadSlotInst`；`CallInst` 仅保存按名字调用的 `InternedString callee`，函数句柄等按值调用由 `ValueApplyInst` 处理。三种调用或应用指令的 `arguments` 均保存已求值的 `ValueId`。构造函数不再统一检查 `Operand` 中的空名字，名字有效性由语法与构建流程负责；独立的成员名等字符串字段仍各自检查。`CallInst.m_function_target` 仅指向同模块词法绑定的 M 函数，不保存外部 M 函数或插件的运行时缓存；局部函数与嵌套函数的工作区差异由词法关系处理，不增加分派类别。已确定的圆括号和花括号索引节点保存按源码顺序求值后的 `ValueId` 下标；索引与静态成员取值／赋值节点不保存 `DispatchType`，内置行为或对象协议由执行时的 base 决定。赋值与删除都输出 `updated_base`，调用处须为它分配新的值编号并负责将根变量写回。编号归属、值定义顺序和 SSA 唯一性由表及后续构建流程处理。
 
 **待明确的设计问题：** 索引与成员取值／赋值节点已移除 `DispatchType`。若将来静态分派到对象重载方法，需要确定目标及其依赖验证保存在专门的特化表示、旁表，还是统一 lower 为 `CallInst`。复合索引链的 `PendingIndex` 运行时表示、动态成员名 `a.(expr)`，以及多输出逗号分隔列表的运行时承载方式也尚未实现。
 
