@@ -334,12 +334,12 @@ public:
 // 已确定为圆括号取值，保留多个输出及索引实参的源码顺序。
 class ParenReferenceInst final : public Instruction {
 public:
-    ParenReferenceInst(std::vector<ValueId> results,
+    ParenReferenceInst(ValueId result,
                        std::vector<ValueId> indices, ValueId base)
-        : Instruction(Type::ParenReference), results(std::move(results)),
+        : Instruction(Type::ParenReference), result(result),
           indices(std::move(indices)), base(base) {}
 
-    std::vector<ValueId> results;
+    ValueId result;
     std::vector<ValueId> indices;
     ValueId base;
 };
@@ -371,29 +371,29 @@ public:
     ValueId base;
 };
 
-// 花括号访问可产生多个元胞内容值。
+// 花括号访问的单个 IR 结果可承载逗号分隔列表。
 class BraceReferenceInst final : public Instruction {
 public:
-    BraceReferenceInst(std::vector<ValueId> results,
+    BraceReferenceInst(ValueId result,
                        std::vector<ValueId> indices, ValueId base)
-        : Instruction(Type::BraceReference), results(std::move(results)),
+        : Instruction(Type::BraceReference), result(result),
           indices(std::move(indices)), base(base) {}
 
-    std::vector<ValueId> results;
+    ValueId result;
     std::vector<ValueId> indices;
     ValueId base;
 };
 
-// 花括号赋值允许多个内容值；右侧为空数组仍属于赋值语义。
+// 花括号赋值的单个 IR 输入值可承载逗号分隔列表。
 class BraceAssignInst final : public Instruction {
 public:
-    BraceAssignInst(std::vector<ValueId> indices, std::vector<ValueId> values,
+    BraceAssignInst(std::vector<ValueId> indices, ValueId value,
                     ValueId result, ValueId base)
         : Instruction(Type::BraceAssign), indices(std::move(indices)),
-          values(std::move(values)), result(result), base(base) {}
+          value(value), result(result), base(base) {}
 
     std::vector<ValueId> indices;
-    std::vector<ValueId> values;
+    ValueId value;
     ValueId result;
     ValueId base;
 };
@@ -401,12 +401,12 @@ public:
 // 保留点号访问左侧名字尚未绑定时的歧义；member 可为静态名字或动态求值结果。
 class DotAccessInst final : public Instruction {
 public:
-    DotAccessInst(std::vector<ValueId> results, Operand base_or_name,
+    DotAccessInst(ValueId result, Operand base_or_name,
                   Operand member)
-        : Instruction(Type::DotAccess), results(std::move(results)),
+        : Instruction(Type::DotAccess), result(result),
           base_or_name(std::move(base_or_name)), member(std::move(member)) {}
 
-    std::vector<ValueId> results;
+    ValueId result;
     Operand base_or_name;
     Operand member;
 };
@@ -414,12 +414,12 @@ public:
 // 已确定按值读取成员，具体实现仍由对象协议分派。
 class DotReferenceInst final : public Instruction {
 public:
-    DotReferenceInst(std::vector<ValueId> results, Operand member,
+    DotReferenceInst(ValueId result, Operand member,
                      ValueId base)
-        : Instruction(Type::DotReference), results(std::move(results)),
+        : Instruction(Type::DotReference), result(result),
           member(std::move(member)), base(base) {}
 
-    std::vector<ValueId> results;
+    ValueId result;
     Operand member;
     ValueId base;
 };
