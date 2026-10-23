@@ -442,11 +442,7 @@ public:
 class UnaryInst final : public Instruction {
 public:
     UnaryInst(ValueId result, ValueId operand, UnaryOp op)
-        : Instruction(Type::Unary), result(result), operand(operand), op(op) {
-        if (op > UnaryOp::Ctranspose) {
-            throw std::invalid_argument("一元运算的操作类型无效");
-        }
-    }
+        : Instruction(Type::Unary), result(result), operand(operand), op(op) {}
 
     ValueId result;
     ValueId operand;
@@ -458,11 +454,7 @@ public:
 class BinaryInst final : public Instruction {
 public:
     BinaryInst(ValueId result, ValueId lhs, ValueId rhs, BinaryOp op)
-        : Instruction(Type::Binary), result(result), lhs(lhs), rhs(rhs), op(op) {
-        if (op > BinaryOp::Ne) {
-            throw std::invalid_argument("二元运算的操作类型无效");
-        }
-    }
+        : Instruction(Type::Binary), result(result), lhs(lhs), rhs(rhs), op(op) {}
 
     ValueId result;
     ValueId lhs;
