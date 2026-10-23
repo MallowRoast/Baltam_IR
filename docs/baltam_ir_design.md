@@ -1,0 +1,546 @@
+# Baltam IR 组织与缓存设计
+
+## 一、IR 怎么组织
+
+### 1.1 总体结构
+
+Baltam 使用 `IRModule` 组织单个源码文件或一次源码输入产生的可执行 IR。
+
+```text
+IRModule
+├── 来源信息
+├── CommandUnit（脚本或命令输入，可选）
+└── FunctionUnit(s)（模块直接拥有的函数）
+    └── Nested FunctionUnit(s)（由词法父函数拥有）
+```
+
+- 一个源码输入对应一个 `IRModule`。
+- `CommandUnit` 只保存 Non-SSA IR。
+- `FunctionUnit` 管理 Non-SSA、SSA 和 Optimized SSA 三个阶段的 IR；具体版本和元数据见 4.1、4.2 节。
+- 顶层函数、Local Function 以及 `classdef` 内直接定义的方法由 `IRModule` 拥有。
+- Nested Function 由其词法父 `FunctionUnit` 拥有。
+- 类方法和普通函数使用相同的 `FunctionUnit` 结构。
+- 类文件仍由 `ModuleType::ClassFile` 标识；类声明和属性默认值表达式的 IR 归属待类语法设计时确定。
+- IR 系统不持有运行时工作空间或已解析的类元数据。
+
+### 1.2 IRModule
+
+`IRModule` 是**一次源码输入生成的 IR** 的所有者。当前保存来源信息、文件内的代码单元和非拥有函数索引，不保存源码文本或缓存验证记录。缓存命中或失效只决定使用哪个模块，不改变已经发布的模块所有权树。
+
+源码来源和模块类型分开表示：`SourceType` 区分文件、命令行输入和内存源码；`ModuleType` 区分脚本主体、函数文件、类文件和命令输入。内存源码也可能按脚本或函数形式解析，因此不能只用一个枚举同时表达两者。
+
+```cpp
+enum class SourceType { File, Command, Memory };
+enum class ModuleType { Script, FunctionFile, ClassFile, Command };
+```
+
+```cpp
+class IRModule {
+private:
+    SourceType source_type_;
+    ModuleType module_type_;
+    std::optional<std::filesystem::path> source_path_;
+
+    std::unique_ptr<CommandUnit> command_unit_;
+    std::vector<std::unique_ptr<FunctionUnit>> functions_;
+    std::map<std::string, FunctionUnit*> function_index_;
+};
+```
+
+当前 `IRModule` 不持有源码文本或源码版本标识。后续若诊断需要在文件变化后还原原始源码，再引入源码快照及其生命周期规则；文件版本验证由缓存层设计。`SourceType::File` 构造接口要求绝对路径并执行词法归一化；符号链接等路径身份规则留给缓存层。`IRModule` 的所有权、入口约定和索引接口已有实现；`BasicBlock` 已能持有指令并通过 `add_instruction` 创建指令，目前实现了基础表达式、函数句柄、变量声明、索引与成员访问的结构，以及三个终结指令。完整 CFG 元数据以及类属性默认值表达式尚未实现。
+
+| 字段 | 作用 |
+|---|---|
+| `source_type_` | 标识文件、命令行或内存源码 |
+| `module_type_` | 标识脚本、函数文件、类文件或命令输入的结构 |
+| `source_path_` | 文件源码的规范化路径；非文件源码为 `nullopt` |
+| `command_unit_` | 独占拥有脚本或命令行主体 |
+| `functions_` | 独占拥有模块直接包含的函数；嵌套函数由各自的词法父函数拥有 |
+| `function_index_` | 使用内部限定键索引模块直接拥有的函数；不拥有函数 |
+
+**入口约定：** 调用处构建函数列表时把主函数放在首位，`set_functions` 保留传入顺序，使 `functions_.front()` 固定为入口；`entry_function()` 只按此约定返回首个函数，不另存指针。脚本和命令输入通过 `command_unit_` 进入；类文件本身没有普通函数入口，由类解析结果选择构造函数或方法。脚本的 Local Function 仍在 `functions_` 中，但不是入口。当前没有 `seal()`；模块类型与代码单元的最终组合以及主函数顺序由调用处保证。
+
+| `module_type_` | `command_unit_` | `functions_` |
+|---|---|---|
+| `Script` | 必须存在 | 可包含脚本 Local Function |
+| `FunctionFile` | 空 | 非空，首个为主函数，其后为文件级 Local Function |
+| `ClassFile` | 空 | 类内方法及文件级 Local Function，可为空 |
+| `Command` | 必须存在 | 空 |
+
+该表约束模块入口，不限制同一个文件内的嵌套函数数量；嵌套函数仍由词法父函数拥有。`SourceType::Command` 与 `ModuleType::Command` 配对；文件或内存源码按实际语法确定 `ModuleType`。类文件中的方法由类解析结果定位，不把 `functions_.front()` 当作构造函数。
+
+**函数索引：** `function_index_` 使用 `std::map<std::string, FunctionUnit*>`，键是模块内部的限定标识，不能只用函数原名。可按“语言作用域类别／词法路径／名称”编码，例如：
+
+```text
+function/main
+local/helper
+method/MyClass/calculate
+```
+
+这些键不是 M 语言中的可调用名称。调用处把模块级函数及对应限定键一起交给 `IRModule::set_functions`；模块一次接收函数列表并建立索引，`find_function` 只查找模块直接拥有的函数。Nested Function 由词法父 `FunctionUnit` 持有，通过父函数的 `nested_functions()` 访问，不进入模块索引。`std::map` 的排序顺序不表示源码定义顺序；定义顺序由 `functions_` 和各级 `nested_functions_` 保留。索引只负责内部定位，不能绕过 Local Function 的可见性规则或类方法分派规则。方法 IR 仍由 `functions_` 拥有。
+
+`CommandUnit` 和模块级 `FunctionUnit` 均由调用处构造，再以 `std::unique_ptr` 移交给模块。`set_command_unit(std::unique_ptr<CommandUnit>&&)` 设置脚本或命令主体；`set_functions(std::vector<IndexedFunction>&&)` 一次设置按源码顺序排列的模块级函数，其中 `IndexedFunction` 是限定键与 `std::unique_ptr<FunctionUnit>` 的配对。设置前检查空对象、空键和重复键；校验失败时不转移传入函数的所有权。
+
+**发布与生命周期：** 模块构建阶段可填充上述字段；发布给缓存或执行器后，构建流程约定不再修改 Unit 所有权树和索引。当前没有封闭状态来强制这一约定。源文件变化时创建新 `IRModule`。执行帧、函数句柄或 `object_meta` 若保存内部 `FunctionUnit*`，必须同时持有该模块的 `shared_ptr`；指针只在模块存活期间有效。按需生成的 SSA／Optimized SSA 不得在执行者仍引用旧版本时原地改写，版本关系见 4.1 节。
+
+类文件的内联方法使用 `FunctionUnit`，由 `functions_` 持有。当前 `IRModule` 不保存类名、属性和方法声明的独立结构，也不保存源码文本。类声明和属性默认值表达式的表示方式留待类语法设计，构建模块时不求值。运行时 `object_meta` 管理类身份、访问控制及继承关系，不反向拥有模块内的 IR。
+
+### 1.3 IRUnit
+
+`IRUnit` 是 `CommandUnit`、`FunctionUnit` 与 `AnonymousFunctionUnit` 的公共基类，不直接拥有统一的 IR 包装对象。各派生类直接管理自己的 `BasicBlock` 集合。
+
+```text
+IRUnit
+├── CommandUnit
+├── FunctionUnit
+└── AnonymousFunctionUnit
+```
+
+语法设计文档中的旧称 `CodeUnit` 在当前所有权结构中对应 `IRUnit`。匿名函数体也属于独立代码单元，但不进入 `IRModule::functions_` 或模块函数索引。
+
+### 1.4 CommandUnit
+
+`CommandUnit` 表示命令行输入或脚本主体。**只拥有 Non-SSA 阶段版本，不持有 SSA 或 Optimized SSA。**
+
+```cpp
+class CommandUnit : public IRUnit {
+private:
+    std::shared_ptr<IRStageVersion> version_; // Non-SSA
+};
+```
+
+`version_` 内的基本块集合独占拥有 Non-SSA 基本块，并与 `ValueTable` 同生存期。建议约定首个基本块为入口。容器顺序不代表执行顺序，实际执行路径由控制流关系决定。脚本中的 Local Function 由 `IRModule` 管理，不属于 `CommandUnit`。基本块由 `CommandUnit::add_block()` 创建。
+
+### 1.5 FunctionUnit
+
+`FunctionUnit` 统一表示普通函数、Local Function、Nested Function、类成员函数和构造函数。
+
+```cpp
+class FunctionUnit : public IRUnit {
+private:
+    std::string name_;
+    std::vector<SlotId> parameter_slots_;
+    std::vector<SlotId> return_slots_;
+
+    std::shared_ptr<IRStageVersion> non_ssa_version_;
+    std::shared_ptr<IRStageVersion> ssa_version_;
+    std::shared_ptr<IRStageVersion> optimized_ssa_version_;
+
+    std::vector<std::unique_ptr<FunctionUnit>> nested_functions_;
+};
+```
+
+| 字段 | 作用 |
+|---|---|
+| `name_` | 函数原始名称 |
+| `parameter_slots_` | 按声明顺序排列的输入参数槽位 |
+| `return_slots_` | 按声明顺序排列的输出参数槽位 |
+| `non_ssa_version_` | Non-SSA 基本块和值表 |
+| `ssa_version_` | SSA 基本块和值表 |
+| `optimized_ssa_version_` | 优化后的 SSA 基本块和值表 |
+| `nested_functions_` | 独占拥有直接嵌套的函数 |
+
+构造 `FunctionUnit` 时仍传入源码中的入参和出参名称，但函数内部只保存有序的 `SlotId` 列表；名称与槽位属性由自身的 `SlotTable` 保存。同名入参与出参复用一个 `SlotId`，例如 `function x = f(x)`；输入和输出身份由各自的列表确定，普通参数槽位使用 `SlotTag::Local`，不再用互斥的 `Arg`／`Ret` 类别表示。三个 IR 阶段各自保存基本块和值表。基本块由 `FunctionUnit::add_block(IRStage)` 创建，块序号在所属阶段内从零开始。SSA 或 Optimized SSA 可以构建新阶段版本，再用 `replace_stage_version()` 一起替换基本块和值表。
+
+类方法与 Local Function 不需要通过 `FunctionType`、`is_method_` 或 `is_local_` 区分。类归属、访问权限和继承关系由运行时 `object_meta` 管理。
+
+### 1.5.1 AnonymousFunctionUnit
+
+`AnonymousFunctionUnit` 保存非拥有的 `IRUnit* lexical_parent_`、按源码顺序排列的 `param_slots_`、按捕获布局排列的 `capture_slots_`，并像 `FunctionUnit` 一样分别拥有三个 IR 阶段版本。`capture_slots_` 中的槽位类别必须为 `Capture`。匿名函数体没有普通函数名或具名输出变量；表达式结果通过 `ReturnInst.values` 返回。`IRUnit` 已有通用 slot 表，参数和捕获槽位的名称绑定仍由后续构建流程补全。
+
+外层基本块中的 `CreateAnonymousFunctionHandleInst` 使用 `std::shared_ptr<AnonymousFunctionUnit>` 引用函数体，运行时句柄以后也可以共享同一份函数体代码；每次构造指令执行时的捕获值属于各自的句柄。词法父指针不延长父单元生命周期。若句柄在模块失效后仍可调用，运行时必须同时保留该模块，不能仅凭共享的匿名函数体访问已销毁的词法父单元。
+
+### 1.6 嵌套函数的所有权
+
+嵌套函数由词法父 `FunctionUnit` 独占拥有：
+
+```matlab
+function y = outer(x)
+    a = 10;
+    function z = inner()
+        z = x + a;
+    end
+    y = inner();
+end
+```
+
+```text
+IRModule
+└── FunctionUnit (outer)
+    ├── Non-SSA BasicBlocks
+    ├── SSA BasicBlocks
+    ├── Optimized SSA BasicBlocks
+    └── nested_functions_
+        └── FunctionUnit (inner)
+```
+
+所有权树与词法嵌套关系一致，父函数销毁时子函数一同销毁，不再必须保存 `lexical_parent_`。如果分析阶段需要从子函数直接访问父函数，可以另外增加非拥有引用。闭包环境和捕获变量仍由运行时管理。
+
+### 1.7 Local Function 与 Nested Function
+
+```matlab
+function y = main(x)
+    y = helper(x);
+    function z = inner(v)
+        z = v + x;
+    end
+end
+
+function y = helper(x)
+    y = x * 2;
+end
+```
+
+```text
+IRModule
+├── FunctionUnit (main)
+│   └── nested_functions_
+│       └── FunctionUnit (inner)
+└── FunctionUnit (helper)
+```
+
+`main` 和 `helper` 由 `IRModule` 拥有，`inner` 由 `main` 拥有。模块索引只包含 `function/main`、`local/helper` 等模块级函数；`inner` 由 `main` 访问。
+
+### 1.8 BasicBlock 所有权
+
+每个 Unit 独占拥有自己的基本块，并负责创建基本块。`BasicBlock` 保存阶段内序号和 `std::vector<std::unique_ptr<Instruction>>`，通过 `add_instruction<Inst>(...)` 创建并持有指令。`GotoInst` 与 `BranchInst` 使用非拥有 `BasicBlock*` 保存跳转目标，`ReturnInst` 保存按顺序返回的值；三者都是终结指令。`BasicBlock::terminator()` 返回末尾的终结指令；添加终结指令后不得再向该块追加指令。当前不保存前驱或后继表，也未检查跳转目标是否属于同一代码单元和 IR 阶段。每个基本块集合的第一个元素约定为入口块。
+
+`ConstInst` 按 [M 语法 IR 设计](m_syntax_ir_design.md)保存 `const_ba_obj_ptr value` 和 `ValueId result`，在 Non-SSA 与 SSA 阶段使用同一种指令。`const_ba_obj_ptr` 是 `std::shared_ptr<const ba_obj>` 的别名；`value` 持有运行前确定的常量对象。运行时修改该值时仍须遵守写时复制语义。`ba_obj` 在 IR 头文件中仅前置声明，实际对象由运行时创建。`ValueId` 是只保存一个 `std::uint32_t index` 的结构体，不带无效哨兵值；构建调用处通过所属阶段版本的 `ValueTable` 分配编号并绑定定义。
+
+`ConcatInst` 保存按源码顺序排列的非空 `items`、`result`、水平或竖直 `axis` 和 `is_dynamic`，Non-SSA 与 SSA 共用此结构。空 `[]` 应使用 `ConstInst`。当前已有值定义表，但尚无类型事实；构建调用处需要确定 `is_dynamic` 是否表示输入中有非常量值；仅凭 `is_dynamic == false` 不能跳过运行时 `horzcat`／`vertcat` 的分派检查。
+
+`CellConstructInst` 保存按源码顺序排列的非空 `items`、`rows`、`cols` 和 `result`，要求元素个数恰好等于行数乘列数；这也隐含行列数非零，无须分别检查。它不保存 `is_dynamic`；空 `{}` 使用 `ConstInst`。字段先放 `vector` 和 `size_t`，再放 `ValueId`，避免额外的字段间对齐空隙。
+
+`ColonInst` 保存 `result`、`start`、可选 `step`、`stop` 和初始为 `true` 的 `needs_runtime_dispatch`。`step` 为空表示源码省略步长，与显式写出步长区分；索引中的单独 `:` 不使用该指令。当前没有保存已解析 `colon` 目标的字段，因此将 `needs_runtime_dispatch` 改为 `false` 后如何执行已解析目标，仍须在分派设计中确定。
+
+`MagicColonInst` 只保存 `result`，表示索引中单独 `:` 的占位值，不生成序列，也不参与普通 `colon` 函数分派。索引指令已能引用这个结果，`ValueInfo.constant_kind` 将其标为 `IndexColon`，与 `ConstInst` 的普通对象常量区分；运行时占位值表示尚未实现，执行时必须按索引位置解释其语义。
+
+`MagicEndInst` 保存按内层到外层排列的候选索引上下文及 `result`；每个上下文保存 `Operand callee_or_base`、从 1 开始的 `dim` 与 `nindices`。`Operand` 用 `std::variant<ValueId, SlotId, InternedString>` 区分已求出的值、已绑定的槽位和未解析名字，不能把已绑定槽位失效后重新作为名字查找。`SlotId` 与 `ValueId` 是各自保存一个 `std::uint32_t index` 的不同结构体，二者不能混用；槽位类别以 `SlotTable` 为准。`Slot` 仍用于匿名函数参数与捕获信息，以及函数句柄构造时的捕获来源。当前 `InternedString` 仍是 `std::string` 别名，并非真正的字符串池句柄；候选上下文的尺寸由该字符串备选类型主导，后续若引入字符串池可重新测量布局。
+
+`LoadSlotInst` 保存 `result: ValueId` 和已绑定的 `slot: SlotId`，从该槽位读取并定义一个值；`StoreSlotInst` 保存 `slot: SlotId` 与已求值的 `value: ValueId`，写入槽位但不产生结果值。两者在 Non-SSA 与 SSA 阶段共用结构。指令构造时不检查编号是否存在；值的预留和绑定由 `ValueTable` 管理，槽位编号范围由所属代码单元的 `SlotTable` 查询。`SlotTag` 由 `SlotTable` 提供，使运行时能够区分局部、脚本、全局、持久及捕获存储；它们不能一概按普通 frame 局部访问或优化。当前没有指令 effect 元数据，槽位是否属于当前单元、当前程序点是否仍绑定到全局／持久存储，以及跨调用的可观察副作用，留给后续构建、验证与执行流程处理。
+
+`GlobalDeclInst` 和 `PersistentDeclInst` 各保存非空的 `std::vector<SlotId>`，都不产生 `ValueId`。槽位类别只保存在所属代码单元的 `SlotTable` 中；构建调用处须检查全局声明指向 `Global` 槽位、持久声明指向 `Persistent` 槽位，指令构造函数仅检查列表非空。当前 `BasicBlock` 不记录所属代码单元，因而尚不能在加入指令时检查 `PersistentDeclInst` 是否位于函数内；重复声明复用同一 slot、静态绑定冲突及运行时环境副作用的表示仍须由后续构建与执行流程确定。
+
+`BranchInst` 按条件值选择真假目标，`GotoInst` 直接指向目标块，`ReturnInst` 结束当前代码单元；脚本或命令输入可返回空 `values`。当前只建立跳转目标与基本块末尾的结构约束，条件真假转换、返回值读取和 CFG 边的验证由后续执行与构建流程负责。
+
+索引与成员访问按 [M 语法 IR 设计](m_syntax_ir_design.md)实现了 `ApplyInst`、`ValueApplyInst`、`CallInst`、`ParenReferenceInst`、`BraceReferenceInst`、`DotAccessInst`、`DotReferenceInst`、`ParenAssignInst`、`ParenDeleteInst`、`BraceAssignInst` 和 `DotAssignInst`。未消歧的圆括号和点号表达式保留 `Operand` 中名字、槽位或值的区别；`CallInst` 仅保存按名字调用的 `InternedString callee`，函数句柄等按值调用由 `ValueApplyInst` 处理。三种调用或应用指令的 `arguments` 均保存已求值的 `ValueId`。构造函数不再统一检查 `Operand` 中的空名字，名字有效性由语法与构建流程负责；独立的成员名等字符串字段仍各自检查。`CallInst.m_function_target` 仅指向同模块词法绑定的 M 函数，不保存外部 M 函数或插件的运行时缓存；局部函数与嵌套函数的工作区差异由词法关系处理，不增加分派类别。已确定的圆括号和花括号索引节点保存按源码顺序求值后的 `ValueId` 下标；索引与静态成员取值／赋值节点不保存 `DispatchType`，内置行为或对象协议由执行时的 base 决定。赋值与删除都输出 `updated_base`，调用处须为它分配新的值编号并负责将根变量写回。编号归属、值定义顺序和 SSA 唯一性由表及后续构建流程处理。
+
+**待明确的设计问题：** 索引与成员取值／赋值节点已移除 `DispatchType`。若将来静态分派到对象重载方法，需要确定目标及其依赖验证保存在专门的特化表示、旁表，还是统一 lower 为 `CallInst`。复合索引链的 `PendingIndex` 运行时表示、动态成员名 `a.(expr)`，以及多输出逗号分隔列表的运行时承载方式也尚未实现。
+
+`UnaryInst` 和 `BinaryInst` 按 [M 语法 IR 设计](m_syntax_ir_design.md#基本运算)使用 `ValueId` 引用已求值的操作数，分别保存一元或二元 `op`、`result`，以及初始为 `true` 的 `needs_runtime_dispatch`。一元运算区分两种转置；二元运算区分矩阵、逐元素、比较与双侧求值逻辑运算。`&&` 和 `||` 应由控制流表达，不加入 `BinaryOp`。两个指令在 Non-SSA 与 SSA 阶段共用结构；构造函数检查操作种类，编号是否已定义由 `ValueTable` 和后续构建流程确定。
+
+**待明确的分派设计：** 当前 `needs_runtime_dispatch` 可以改为 `false`，但指令没有保存已解析目标或内置实现标识。设计文档要求二元运算静态解析到用户函数后仍保留源码操作符信息；`dev_zj` 分支的旧说明则建议将这种运算 lower 为 `CallInst`。两者对目标存放位置和运算符信息的保留方式不同，需要在实现静态分派前确定。当前版本仅定义动态分派初始状态，不预设静态解析策略。
+
+具名句柄由 `CreateNamedFunctionHandleInst` 保存函数名、结果编号、解析模式、已绑定分派类别和可选的 `FunctionUnit*`；运行时模式必须保持 `Dynamic` 且无静态目标，静态模式只允许无函数指针的 `Builtin` 或带函数指针的 `MFunction`。匿名句柄由 `CreateAnonymousFunctionHandleInst` 保存共享的匿名函数体、按顺序排列的 `CaptureValue` 和结果编号；每项捕获保存名称、外层来源槽位及构造点取得的 `ValueId`。构造函数检查捕获数量与匿名函数体的 `capture_slots_` 数量一致。`@name` 和 `@(args) expr` 都只构造句柄，不执行调用。
+
+**待补的执行支撑：** 当前已有 `LoadSlotInst` 和 slot 表，但没有自由变量分析或 closure 运行时对象，因此捕获值的读取、未绑定错误、嵌套函数共享父工作区以及具名句柄的动态查找尚不能执行。`CaptureValue` 与 `capture_slots_` 的逐项对应关系由后续构建流程建立；仅有相同数量不足以证明名称与槽位映射正确。
+
+### 1.9 IR 构建流程
+
+构建流程负责以下工作；当前不规定必须由名为 `IRBuilder` 的类完成：
+
+1. 读取一次源码，确定 `SourceType` 和 `ModuleType`，创建 `IRModule`；源码文本仅供本次解析使用。
+2. 根据源码结构在调用处创建 `CommandUnit` 和模块级 `FunctionUnit`；函数文件的函数列表以主函数开头，再设置到 `IRModule`。
+3. 遇到 Nested Function 时，由词法父函数创建并加入 `nested_functions_`。
+4. 为可执行单元构建 Non-SSA IR；类属性默认值表达式的表示方式另行设计，不在此时求值。
+5. 检查模块级函数的限定键唯一、入口与所有权关系，完成后发布模块；这些最终检查尚无统一接口。
+6. 后续按需生成 SSA 和 Optimized SSA；发布新版本时遵守 4.1 节的生命周期约束。
+
+不单独设置 `IRManager`。
+
+---
+
+## 二、IR 怎么缓存
+
+### 2.1 缓存范围
+
+**`IRCache` 只缓存 `.m` 源文件生成的 `IRModule`。**
+
+| 源码来源 | 是否缓存 |
+|---|---|
+| 普通 `.m` 函数文件 | 是 |
+| `.m` 脚本文件 | 是 |
+| `classdef` 类文件 | 是 |
+| 类文件夹中的 `.m` 方法文件 | 是 |
+| 命令行输入 | 否 |
+| 临时内存代码 | 否 |
+
+命令行和临时内存代码通过上述构建流程得到临时模块，由调用方管理生命周期；若创建的函数句柄仍引用其函数 IR，句柄也必须保持该模块存活。
+
+### 2.2 缓存粒度
+
+以单个 `.m` 文件为单位，一个文件对应一个 `IRModule`，不为 Local Function 或 Nested Function 建立独立文件级缓存。
+
+```text
+IRCache
+└── /project/calculate.m
+    └── CacheEntry
+        └── IRModule
+            ├── FunctionUnit (calculate)
+            └── FunctionUnit (helper)
+```
+
+查询条目并取得模块后，通过 `function_index_` 定位模块直接拥有的目标函数；嵌套函数由其词法父函数访问。
+
+### 2.3 IRCache 结构
+
+第一阶段缓存按规范化的绝对 `.m` 文件路径建立条目。路径解析由调用方完成；`IRCache` 不负责搜索路径、函数分派或类方法解析。同一物理文件通过不同符号链接到达时可能出现多个条目，是否合并这类路径留待统一的路径身份规则确定。
+
+`WorldId` 定义在 `world_counter.h` 中，缓存复用该类型。
+
+```cpp
+struct CacheEntry {
+    std::shared_ptr<IRModule> module;
+    std::filesystem::file_time_type source_mtime;
+    WorldId checked_world = 0;
+    bool invalidated = false;
+
+    bool valid();
+};
+
+class IRCache {
+public:
+    static IRCache& instance() noexcept;
+    CacheEntry* find(const std::filesystem::path& path) const;
+    CacheEntry* register_module(std::shared_ptr<IRModule> module);
+    void remove(const std::filesystem::path& path);
+
+private:
+    IRCache() = default;
+    std::unordered_map<std::filesystem::path,
+                       std::unique_ptr<CacheEntry>> entries_;
+};
+```
+
+| 字段 | 作用 |
+|---|---|
+| `module` | 持有已构建的 IRModule |
+| `source_mtime` | 保存注册时的文件修改时间 |
+| `checked_world` | 上次完成文件有效性检查时的全局世界计数 |
+| `invalidated` | 显式或文件变化导致的失效标记 |
+| `entries_` | 文件路径到当前缓存条目的映射 |
+
+`CacheEntry::valid()` 先检查 `invalidated`；若条目的 `checked_world` 与全局 `WorldCounter::current()` 相同，则直接有效。两者不同时才检查文件修改时间；文件未变化则更新 `checked_world` 并复用条目，文件已变化或无法读取则标记失效并返回 `false`。缓存不保存源码字节或外部依赖验证记录，也不负责读取源码。缓存只按路径做点查找，不要求有序遍历，因此使用 `std::unordered_map`。
+
+`IRCache` 通过 `instance()` 提供进程内唯一实例，禁止复制和移动；调用方共享同一份文件缓存。缓存操作仍按单线程调用设计。
+
+### 2.4 缓存获取流程
+
+```text
+已解析的绝对 .m 路径
+          │
+          ▼
+调用 IRCache::find(path)，取得缓存条目
+          │
+          ▼
+有条目时调用 CacheEntry::valid()
+          │
+     ┌────┴────┐
+     │         │
+   有效          未命中或已失效
+     │         │
+ 复用旧条目      调用处读取源码并构建新模块
+                    │
+                    ▼
+              调用 register_module(module)
+```
+
+`IRCache` 只提供 `instance()`、`find(path)`、`register_module(module)` 和 `remove(path)`。缓存以 `unique_ptr<CacheEntry>` 独占条目；`find` 与 `register_module` 返回非拥有的 `CacheEntry*`，调用方检查条目的 `valid()`。对应路径的条目被替换或移除后，先前取得的指针立即失效；调用方若要在此后继续使用模块，应事先复制条目的 `shared_ptr<IRModule>`。未命中或失效时，调用方读取源码、解析 AST 并按 1.9 节构建模块，成功后注册新条目。注册时读取文件修改时间，记录当前全局世界计数。缓存不负责调用构建流程，也不定义源码读取接口。
+
+文件消失、无法读取或调用处解析失败时，本次加载返回错误，缓存中旧条目不作为新请求的结果；已持有旧模块的执行者仍可继续使用它。构建成功后再注册新条目，避免失败构建破坏旧条目。
+
+### 2.5 世界计数
+
+源文件内容决定本节缓存的基础 `IRModule` 版本；世界计数反映运行时函数解析环境或优化依赖，不能代替文件版本。世界变化本身不要求重新读取并构建相同源码的基础 IR。
+
+全局当前世界由 `WorldCounter` 单例保存，缓存条目的 `checked_world` 使用同一个 `WorldId` 类型：
+
+```cpp
+using WorldId = std::uint64_t;
+
+class WorldCounter final {
+public:
+    static WorldCounter& instance() noexcept;
+    WorldId current() const noexcept;
+    WorldId advance();
+
+private:
+    WorldId current_ = 0;
+};
+```
+
+初始世界为 0。参考 `object_meta` 的检查方式，调用处在每轮可能观察到文件变化的交互或执行前调用 `advance()`；同一轮内 `CacheEntry::valid()` 可通过 `checked_world` 跳过重复的文件时间检查。若没有推进全局世界，同一轮内的文件修改不会被检查。当前仓库尚无交互执行入口，因此只实现计数器及条目检查，推进时机由后续运行时调用处保证。第一阶段按单线程调用设计，计数达到 `WorldId` 上限时报错，不回绕。
+
+世界计数变化不意味着所有 IR 都必须重建。如果调用目标在运行时动态解析，路径变化可能只需重新解析调用目标；如果 Optimized SSA 绑定了特定函数或进行了内联，则可能需要重新验证或重新生成优化结果。
+
+`checked_world` 只记录文件有效性检查的轮次，不表示函数调用或优化结果已完成世界依赖验证。一个模块可能有多个函数、多个优化版本和不同依赖；逐版本依赖验证与所有权仍需按 4.1、4.3 节设计。
+
+### 2.6 所有权与生命周期
+
+```text
+IRCache
+└── unique_ptr<CacheEntry>
+    └── shared_ptr<IRModule>
+        ├── unique_ptr<CommandUnit>
+        │   └── BasicBlocks
+        └── vector<unique_ptr<FunctionUnit>>
+            ├── BasicBlocks
+            └── nested_functions_
+                └── FunctionUnit
+                    └── BasicBlocks
+```
+
+运行时执行帧或函数句柄可同时保存：
+
+```cpp
+std::shared_ptr<IRModule> module;
+FunctionUnit* function;
+```
+
+`module` 保证整个所有权树存活，`function` 为非拥有指针，可指向任意层级的函数。
+
+### 2.7 缓存失效
+
+检测到源文件修改时间变化时，由调用处重新解析并创建新 `IRModule`，替换同一路径的缓存条目，不原地修改旧模块。当前不比较新旧源码内容；即使内容相同，修改时间变化也会触发重建：
+
+```text
+IRCache → unique_ptr<CacheEntry V2> → shared_ptr<IRModule V2>
+执行中的函数 → shared_ptr<IRModule V1>
+```
+
+缓存映射只保存该路径当前条目。替换或移除时，旧 `CacheEntry` 被销毁，先前取得的 `CacheEntry*` 失效；执行者若持有旧模块的 `shared_ptr`，模块仍可存活，并在最后一个引用释放后销毁。旧 IR 生命周期与旧世界函数定义的可见性属于不同问题。`remove(path)` 移除缓存条目，不得使执行中持有的模块失效。
+
+### 2.8 缓存总结
+
+`IRCache` 负责 `.m` 文件缓存条目的查询、注册和移除；源码读取由构建调用处完成，修改时间检查由 `CacheEntry` 管理。缓存不负责命令行 IR、临时内存 IR、类元数据、世界依赖验证或优化算法。第一阶段按单线程调用设计，不引入锁或并发构建去重；若运行时允许并发访问缓存，须先定义同步和发布规则。
+
+---
+
+## 三、类文件夹怎么处理
+
+### 3.1 文件夹与模块的关系
+
+`@ClassName` 类文件夹是类方法的组织与解析单位，**不是一个 `IRModule`**。文件夹中的每个 `.m` 文件仍独立生成并缓存一个 `IRModule`，不需要 `ClassModule` 或 `ClassIRCache`。
+
+例如：
+
+```text
+project/
+└── @MyClass/
+    ├── MyClass.m
+    ├── calculate.m
+    └── display.m
+```
+
+对应的 IR 缓存为：
+
+```text
+IRCache
+├── /project/@MyClass/MyClass.m   → IRModule
+├── /project/@MyClass/calculate.m → IRModule
+└── /project/@MyClass/display.m   → IRModule
+```
+
+### 3.2 方法解析与函数组织
+
+运行时 `object_meta` 负责识别类文件夹中的方法，并保存类归属、访问权限及继承关系。调用方法时，先通过 `object_meta` 定位 `.m` 文件，再从 `IRCache` 获取对应 `IRModule` 和 `FunctionUnit`。
+
+方法文件中的 Local Function 仍由该文件的 `IRModule` 拥有；Nested Function 则由其词法父 `FunctionUnit` 拥有。它们不会因为位于 `@ClassName` 文件夹内就自动成为类方法。
+
+### 3.3 缓存失效
+
+- **方法实现修改**：只使对应 `.m` 文件的 IR 缓存失效。
+- **方法增删或类结构变化**：由运行时重新验证 `object_meta`；未修改的 `.m` 文件 IR 可以继续复用。
+
+类元数据缓存和 IR 缓存分别管理，通过方法解析与世界计数协调有效性。
+
+---
+
+## 四、实施前待解决的问题
+
+以下问题不改变“一个源码输入对应一个 `IRModule`”的总体方向，但当前字段示意不足以保证后续 SSA、缓存更新及类定义的正确性。对应结构在实现前需要进一步定案。
+
+### 4.1 优化 IR 的版本与执行中生命周期
+
+世界计数变化后可能重新生成 Optimized SSA。同一模块内更新优化结果时，正在执行旧优化 IR 的 frame、JIT 代码或 deopt 信息可能仍引用旧基本块及指令，因此需要保留旧阶段版本。
+
+`IRStageVersion` 共同拥有基本块集合及该阶段的 `ValueTable`；SSA／Optimized SSA 重新生成时创建新版本，持有旧版本的执行者可继续使用旧基本块和值表。构建调用处应在版本发布后停止修改它，并由执行帧持有正在使用的版本；当前接口尚未强制禁止发布后的修改。
+
+### 4.2 各阶段 IR 的元数据与 deopt 对应关系
+
+三个基本块集合不能单独构成完整的可执行 IR。基础元数据已按以下 `SlotTable`、`ValueTable` 设计并实现。动态绑定状态、源码位置，以及 SSA 指令到 Non-SSA 恢复位置的对应关系仍需后续设计。Optimized SSA 还需要保存优化依赖和相应的回退信息。
+
+#### SlotTable
+
+每个 `IRUnit` 拥有一张 `SlotTable`，供该代码单元的 Non-SSA、SSA 和 Optimized SSA 阶段共用；`CommandUnit` 仅使用 Non-SSA。`SlotId` 只在所属代码单元内有效，不能直接用于另一个函数或匿名函数体。表用 `std::vector<SlotInfo>` 按 `SlotId` 索引，编号从零连续分配，不在表项中重复保存编号。表项先保存名称、`SlotTag` 和固定存储类型：
+
+```cpp
+enum class SlotValueType : std::uint8_t {
+    Unknown,
+    Int64Scalar,
+    LogicalScalar,
+};
+
+struct SlotInfo {
+    InternedString name;
+    SlotTag tag;
+    SlotValueType fixed_type;
+};
+```
+
+`fixed_type` 是对槽位存储的固定约束，普通用户变量为 `Unknown`，`for` 的内部迭代下标可为 `Int64Scalar`；它不表示某次读取所得值的推断类型。构建调用处通过表分配 `SlotId`，按 ID 查询表项；名字解析依赖词法作用域和运行时绑定，不能仅用这张表的名称作通用查找键，也不强制所有表项名称唯一。全局和持久变量当前是否仍绑定由运行时状态决定，不能只根据静态 `SlotTag` 推断。表在模块发布后不再原地追加；优化版本若需要新的存储槽位，须另行确定版本私有槽位的归属。
+
+#### ValueTable
+
+每个代码单元的每个 IR 阶段版本各有一张 `ValueTable`。`ValueId` 只在该代码单元的该阶段版本内有效；不同阶段、不同版本或不同代码单元可以出现相同的数字编号。表用 `std::vector<ValueInfo>` 按 `ValueId` 索引，表项不重复保存编号：
+
+```cpp
+struct ValueInfo {
+    Instruction* definition;      // 非拥有，指向同一阶段版本中的指令
+    std::uint32_t result_index;    // 多结果指令中的输出位置
+    enum class Form : std::uint8_t { Single, MaybePack } form;
+    enum class ConstantKind : std::uint8_t {
+        Unknown, Object, IndexColon
+    } constant_kind;
+};
+```
+
+一个结果编号只绑定一条定义指令；`CallInst` 等多结果指令的不同 `ValueId` 分别保存各自的 `result_index`。`form` 默认为 `Single`；花括号取值等可能产生逗号分隔列表的结果在绑定时标记为 `MaybePack`。它只表示该结果可能承载多个值，不记录运行时元素数量，也不自动实现函数实参或出参的展开；是否标记由构建调用处根据表达式语境决定。`constant_kind` 默认为 `Unknown`，`ValueTable::bind()` 按定义指令把 `ConstInst` 标为 `Object`，把 `MagicColonInst` 标为 `IndexColon`；后者是已知的索引占位符，不能当成普通对象常量折叠。类型和 shape 事实暂不加入表项，待运行时类型与维度表示确定后再设计。现有指令构造函数要求先给出 `ValueId`，因此构建时先预留编号，再创建并加入指令，最后绑定其定义指针。构造失败时必须撤销尚未发布的预留；发布前不得存在未绑定编号。编号本身不包含有效状态；越界或未绑定的编号查询不返回定义。
+
+`ValueInfo::definition` 的生命周期依赖同阶段的基本块。当前基本块集合与 `ValueTable` 已放在同一个 `IRStageVersion` 中，替换阶段版本时一起替换。`replace_stage_version()` 拒绝含未绑定编号的版本；构建调用处仍需保证绑定指针指向该版本拥有的指令。`SlotTable` 归代码单元所有，不随单个 SSA 版本重建。
+
+`LoadSlotInst`／`StoreSlotInst`、全局／持久声明以及普通函数的入参／出参列表已只保存 `SlotId`，名称与 `SlotTag` 通过所属代码单元的 `SlotTable` 查询。匿名函数参数与捕获中的 `Slot` 引用仍需同步核对，避免同一槽位的名称或类别在多处重复保存。
+
+按[解释器总体设计](matlab_interpreter_overall_design.md)和[Deopt 设计思路](SSA%20%E5%88%B0%20non-SSA%20%E7%9A%84%E8%BF%90%E8%A1%8C%E6%97%B6%20Deopt%20%E8%AE%BE%E8%AE%A1%E6%80%9D%E8%B7%AF.md)，SSA 回退需要恢复 slot 的值及绑定状态，并区分调用前、调用后和异常路径的继续位置。后续应为每个 IR 版本固定这些元数据的归属与生命周期，避免基本块已更新而映射仍指向旧版本。
+
+### 4.3 世界验证与源文件版本判定
+
+当前 `CacheEntry` 不保存外部依赖验证结果。优化 pass 需要记录所依赖的函数查找、分派目标或“没有用户自定义实现”等结论；世界变化后逐项检查，才能判断对应优化版本是否仍有效。动态解析的调用是否需要重新验证，仍待确定。
+
+源码修改时间检查由 `CacheEntry` 管理，避免 `IRModule` 承担缓存状态。`checked_world` 仅是文件检查的快速路径，不能用于判断函数及其优化版本的依赖是否有效。确定优化版本的所有权时，应再设计逐版本验证状态。
+
+当前条目先用 `checked_world` 与全局世界计数比较；相同时直接命中，不同时才检查 `mtime`。修改时间变化时调用处重新读取并构建模块。路径规范化与符号链接身份规则尚未最终确定。
+
+### 4.4 `classdef` 文件中的可执行内容
+
+“类文件夹中的每个 `.m` 文件对应一个 `IRModule`”可以保留，但 `classdef` 文件本身不能只按普通函数文件处理。类定义中可能有内联方法、构造函数、属性访问方法以及属性默认值表达式；其中部分方法必须定义在 `classdef` 文件内，默认值表达式在首次需要时求值，而非每次实例化时重算。参见 [MathWorks：Methods in Separate Files](https://www.mathworks.com/help/matlab/matlab_oop/methods-in-separate-files.html) 与 [Initialize Property Values](https://www.mathworks.com/help/matlab/matlab_oop/initialize-property-values.html)。
+
+内联方法由 `functions_` 持有；类声明和属性默认值表达式暂时没有专用 IR 结构。实现类语法前需确定默认值表达式使用的 IR 单元、`object_meta` 的引用接口，以及类声明版本变化时如何同时验证类元数据与相关 IR。`object_meta` 管理类归属和访问规则，并不能代替这些表达式的 IR 表示。
+
+### 4.5 构建接口与当前代码状态
+
+当前仓库已实现 `IRModule`、代码单元、基本块的所有权骨架、基础表达式、索引与成员访问、变量声明和终结指令的部分结构，以及文件来源的 `IRCache`；此前的 `ir_builder`、`ir_print` 和 `ir_verify` 仍未恢复。`Instruction` 已为所有指令预留虚 `to_string() const` 接口，具体字符串格式尚未实现，调用时会报告中文错误。1.9 节描述的是后续**IR 构建流程的职责**，不是已有接口；调用处构建模块后通过 `IRCache::register_module` 注册。嵌套函数和基本块由所属 Unit 创建，基本块创建并持有指令；值编号分配及 CFG 构建与验证仍需设计，不应把流程描述误读成已实现的 `IRBuilder`。
+
+---
+
+## 五、结论
+
+Baltam 的 IR 系统采用以 `IRModule` 为核心的所有权模型。
+
+`IRModule` 组织一次源码输入产生的可执行 IR：`CommandUnit` 仅保存 Non-SSA 基本块；`FunctionUnit` 管理 Non-SSA、SSA、Optimized SSA 基本块；类文件由 `ModuleType::ClassFile` 标识，类声明和默认值表达式的表示方式待定。模块直接包含的函数由 `IRModule` 拥有并加入模块索引，Nested Function 由词法父 `FunctionUnit` 拥有且不进入模块索引；函数文件入口按约定取 `functions_.front()`。
+
+`IRCache` **只缓存 `.m` 文件生成的基础 IR**，按规范化文件路径查询、注册和移除条目；`CacheEntry::valid()` 通过全局世界计数与文件修改时间判断条目是否有效。全局当前世界由 `WorldCounter` 单例保存；外部依赖验证与优化版本所有权仍待定。缓存独占 `CacheEntry`，执行者通过 `shared_ptr<IRModule>` 保证仍被引用的旧 IR 可以继续存活。命令行和临时内存 IR 不进入缓存。
+
+对于 `@ClassName` 类文件夹，每个 `.m` 方法文件独立生成和缓存 `IRModule`，文件夹本身不构成 IR 模块。类归属、方法解析和继承关系由运行时 `object_meta` 独立管理。
+
+整体上，**IR 组织、IR 缓存和运行时类元数据各司其职**，避免重复所有权、重复缓存以及职责交叉。第四节列出的版本生命周期、deopt 元数据、依赖验证、`classdef` 表示和构建接口仍须在实现相应功能前确定。
