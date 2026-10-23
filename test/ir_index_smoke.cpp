@@ -30,11 +30,11 @@ int main() {
 
     CommandUnit unit;
     BasicBlock& block = unit.add_block();
-    const std::vector<Operand> operands{ValueId{1}, SlotId{2}};
+    const std::vector<Operand> operands{ValueId{1}, InternedString{"A"}};
     require(std::holds_alternative<ValueId>(operands[0]) &&
-                std::holds_alternative<SlotId>(operands[1]) &&
-                std::get<SlotId>(operands[1]) == SlotId{2},
-            "操作数未区分值编号与槽位编号");
+                std::holds_alternative<InternedString>(operands[1]) &&
+                std::get<InternedString>(operands[1]) == "A",
+            "操作数未区分已求值结果与未消歧名字");
     const std::vector<ValueId> indices{ValueId{1}, ValueId{2}};
 
     auto& apply = block.add_instruction<ApplyInst>(
