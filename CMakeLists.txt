@@ -7,8 +7,7 @@ add_library(baltam_ir STATIC
     src/ir/ir_inst.cpp
     src/ir/ir_module.cpp
     src/ir/ir_cache.cpp
-    src/ir/ir_unit.cpp
-    src/ir/world_counter.cpp)
+    src/ir/ir_unit.cpp)
 target_compile_features(baltam_ir PUBLIC cxx_std_17)
 target_include_directories(baltam_ir PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
