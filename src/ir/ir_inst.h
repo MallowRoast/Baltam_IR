@@ -344,6 +344,33 @@ public:
     ValueId base;
 };
 
+// 更新圆括号选中的元素，并定义新的 base 值。
+class ParenAssignInst final : public Instruction {
+public:
+    ParenAssignInst(std::vector<ValueId> indices, ValueId result,
+                    ValueId base, ValueId value)
+        : Instruction(Type::ParenAssign), indices(std::move(indices)),
+          result(result), base(base), value(value) {}
+
+    std::vector<ValueId> indices;
+    ValueId result;
+    ValueId base;
+    ValueId value;
+};
+
+// A(I) = [] 的删除语义不携带右值，结果是更新后的 base。
+class ParenDeleteInst final : public Instruction {
+public:
+    ParenDeleteInst(std::vector<ValueId> indices, ValueId result,
+                    ValueId base)
+        : Instruction(Type::ParenDelete), indices(std::move(indices)),
+          result(result), base(base) {}
+
+    std::vector<ValueId> indices;
+    ValueId result;
+    ValueId base;
+};
+
 // 花括号访问可产生多个元胞内容值。
 class BraceReferenceInst final : public Instruction {
 public:
@@ -354,6 +381,20 @@ public:
 
     std::vector<ValueId> results;
     std::vector<ValueId> indices;
+    ValueId base;
+};
+
+// 花括号赋值允许多个内容值；右侧为空数组仍属于赋值语义。
+class BraceAssignInst final : public Instruction {
+public:
+    BraceAssignInst(std::vector<ValueId> indices, std::vector<ValueId> values,
+                    ValueId result, ValueId base)
+        : Instruction(Type::BraceAssign), indices(std::move(indices)),
+          values(std::move(values)), result(result), base(base) {}
+
+    std::vector<ValueId> indices;
+    std::vector<ValueId> values;
+    ValueId result;
     ValueId base;
 };
 
@@ -383,62 +424,16 @@ public:
     ValueId base;
 };
 
-// 更新圆括号选中的元素，并定义新的 base 值。
-class ParenAssignInst final : public Instruction {
-public:
-    ParenAssignInst(std::vector<ValueId> indices, ValueId updated_base,
-                    ValueId base, ValueId value)
-        : Instruction(Type::ParenAssign), indices(std::move(indices)),
-          updated_base(updated_base), base(base), value(value) {}
-
-    std::vector<ValueId> indices;
-    ValueId updated_base;
-    ValueId base;
-    ValueId value;
-};
-
-// A(I) = [] 的删除语义不携带右值，结果是更新后的 base。
-class ParenDeleteInst final : public Instruction {
-public:
-    ParenDeleteInst(std::vector<ValueId> indices, ValueId updated_base,
-                    ValueId base)
-        : Instruction(Type::ParenDelete), indices(std::move(indices)),
-          updated_base(updated_base), base(base) {}
-
-    std::vector<ValueId> indices;
-    ValueId updated_base;
-    ValueId base;
-};
-
-// 花括号赋值允许多个内容值；右侧为空数组仍属于赋值语义。
-class BraceAssignInst final : public Instruction {
-public:
-    BraceAssignInst(std::vector<ValueId> indices, std::vector<ValueId> values,
-                    ValueId updated_base, ValueId base)
-        : Instruction(Type::BraceAssign), indices(std::move(indices)),
-          values(std::move(values)), updated_base(updated_base), base(base) {}
-
-    std::vector<ValueId> indices;
-    std::vector<ValueId> values;
-    ValueId updated_base;
-    ValueId base;
-};
-
 // 设置静态或动态成员，并定义更新后的 base 值。
 class DotAssignInst final : public Instruction {
 public:
-    DotAssignInst(Operand member, ValueId updated_base, ValueId base,
+    DotAssignInst(Operand member, ValueId result, ValueId base,
                   ValueId value)
         : Instruction(Type::DotAssign), member(std::move(member)),
-          updated_base(updated_base), base(base), value(value) {
-        if (const auto* name = std::get_if<InternedString>(&this->member);
-            name && name->empty()) {
-            throw std::invalid_argument("点号赋值的成员名不能为空");
-        }
-    }
+          result(result), base(base), value(value) {}
 
     Operand member;
-    ValueId updated_base;
+    ValueId result;
     ValueId base;
     ValueId value;
 };
