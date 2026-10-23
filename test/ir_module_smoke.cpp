@@ -212,7 +212,7 @@ int main() {
     auto& magic_end = main_ssa.add_instruction<MagicEndInst>(
         std::vector<MagicEndInst::MagicEndContext>{
             {InternedString{"fun"}, 1, 1},
-            {SlotId{0}, 2, 2}}, ValueId{7});
+            {ValueId{0}, 2, 2}}, ValueId{7});
     auto& bound_end = main_ssa.add_instruction<MagicEndInst>(
         std::vector<MagicEndInst::MagicEndContext>{{ValueId{1}, 1, 1}},
         ValueId{8});
@@ -225,10 +225,10 @@ int main() {
                     magic_end.candidate_contexts[0].callee_or_base) == "fun" &&
                 magic_end.candidate_contexts[1].dim == 2 &&
                 magic_end.candidate_contexts[1].nindices == 2 &&
-                std::holds_alternative<SlotId>(
+                std::holds_alternative<ValueId>(
                     magic_end.candidate_contexts[1].callee_or_base) &&
-                std::get<SlotId>(magic_end.candidate_contexts[1].callee_or_base)
-                    == SlotId{0} &&
+                std::get<ValueId>(magic_end.candidate_contexts[1].callee_or_base)
+                    == ValueId{0} &&
                 std::holds_alternative<ValueId>(
                     bound_end.candidate_contexts[0].callee_or_base) &&
                 main_ssa.instructions().back().get() == &bound_end,
