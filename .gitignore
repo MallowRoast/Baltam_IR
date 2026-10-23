@@ -1,0 +1,9 @@
+# 依赖目录
+deps/*
+
+# 构建目录
+build/*
+cmake-build-debug/*
+
+# IDE 相关
+.idea/*
