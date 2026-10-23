@@ -357,29 +357,29 @@ public:
     ValueId base;
 };
 
-// 保留 a.b 左侧名字尚未绑定时的歧义。
+// 保留点号访问左侧名字尚未绑定时的歧义；member 可为静态名字或动态求值结果。
 class DotAccessInst final : public Instruction {
 public:
     DotAccessInst(std::vector<ValueId> results, Operand base_or_name,
-                  InternedString member)
+                  Operand member)
         : Instruction(Type::DotAccess), results(std::move(results)),
           base_or_name(std::move(base_or_name)), member(std::move(member)) {}
 
     std::vector<ValueId> results;
     Operand base_or_name;
-    InternedString member;
+    Operand member;
 };
 
-// 已确定按值读取静态成员，具体实现仍由对象协议分派。
+// 已确定按值读取成员，具体实现仍由对象协议分派。
 class DotReferenceInst final : public Instruction {
 public:
-    DotReferenceInst(std::vector<ValueId> results, InternedString member,
+    DotReferenceInst(std::vector<ValueId> results, Operand member,
                      ValueId base)
         : Instruction(Type::DotReference), results(std::move(results)),
           member(std::move(member)), base(base) {}
 
     std::vector<ValueId> results;
-    InternedString member;
+    Operand member;
     ValueId base;
 };
 
@@ -424,19 +424,20 @@ public:
     ValueId base;
 };
 
-// 设置静态成员，并定义更新后的 base 值。
+// 设置静态或动态成员，并定义更新后的 base 值。
 class DotAssignInst final : public Instruction {
 public:
-    DotAssignInst(InternedString member, ValueId updated_base, ValueId base,
+    DotAssignInst(Operand member, ValueId updated_base, ValueId base,
                   ValueId value)
         : Instruction(Type::DotAssign), member(std::move(member)),
           updated_base(updated_base), base(base), value(value) {
-        if (this->member.empty()) {
+        if (const auto* name = std::get_if<InternedString>(&this->member);
+            name && name->empty()) {
             throw std::invalid_argument("点号赋值的成员名不能为空");
         }
     }
 
-    InternedString member;
+    Operand member;
     ValueId updated_base;
     ValueId base;
     ValueId value;
