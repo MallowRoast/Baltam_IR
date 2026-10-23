@@ -57,7 +57,7 @@ struct Slot {
 // 当前用字符串保存名字文本；后续可接入真正的字符串池。
 using InternedString = std::string;
 
-// 已绑定槽位只保存编号，类别由槽位表查询；名字仍保存原始文本。
-using Operand = std::variant<ValueId, SlotId, InternedString>;
+// 操作数只表示已求值的结果或尚未消歧的名字；已绑定变量须先通过 LoadSlotInst 取得 ValueId。
+using Operand = std::variant<ValueId, InternedString>;
 
 } // baltam 命名空间
