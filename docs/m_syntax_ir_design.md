@@ -187,12 +187,12 @@ ValueId result;
 
 `candidate_contexts` 按内层到外层排列。单层 `A(end)` 只有一个候选；`A(fun(end))` 在 `fun(...)` 尚未确定是索引还是函数调用时，保留 `fun`、`A` 两层候选。基础 IR 不预先假定 `end` 的结果类型。
 
-`callee_or_base` 的 `Operand` 种类决定候选是否已经绑定，不能把三种情况都当作普通名字重新查找：
+`callee_or_base` 的 `Operand` 种类区分已求值对象与尚未消歧的名字；已确定为变量时须先生成 `LoadSlotInst`，并在索引操作中复用同一 `ValueId`：
 
 | `Operand` 种类 | 含义 |
 | --- | --- |
 | `InternedString` | 尚未解析的源码名字。若解析为变量，就以该变量为索引对象；若解析为普通函数调用，则该候选不是索引上下文，可继续尝试外层候选。 |
-| `SlotId` | 已确定是当前函数或 workspace 中的变量。从槽位表查询类别，读取索引对象并检查绑定状态；已被 `clear` 或未绑定时直接报变量引用错误，不查找同名函数，也不回退到外层候选。 |
+
 | `ValueId` | 已加载或计算出的索引对象值。它已绑定到具体数据流，只需判断该值是否支持索引 `end` 语义；不支持时按该候选报错。 |
 
 #### SSA IR
@@ -324,7 +324,7 @@ z = f(2);  % z 为 3
 // 名字仍未消歧：A(...) 可能是调用，也可能是索引。
 struct ApplyInst {
     std::vector<ValueId> results;
-    Operand callee_or_base;          // 未解析名字或已知绑定
+    Operand callee_or_base;          // 未解析名字或已求值对象
     std::vector<ValueId> arguments;  // 已求值的实参，可能引用值包
 };
 
@@ -355,7 +355,7 @@ struct ParenReferenceInst {
 };
 ```
 
-`ApplyInst`、`ValueApplyInst` 和 `CallInst` 的 `arguments` 在生成指令前已经分别求值，按源码顺序保存 `ValueId`；可能展开成逗号分隔列表的实参由对应 `ValueInfo.form` 标记。`ApplyInst.callee_or_base` 仍保留名字、槽位或值的区别；`CallInst.callee` 只保存已确定按名字调用的函数名。`Operand` 中的空名字不在指令构造时统一检查，名称有效性由前面的语法与构建流程负责。`results` 保留请求的输出位次；普通内置圆括号取值通常产生一个值，对象索引协议可能需要多个输出。`ParenReferenceInst` 已确定“圆括号取值”这一类别；内置索引还是对象索引协议由执行时的 base 决定，不在节点中保存 `DispatchType`。`ApplyInst` 确定为索引后，沿用已求值的实参作为 `indices`；确定为按名字调用后，沿用实参生成 `CallInst`；若先得到函数句柄等运行时值，则由 `ValueApplyInst` 分派调用或索引。值包的实际展开规则仍需后续执行设计。
+`ApplyInst`、`ValueApplyInst` 和 `CallInst` 的 `arguments` 在生成指令前已经分别求值，按源码顺序保存 `ValueId`；可能展开成逗号分隔列表的实参由对应 `ValueInfo.form` 标记。`ApplyInst.callee_or_base` 只保留未消歧名字或已求值的值；已确定为变量时先用 `LoadSlotInst` 得到 `ValueId`；`CallInst.callee` 只保存已确定按名字调用的函数名。`Operand` 中的空名字不在指令构造时统一检查，名称有效性由前面的语法与构建流程负责。`results` 保留请求的输出位次；普通内置圆括号取值通常产生一个值，对象索引协议可能需要多个输出。`ParenReferenceInst` 已确定“圆括号取值”这一类别；内置索引还是对象索引协议由执行时的 base 决定，不在节点中保存 `DispatchType`。`ApplyInst` 确定为索引后，沿用已求值的实参作为 `indices`；确定为按名字调用后，沿用实参生成 `CallInst`；若先得到函数句柄等运行时值，则由 `ValueApplyInst` 分派调用或索引。值包的实际展开规则仍需后续执行设计。
 
 `CallInst` 不保存运行时调用点缓存。`DispatchType::MFunction` 和 `m_function_target` 仅用于同一 `IRModule` 内词法绑定固定的目标；外部 M 函数可能因源码或函数查找环境变化而失效，保持 `Dynamic`，由运行时解析。内置函数只有在注册和地址于进程内保持稳定时才能静态确定；可替换的插件函数暂保持动态分派。`DispatchType` 不为局部函数和嵌套函数各设一种类别：二者都是 M 函数，嵌套函数调用额外需要父函数的共享工作区。当前 `FunctionUnit` 通过所有权树区分顶层函数与嵌套函数，但没有反向词法父函数字段；运行时绑定嵌套函数工作区所需的关系仍待落实。若以后要静态绑定外部 M 函数或插件，须在 IR 之外设计带版本验证和目标生命周期管理的解析结果，单靠类别枚举和函数名不足以直接调用。
 
