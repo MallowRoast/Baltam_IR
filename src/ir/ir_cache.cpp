@@ -37,6 +37,7 @@ bool CacheEntry::is_valid() {
         return false;
     }
     const auto world = WorldCounter::instance().current();
+    // 同一世界沿用上次文件检查结果；跨世界才重新读取修改时间。
     if (this->world == world) {
         return true;
     }
@@ -71,6 +72,7 @@ CacheEntry* IRCache::register_module(
     }
     const auto path = normalized_m_file_path(*module->source_path());
     const auto mtime = read_mtime(path);
+    // 新条目替换旧条目；外部持有的旧 module 仍由 shared_ptr 保活。
     auto entry = std::make_unique<CacheEntry>(CacheEntry{
         std::move(module), mtime, WorldCounter::instance().current(), true});
     auto* registered = entry.get();

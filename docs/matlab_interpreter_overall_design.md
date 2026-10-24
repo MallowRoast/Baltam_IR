@@ -6,7 +6,7 @@
 M 函数 source code → AST → non-SSA IR → based SSA IR → optimized SSA IR → JIT
 ```
 
-这是代码的构建过程。运行时希望大部分代码执行 SSA IR；non-SSA IR 是完整的 M 语言执行基线，也是在 SSA 无法继续执行时的回退目标。JIT 是后续执行层，本文不展开它的具体设计。
+这是目标构建流程；当前仓库只实现部分 M 语法到 Non-SSA IR 的构建及文件缓存，后续 SSA、优化执行和 JIT 尚未实现。运行时希望大部分代码执行 SSA IR；设计上 non-SSA IR 将成为完整的 M 语言执行基线，也是 SSA 无法继续执行时的回退目标。JIT 是后续执行层，本文不展开它的具体设计。
 
 ## 各阶段做什么
 

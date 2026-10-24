@@ -54,6 +54,20 @@ enum class BinaryOp : std::uint8_t {
     Ne,
 };
 
+// 内部语义操作先保留语义身份，由后续阶段选择具体实现。
+enum class IntrinsicId : std::uint8_t {
+    SwitchMatch,
+    ForeachInit,
+    ForeachCount,
+    ForeachGet,
+    IntGt,
+    IntAdd,
+    LogicalScalar,
+};
+
+// 仅描述指令是否可能改写已有 slot；不表示是否会抛错或产生其他副作用。
+enum class Effect : std::uint8_t { NoSlotWrite, MayWriteSlot };
+
 // 基本块通过该基类独占拥有不同种类的指令。
 class Instruction {
 public:
@@ -72,6 +86,7 @@ public:
         Apply,
         ValueApply,
         Call,
+        Intrinsic,
         ParenReference,
         BraceReference,
         DotAccess,
@@ -92,6 +107,7 @@ public:
     [[nodiscard]] virtual std::string to_string() const;
 
     [[nodiscard]] Type type() const noexcept { return type_; }
+    [[nodiscard]] Effect effect() const noexcept;
     [[nodiscard]] BasicBlock* parent() const noexcept { return parent_; }
     [[nodiscard]] bool is_terminator() const noexcept {
         return type_ == Type::Goto || type_ == Type::Branch ||
@@ -114,6 +130,8 @@ public:
     ConstInst(const_ba_obj_ptr value, ValueId result)
         : Instruction(Type::Const), value(std::move(value)), result(result) {}
 
+    [[nodiscard]] std::string to_string() const override;
+
     const_ba_obj_ptr value;
     ValueId result;
 };
@@ -124,6 +142,8 @@ public:
     LoadSlotInst(ValueId result, SlotId slot)
         : Instruction(Type::LoadSlot), result(result), slot(slot) {}
 
+    [[nodiscard]] std::string to_string() const override;
+
     ValueId result;
     SlotId slot;
 };
@@ -133,6 +153,8 @@ class StoreSlotInst final : public Instruction {
 public:
     StoreSlotInst(SlotId slot, ValueId value)
         : Instruction(Type::StoreSlot), slot(slot), value(value) {}
+
+    [[nodiscard]] std::string to_string() const override;
 
     SlotId slot;
     ValueId value;
@@ -147,6 +169,8 @@ public:
                bool is_dynamic)
         : Instruction(Type::Concat), items(std::move(items)), result(result),
           axis(axis), is_dynamic(is_dynamic) {}
+
+    [[nodiscard]] std::string to_string() const override;
 
     // 空 [] 生成常量，普通单值 [x] 透传 x；实际并置至少有一项输入。
     // 输入值即使是空数组，也不能删除对应的项。
@@ -171,6 +195,8 @@ public:
         }
     }
 
+    [[nodiscard]] std::string to_string() const override;
+
     std::vector<ValueId> items;
     std::size_t rows;
     std::size_t cols;
@@ -184,6 +210,8 @@ public:
               ValueId stop)
         : Instruction(Type::Colon), result(result), start(start),
           step(step), stop(stop) {}
+
+    [[nodiscard]] std::string to_string() const override;
 
     ValueId result;
     ValueId start;
@@ -238,6 +266,8 @@ public:
     explicit GlobalDeclInst(std::vector<SlotId> slots)
         : Instruction(Type::GlobalDecl), slots(std::move(slots)) {}
 
+    [[nodiscard]] std::string to_string() const override;
+
     std::vector<SlotId> slots;
 };
 
@@ -247,6 +277,8 @@ public:
     explicit PersistentDeclInst(std::vector<SlotId> slots)
         : Instruction(Type::PersistentDecl), slots(std::move(slots)) {}
 
+    [[nodiscard]] std::string to_string() const override;
+
     std::vector<SlotId> slots;
 };
 
@@ -255,6 +287,8 @@ class GotoInst final : public Instruction {
 public:
     explicit GotoInst(BasicBlock* target)
         : Instruction(Type::Goto), target(target) {}
+
+    [[nodiscard]] std::string to_string() const override;
 
     BasicBlock* target;
 };
@@ -266,6 +300,8 @@ public:
                BasicBlock* false_target)
         : Instruction(Type::Branch), true_target(true_target),
           false_target(false_target), condition(condition) {}
+
+    [[nodiscard]] std::string to_string() const override;
 
     BasicBlock* true_target;
     BasicBlock* false_target;
@@ -279,6 +315,8 @@ public:
         : Instruction(Type::Return), values(std::move(values)) {
     }
 
+    [[nodiscard]] std::string to_string() const override;
+
     std::vector<ValueId> values;
 };
 
@@ -290,6 +328,8 @@ public:
         : Instruction(Type::Apply), results(std::move(results)),
           callee_or_base(std::move(callee_or_base)),
           arguments(std::move(arguments)) {}
+
+    [[nodiscard]] std::string to_string() const override;
 
     std::vector<ValueId> results;
     Operand callee_or_base;
@@ -303,6 +343,8 @@ public:
                    std::vector<ValueId> arguments, ValueId base)
         : Instruction(Type::ValueApply), results(std::move(results)),
           arguments(std::move(arguments)), base(base) {}
+
+    [[nodiscard]] std::string to_string() const override;
 
     std::vector<ValueId> results;
     std::vector<ValueId> arguments;
@@ -322,6 +364,8 @@ public:
           m_function_target(m_function_target),
           dispatch_type(dispatch_type) {}
 
+    [[nodiscard]] std::string to_string() const override;
+
     std::vector<ValueId> results;
     InternedString callee;
     std::vector<ValueId> arguments;
@@ -332,6 +376,20 @@ public:
     DispatchType dispatch_type;
 };
 
+// 不绑定运行时函数或机器指令；内部操作不得隐式改写 slot。
+class IntrinsicInst final : public Instruction {
+public:
+    IntrinsicInst(ValueId result, IntrinsicId id, std::vector<ValueId> operands)
+        : Instruction(Type::Intrinsic), result(result), id(id),
+          operands(std::move(operands)) {}
+
+    [[nodiscard]] std::string to_string() const override;
+
+    ValueId result;
+    IntrinsicId id;
+    std::vector<ValueId> operands;
+};
+
 // 已确定为圆括号取值，保留多个输出及索引实参的源码顺序。
 class ParenReferenceInst final : public Instruction {
 public:
@@ -339,6 +397,8 @@ public:
                        std::vector<ValueId> indices, ValueId base)
         : Instruction(Type::ParenReference), result(result),
           indices(std::move(indices)), base(base) {}
+
+    [[nodiscard]] std::string to_string() const override;
 
     ValueId result;
     std::vector<ValueId> indices;
@@ -352,6 +412,8 @@ public:
                     ValueId base, ValueId value)
         : Instruction(Type::ParenAssign), indices(std::move(indices)),
           result(result), base(base), value(value) {}
+
+    [[nodiscard]] std::string to_string() const override;
 
     std::vector<ValueId> indices;
     ValueId result;
@@ -367,6 +429,8 @@ public:
         : Instruction(Type::ParenDelete), indices(std::move(indices)),
           result(result), base(base) {}
 
+    [[nodiscard]] std::string to_string() const override;
+
     std::vector<ValueId> indices;
     ValueId result;
     ValueId base;
@@ -380,6 +444,8 @@ public:
         : Instruction(Type::BraceReference), result(result),
           indices(std::move(indices)), base(base) {}
 
+    [[nodiscard]] std::string to_string() const override;
+
     ValueId result;
     std::vector<ValueId> indices;
     ValueId base;
@@ -392,6 +458,8 @@ public:
                     ValueId result, ValueId base)
         : Instruction(Type::BraceAssign), indices(std::move(indices)),
           value(value), result(result), base(base) {}
+
+    [[nodiscard]] std::string to_string() const override;
 
     std::vector<ValueId> indices;
     ValueId value;
@@ -407,6 +475,8 @@ public:
         : Instruction(Type::DotAccess), result(result),
           base_or_name(std::move(base_or_name)), member(std::move(member)) {}
 
+    [[nodiscard]] std::string to_string() const override;
+
     ValueId result;
     Operand base_or_name;
     Operand member;
@@ -419,6 +489,8 @@ public:
                      ValueId base)
         : Instruction(Type::DotReference), result(result),
           member(std::move(member)), base(base) {}
+
+    [[nodiscard]] std::string to_string() const override;
 
     ValueId result;
     Operand member;
@@ -433,6 +505,8 @@ public:
         : Instruction(Type::DotAssign), member(std::move(member)),
           result(result), base(base), value(value) {}
 
+    [[nodiscard]] std::string to_string() const override;
+
     Operand member;
     ValueId result;
     ValueId base;
@@ -445,6 +519,8 @@ public:
     UnaryInst(ValueId result, ValueId operand, UnaryOp op)
         : Instruction(Type::Unary), result(result), operand(operand), op(op) {}
 
+    [[nodiscard]] std::string to_string() const override;
+
     ValueId result;
     ValueId operand;
     UnaryOp op;
@@ -456,6 +532,8 @@ class BinaryInst final : public Instruction {
 public:
     BinaryInst(ValueId result, ValueId lhs, ValueId rhs, BinaryOp op)
         : Instruction(Type::Binary), result(result), lhs(lhs), rhs(rhs), op(op) {}
+
+    [[nodiscard]] std::string to_string() const override;
 
     ValueId result;
     ValueId lhs;
