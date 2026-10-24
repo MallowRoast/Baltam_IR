@@ -1,6 +1,7 @@
 #include "ir/ir_unit.h"
 
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -59,6 +60,38 @@ ValueId IRStageVersion::add_value(ValueInfo info) {
 
 namespace {
 
+void append_slots(std::ostringstream& output, const IRUnit& unit) {
+    if (unit.slot_table().size() == 0) return;
+    output << "; slots:\n";
+    for (std::size_t i = 0; i < unit.slot_table().size(); ++i) {
+        const SlotId id{static_cast<std::uint32_t>(i)};
+        output << ";   slot" << i << " = " << unit.slot_table().find(id).name << '\n';
+    }
+    output << '\n';
+}
+
+void append_blocks(std::ostringstream& output, const IRStageVersion& version) {
+    for (const auto& block : version.blocks()) output << block->to_string();
+}
+
+void append_signature_slots(std::ostringstream& output, const FunctionUnit& function,
+                            const std::vector<SlotId>& slots) {
+    for (std::size_t i = 0; i < slots.size(); ++i) {
+        if (i != 0) output << ", ";
+        output << "slot" << slots[i].index << ' '
+               << function.slot_table().find(slots[i]).name;
+    }
+}
+
+const char* stage_name(IRStage stage) {
+    switch (stage) {
+        case IRStage::NonSSA: return "Non-SSA";
+        case IRStage::SSA: return "Based-SSA";
+        case IRStage::OptimizedSSA: return "Optimized-SSA";
+    }
+    throw std::invalid_argument("无效的 IR 阶段");
+}
+
 void bind_module(FunctionUnit& function, IRModule* module) {
     function.set_parent(module);
     for (const auto& nested : function.nested_functions()) {
@@ -80,6 +113,23 @@ Pointer& select_version(IRStage stage, Pointer& non_ssa, Pointer& ssa,
 }
 
 } // 匿名命名空间
+
+std::string BasicBlock::to_string() const {
+    std::ostringstream output;
+    output << label_ << ":\n";
+    for (const auto& instruction : instructions_)
+        output << "  " << instruction->to_string() << '\n';
+    return output.str();
+}
+
+std::string CommandUnit::to_string() const {
+    std::ostringstream output;
+    output << "script {\n";
+    append_slots(output, *this);
+    append_blocks(output, *version_);
+    output << "}\n";
+    return output.str();
+}
 
 FunctionUnit::FunctionUnit(std::string name,
                            std::vector<std::string> parameters,
@@ -141,14 +191,46 @@ std::shared_ptr<const IRStageVersion> FunctionUnit::current_version() const {
     return stage_version(current_stage_);
 }
 
+std::string FunctionUnit::to_string() const {
+    std::ostringstream output;
+    output << "define @" << name_ << '(';
+    append_signature_slots(output, *this, parameter_slots_);
+    output << ')';
+    if (!return_slots_.empty()) {
+        output << " -> (";
+        append_signature_slots(output, *this, return_slots_);
+        output << ')';
+    }
+    output << " {\n; stage: " << stage_name(current_stage_) << '\n';
+    append_slots(output, *this);
+    append_blocks(output, *current_version());
+    output << "}\n";
+    for (const auto& nested : nested_functions_) {
+        output << "\n; nested in @" << name_ << '\n' << nested->to_string();
+    }
+    return output.str();
+}
+
 IRModule::IRModule(SourceType source_type, ModuleType module_type,
                    std::optional<std::filesystem::path> source_path)
     : source_type_(source_type),
       module_type_(module_type),
       path_(std::move(source_path)) {
     if (path_) {
-        path_ = path_->lexically_normal();
+        path_ = (source_type_ == SourceType::File
+                     ? std::filesystem::absolute(*path_) : *path_).lexically_normal();
     }
+}
+
+std::string IRModule::to_string() const {
+    std::ostringstream output;
+    if (path_) output << "; ModulePath = '" << path_->string() << "'\n\n";
+    if (command_unit_) output << command_unit_->to_string();
+    for (std::size_t i = 0; i < functions_.size(); ++i) {
+        if (command_unit_ || i != 0) output << '\n';
+        output << functions_[i]->to_string();
+    }
+    return output.str();
 }
 
 const FunctionUnit* IRModule::find_function(std::string_view key) const {

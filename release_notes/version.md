@@ -1,3 +1,22 @@
+# Version 0.1.1
+
+## 构建与文件加载
+
+- 新增 `IRBuilder::build_file(path)`：解析脚本或函数型 `.m` 文件，构建包含脚本主体、文件级函数和多层嵌套函数的 Non-SSA `IRModule`；嵌套函数由词法父函数拥有。
+- 文件模块接入 `IRCache`：按规范化的绝对路径复用有效模块；缓存失效时重建并替换条目，旧模块可由外部 `shared_ptr` 继续持有。文件修改时间按现有世界计数规则检查。
+- 简化构建接口：移除 `AstReader`、`AstNodeView` 和 `InstructionBuilder`；`IRBuilder` 持有当前指令插入块，脚本与函数共用构建流程，基本块统一编号为 `bb0`、`bb1` 等。
+
+## IR 输出与命令行工具
+
+- 为基本块、脚本单元、函数单元和模块提供 `to_string()`；函数注释显示 `Non-SSA`、`Based-SSA` 或 `Optimized-SSA` 阶段，嵌套函数输出标注词法父函数。
+- 新增 `baltam_ir` 命令行工具：接受相对或绝对 `.m` 路径，输出以绝对路径形式的 `ModulePath` 开头；支持 `-o <输出文件>`，默认写入标准输出。
+- `utils/README.md` 补充构建、使用以及将 `build` 目录临时加入 Bash `PATH` 的步骤。
+
+## 测试
+
+- 增加常量、表达式、索引、成员访问、变量声明、分支、循环、短路逻辑、脚本、嵌套函数、多文件缓存和 CLI 输出文件等用例。
+- 测试目标移入 `test/CMakeLists.txt`；合并重复的 C++ 测试文件，保留 IR lowering 与缓存集成测试两个测试程序。
+
 # Version 0.0.1
 
 首个 Baltam IR 版本，提供 C++17 静态库和 IR 设计文档。

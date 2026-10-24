@@ -63,6 +63,8 @@ private:
 class BasicBlock final {
 public:
     [[nodiscard]] IRUnit* parent() const noexcept { return parent_; }
+    [[nodiscard]] const std::string& label() const noexcept { return label_; }
+    [[nodiscard]] std::string to_string() const;
     [[nodiscard]] const std::vector<std::unique_ptr<Instruction>>&
     instructions() const noexcept { return instructions_; }
     [[nodiscard]] const Instruction* terminator() const noexcept {
@@ -87,9 +89,11 @@ public:
 private:
     friend class IRStageVersion;
 
-    explicit BasicBlock(IRUnit& parent) : parent_(&parent) {}
+    BasicBlock(IRUnit& parent, std::string label)
+        : parent_(&parent), label_(std::move(label)) {}
 
     IRUnit* parent_;
+    std::string label_;
     std::vector<std::unique_ptr<Instruction>> instructions_;
 };
 
@@ -103,8 +107,9 @@ public:
     [[nodiscard]] ValueTable& values() noexcept { return values_; }
     [[nodiscard]] const ValueTable& values() const noexcept { return values_; }
     [[nodiscard]] ValueId add_value(ValueInfo info);
-    BasicBlock& add_block(IRUnit& parent) {
-        auto block = std::unique_ptr<BasicBlock>(new BasicBlock(parent));
+    BasicBlock& add_block(IRUnit& parent, std::string label = {}) {
+        auto block = std::unique_ptr<BasicBlock>(
+            new BasicBlock(parent, std::move(label)));
         blocks_.push_back(std::move(block));
         if (!entry_block_) {
             entry_block_ = blocks_.back().get();
@@ -140,6 +145,7 @@ private:
 class CommandUnit final : public IRUnit {
 public:
     CommandUnit() = default;
+    [[nodiscard]] std::string to_string() const;
 
     [[nodiscard]] const std::vector<std::unique_ptr<BasicBlock>>&
     blocks() const noexcept { return version_->blocks(); }
@@ -161,6 +167,7 @@ public:
                  std::vector<std::string> returns);
 
     [[nodiscard]] const std::string& name() const noexcept { return name_; }
+    [[nodiscard]] std::string to_string() const;
     [[nodiscard]] IRStage current_stage() const noexcept { return current_stage_; }
     void set_current_stage(IRStage stage) noexcept { current_stage_ = stage; }
     [[nodiscard]] const std::vector<SlotId>& parameter_slots() const noexcept {
@@ -217,6 +224,7 @@ public:
     IRModule& operator=(IRModule&&) = delete;
 
     [[nodiscard]] SourceType source_type() const noexcept { return source_type_; }
+    [[nodiscard]] std::string to_string() const;
     [[nodiscard]] ModuleType module_type() const noexcept { return module_type_; }
     [[nodiscard]] const std::optional<std::filesystem::path>& source_path() const noexcept {
         return path_;
