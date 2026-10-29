@@ -207,7 +207,7 @@ IRModule
 
 每个 `IRStageVersion` 独占拥有该阶段的基本块；`CommandUnit` 和 `FunctionUnit` 持有相应版本。`BasicBlock` 保存非拥有的 `IRUnit* parent_` 和 `std::vector<std::unique_ptr<Instruction>>`；每条指令保存指向所属基本块的非拥有父指针，通过 `add_instruction<Inst>(...)` 创建并持有指令。`GotoInst` 与 `BranchInst` 使用非拥有 `BasicBlock*` 保存跳转目标，`ReturnInst` 保存按顺序返回的值；三者都是终结指令。`BasicBlock::terminator()` 返回末尾的终结指令；添加终结指令后不得再向该块追加指令。当前不保存前驱或后继表，也未检查跳转目标是否属于同一代码单元和 IR 阶段。`IRStageVersion::entry_block()` 保存入口基本块指针，创建的第一个基本块默认作为入口。
 
-`ConstInst` 按 [M 语法 IR 设计](m_syntax_ir_design.md)保存 `const_ba_obj_ptr value` 和 `ValueId result`，在 Non-SSA 与 SSA 阶段使用同一种指令。`const_ba_obj_ptr` 是 `std::shared_ptr<const ba_obj>` 的别名；`value` 持有运行前确定的常量对象。运行时修改该值时仍须遵守写时复制语义。`ba_obj` 在 IR 头文件中仅前置声明，实际对象由运行时创建。`ValueId` 是只保存一个 `std::uint32_t index` 的结构体，不带无效哨兵值；构建调用处通过所属 `IRStageVersion::add_value` 分配编号并登记定义。
+`ConstInst` 按 [M 语法 IR 设计](M语法与IR设计.md)保存 `const_ba_obj_ptr value` 和 `ValueId result`，在 Non-SSA 与 SSA 阶段使用同一种指令。`const_ba_obj_ptr` 是 `std::shared_ptr<const ba_obj>` 的别名；`value` 持有运行前确定的常量对象。运行时修改该值时仍须遵守写时复制语义。`ba_obj` 在 IR 头文件中仅前置声明，实际对象由运行时创建。`ValueId` 是只保存一个 `std::uint32_t index` 的结构体，不带无效哨兵值；构建调用处通过所属 `IRStageVersion::add_value` 分配编号并登记定义。
 
 `ConcatInst` 保存按源码顺序排列的非空 `items`、`result`、水平或竖直 `axis` 和 `is_dynamic`，Non-SSA 与 SSA 共用此结构。空 `[]` 应使用 `ConstInst`。当前已有值定义表，但尚无类型事实；当前 builder 根据输入的 `ValueInfo.is_constant` 设置 `is_dynamic`，后续优化仍需确定更完整的动态判定规则；仅凭 `is_dynamic == false` 不能跳过运行时 `horzcat`／`vertcat` 的分派检查。
 
@@ -221,17 +221,17 @@ IRModule
 
 `LoadSlotInst` 保存 `result: ValueId` 和已绑定的 `slot: SlotId`，从该槽位读取并定义一个值；`StoreSlotInst` 保存 `slot: SlotId` 与已求值的 `value: ValueId`，写入槽位但不产生结果值。两者在 Non-SSA 与 SSA 阶段共用结构。指令构造时不检查编号是否存在；构建调用处通过 `IRStageVersion::add_value` 添加值定义，槽位编号范围由所属代码单元的 `SlotTable` 查询。槽位是否属于当前单元、当前程序点是否仍绑定到全局／持久存储，以及跨调用的可观察副作用，留给后续构建、验证与执行流程处理。
 
-`Instruction::effect()` 仅描述指令是否可能改写已有 slot：`NoSlotWrite` 包括常量、元胞构造、索引冒号占位、load、goto、branch、return 和当前全部 `IntrinsicInst`；其他当前指令保守标为 `MayWriteSlot`。它不表示指令是否会抛错或产生其他副作用。`StoreSlotInst` 的写入目标可从 `slot` 字段读取；优化 pass 可按目标精确失效缓存，其他 `MayWriteSlot` 指令在缺乏进一步信息时需保守处理。增加新的 intrinsic 时须保证其不隐式写入 slot，否则应重新审查 effect。Non-SSA 阶段的 pass 规划见[分析和优化 pass](%E5%88%86%E6%9E%90%E5%92%8C%E4%BC%98%E5%8C%96%20pass.md)。
+`Instruction::effect()` 仅描述指令是否可能改写已有 slot：`NoSlotWrite` 包括常量、元胞构造、索引冒号占位、load、goto、branch、return 和当前全部 `IntrinsicInst`；其他当前指令保守标为 `MayWriteSlot`。它不表示指令是否会抛错或产生其他副作用。`StoreSlotInst` 的写入目标可从 `slot` 字段读取；优化 pass 可按目标精确失效缓存，其他 `MayWriteSlot` 指令在缺乏进一步信息时需保守处理。增加新的 intrinsic 时须保证其不隐式写入 slot，否则应重新审查 effect。Non-SSA 阶段的 pass 规划见[分析和优化 pass](分析与优化流程.md)。
 
 `GlobalDeclInst` 和 `PersistentDeclInst` 各保存非空的 `std::vector<SlotId>`，都不产生 `ValueId`。声明指令中的槽位按 `SlotId` 引用；其名称由所属代码单元的 `SlotTable` 查询。`BasicBlock` 保存所属 `IRUnit*`，但加入指令时尚不检查 `PersistentDeclInst` 是否位于函数内；重复声明复用同一 slot、静态绑定冲突及运行时环境副作用的表示仍须由后续构建与执行流程确定。
 
 `BranchInst` 按条件值选择真假目标，`GotoInst` 直接指向目标块，`ReturnInst` 结束当前代码单元；脚本或命令输入可返回空 `values`。当前只建立跳转目标与基本块末尾的结构约束，条件真假转换、返回值读取和 CFG 边的验证由后续执行与构建流程负责。
 
-索引与成员访问按 [M 语法 IR 设计](m_syntax_ir_design.md)实现了 `ApplyInst`、`ValueApplyInst`、`CallInst`、`ParenReferenceInst`、`BraceReferenceInst`、`DotAccessInst`、`DotReferenceInst`、`ParenAssignInst`、`ParenDeleteInst`、`BraceAssignInst` 和 `DotAssignInst`。圆括号和点号表达式的 `Operand` 只保留未消歧名字或已求值结果；已绑定变量先生成 `LoadSlotInst`；`CallInst` 仅保存按名字调用的 `InternedString callee`，函数句柄等按值调用由 `ValueApplyInst` 处理。三种调用或应用指令的 `arguments` 均保存已求值的 `ValueId`。构造函数不再统一检查 `Operand` 中的空名字，名字有效性由语法与构建流程负责；独立的成员名等字符串字段仍各自检查。`CallInst.m_function_target` 仅指向同模块词法绑定的 M 函数，不保存外部 M 函数或插件的运行时缓存；局部函数与嵌套函数的工作区差异由词法关系处理，不增加分派类别。已确定的圆括号和花括号索引节点保存按源码顺序求值后的 `ValueId` 下标；索引与静态成员取值／赋值节点不保存 `DispatchType`，内置行为或对象协议由执行时的 base 决定。赋值与删除都输出 `updated_base`，调用处须为它分配新的值编号并负责将根变量写回。编号归属、值定义顺序和 SSA 唯一性由表及后续构建流程处理。
+索引与成员访问按 [M 语法 IR 设计](M语法与IR设计.md)实现了 `ApplyInst`、`ValueApplyInst`、`CallInst`、`ParenReferenceInst`、`BraceReferenceInst`、`DotAccessInst`、`DotReferenceInst`、`ParenAssignInst`、`ParenDeleteInst`、`BraceAssignInst` 和 `DotAssignInst`。圆括号和点号表达式的 `Operand` 只保留未消歧名字或已求值结果；已绑定变量先生成 `LoadSlotInst`；`CallInst` 仅保存按名字调用的 `InternedString callee`，函数句柄等按值调用由 `ValueApplyInst` 处理。三种调用或应用指令的 `arguments` 均保存已求值的 `ValueId`。构造函数不再统一检查 `Operand` 中的空名字，名字有效性由语法与构建流程负责；独立的成员名等字符串字段仍各自检查。`CallInst.m_function_target` 仅指向同模块词法绑定的 M 函数，不保存外部 M 函数或插件的运行时缓存；局部函数与嵌套函数的工作区差异由词法关系处理，不增加分派类别。已确定的圆括号和花括号索引节点保存按源码顺序求值后的 `ValueId` 下标；索引与静态成员取值／赋值节点不保存 `DispatchType`，内置行为或对象协议由执行时的 base 决定。赋值与删除都输出 `updated_base`，调用处须为它分配新的值编号并负责将根变量写回。编号归属、值定义顺序和 SSA 唯一性由表及后续构建流程处理。
 
 **待明确的设计问题：** 索引与成员取值／赋值节点已移除 `DispatchType`。若将来静态分派到对象重载方法，需要确定目标及其依赖验证保存在专门的特化表示、旁表，还是统一 lower 为 `CallInst`。复合索引链的 `PendingIndex` 运行时表示、动态成员名 `a.(expr)` 的运行时处理，以及多输出逗号分隔列表的运行时承载方式尚未实现；当前 builder 已能把 `a.(expr)` 降为以 `ValueId` 表示成员名的点号指令。
 
-`UnaryInst` 和 `BinaryInst` 按 [M 语法 IR 设计](m_syntax_ir_design.md#基本运算)使用 `ValueId` 引用已求值的操作数，分别保存一元或二元 `op`、`result`，以及初始为 `true` 的 `needs_runtime_dispatch`。一元运算区分两种转置；二元运算区分矩阵、逐元素、比较与双侧求值逻辑运算。`&&` 和 `||` 应由控制流表达，不加入 `BinaryOp`。两个指令在 Non-SSA 与 SSA 阶段共用结构；构造函数检查操作种类，编号是否已定义由 `ValueTable` 和后续构建流程确定。
+`UnaryInst` 和 `BinaryInst` 按 [M 语法 IR 设计](M语法与IR设计.md#基本运算)使用 `ValueId` 引用已求值的操作数，分别保存一元或二元 `op`、`result`，以及初始为 `true` 的 `needs_runtime_dispatch`。一元运算区分两种转置；二元运算区分矩阵、逐元素、比较与双侧求值逻辑运算。`&&` 和 `||` 应由控制流表达，不加入 `BinaryOp`。两个指令在 Non-SSA 与 SSA 阶段共用结构；构造函数检查操作种类，编号是否已定义由 `ValueTable` 和后续构建流程确定。
 
 `IntrinsicInst` 表示已确定的内部语义，不预先指定执行方式。`SwitchMatch` 保存选择值与 case 值两个输入，并产生供 `BranchInst` 使用的单个结果。`ForeachInit`、`ForeachCount`、`ForeachGet`、`IntGt` 和 `IntAdd` 用于 `for` 循环的迭代状态、取值和内部整数运算；`LogicalScalar` 用于短路操作数的标量逻辑转换。它们不得隐式写入已有 slot，故当前全部返回 `NoSlotWrite`；普通 M 函数调用仍使用 `CallInst`。
 
@@ -507,7 +507,7 @@ struct ValueInfo {
 
 `LoadSlotInst`／`StoreSlotInst`、全局／持久声明以及普通函数的入参／出参列表已只保存 `SlotId`，名称通过所属代码单元的 `SlotTable` 查询。匿名函数参数与捕获也只保存 `SlotId`。
 
-按[解释器总体设计](matlab_interpreter_overall_design.md)和[Deopt 设计思路](SSA%20%E5%88%B0%20non-SSA%20%E7%9A%84%E8%BF%90%E8%A1%8C%E6%97%B6%20Deopt%20%E8%AE%BE%E8%AE%A1%E6%80%9D%E8%B7%AF.md)，SSA 回退需要恢复 slot 的值及绑定状态，并区分调用前、调用后和异常路径的继续位置。后续应为每个 IR 版本固定这些元数据的归属与生命周期，避免基本块已更新而映射仍指向旧版本。
+按[新解释器架构](新解释器架构.md)和[Deopt 设计思路](SSA到非SSA的运行时回退设计.md)，SSA 回退需要恢复 slot 的值及绑定状态，并区分调用前、调用后和异常路径的继续位置。后续应为每个 IR 版本固定这些元数据的归属与生命周期，避免基本块已更新而映射仍指向旧版本。
 
 ### 4.3 世界验证与源文件版本判定
 

@@ -18,7 +18,7 @@
 
 - 冒号表达式：`start:stop`、`start:step:stop`
 
-  内置数值 `colon` 的两个或三个操作数在 MATLAB R2025a 起都必须是实数标量；非标量操作数会报错。R2024a 对此发出警告，更早版本取非标量的第一个元素。此约束属于运行时内置函数语义，不能在语法解析时直接拒绝表达式，因为用户自定义 `colon` 可以有不同的行为。当前 `ColonInst` 尚未检查操作数的形状和类型。详见 [MathWorks `colon` 版本记录](https://www.mathworks.com/help/matlab/ref/double.colon.html)及 [IR 设计中的冒号表达式](m_syntax_ir_design.md#冒号表达式)。
+  内置数值 `colon` 的两个或三个操作数在 MATLAB R2025a 起都必须是实数标量；非标量操作数会报错。R2024a 对此发出警告，更早版本取非标量的第一个元素。此约束属于运行时内置函数语义，不能在语法解析时直接拒绝表达式，因为用户自定义 `colon` 可以有不同的行为。当前 `ColonInst` 尚未检查操作数的形状和类型。详见 [MathWorks `colon` 版本记录](https://www.mathworks.com/help/matlab/ref/double.colon.html)及 [IR 设计中的冒号表达式](M语法与IR设计.md#冒号表达式)。
 
 - 索引中的冒号：`A(:)`、`A(1:end-1)`
 
