@@ -1,7 +1,7 @@
 #include "ir/ir_builder.h"
+#include "ir/ir_io.h"
 
 #include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <optional>
 #include <stdexcept>
@@ -26,19 +26,19 @@ int main(int argc, char* argv[]) {
         return 2;
     }
     try {
+        if (input->extension() != ".m")
+            throw std::invalid_argument("baltam_ir 只接受 M 文件；处理 IR 文件请使用 opt");
         if (output) {
             std::error_code error;
             if (std::filesystem::equivalent(*input, *output, error))
                 throw std::invalid_argument("输出文件不能与输入文件相同");
         }
-        const auto ir = baltam::IRBuilder::build_file(*input)->to_string();
+        const auto module = baltam::IRBuilder::build_file(*input);
         if (output) {
-            std::ofstream file(*output, std::ios::binary | std::ios::trunc);
-            if (!file) throw std::runtime_error("无法打开输出文件: " + output->string());
-            file << ir;
-            if (!file) throw std::runtime_error("写入输出文件失败: " + output->string());
+            baltam::write_ir_file(*module, *output);
         } else {
-            std::cout << ir;
+            // 大常量需要资源目录；标准输出模式不创建配套文件。
+            std::cout << module->to_string();
         }
         return 0;
     } catch (const std::exception& error) {

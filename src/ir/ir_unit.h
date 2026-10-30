@@ -224,7 +224,12 @@ public:
     IRModule& operator=(IRModule&&) = delete;
 
     [[nodiscard]] SourceType source_type() const noexcept { return source_type_; }
-    [[nodiscard]] std::string to_string() const;
+    // 持久化当前阶段，并在整个模块内共用一张常量表。
+    // 包含 MAT 常量时，必须显式指定资源目录。
+    [[nodiscard]] std::string
+    to_string(const std::filesystem::path &resource_directory = {},
+              const std::filesystem::path &constant_directory = "constants") const;
+    [[nodiscard]] std::string function_path(const FunctionUnit *function) const;
     [[nodiscard]] ModuleType module_type() const noexcept { return module_type_; }
     [[nodiscard]] const std::optional<std::filesystem::path>& source_path() const noexcept {
         return path_;

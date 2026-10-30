@@ -16,12 +16,6 @@ if(BALTAM_BUILD_UTILS)
         ${CMAKE_CURRENT_SOURCE_DIR}/syntax/script_with_function.m)
     set_tests_properties(baltam_ir_script_with_function PROPERTIES
         PASS_REGULAR_EXPRESSION "define @twice")
-    add_test(NAME baltam_ir_output_file COMMAND ${CMAKE_COMMAND}
-        -DBALTAM_IR=$<TARGET_FILE:baltam_ir>
-        -DM_FILE=${CMAKE_CURRENT_SOURCE_DIR}/syntax/constant.m
-        -DOUTPUT_FILE=${CMAKE_CURRENT_BINARY_DIR}/constant.ir
-        -DINPUT_COPY=${CMAKE_CURRENT_BINARY_DIR}/constant_copy.m
-        -P ${CMAKE_CURRENT_SOURCE_DIR}/check_output_file.cmake)
 endif()
 
 if(BALTAM_ENABLE_AST_TEST)

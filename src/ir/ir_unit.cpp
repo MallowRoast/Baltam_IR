@@ -1,4 +1,5 @@
 #include "ir/ir_unit.h"
+#include "ir/ir_io.h"
 
 #include <limits>
 #include <sstream>
@@ -60,38 +61,6 @@ ValueId IRStageVersion::add_value(ValueInfo info) {
 
 namespace {
 
-void append_slots(std::ostringstream& output, const IRUnit& unit) {
-    if (unit.slot_table().size() == 0) return;
-    output << "; slots:\n";
-    for (std::size_t i = 0; i < unit.slot_table().size(); ++i) {
-        const SlotId id{static_cast<std::uint32_t>(i)};
-        output << ";   slot" << i << " = " << unit.slot_table().find(id).name << '\n';
-    }
-    output << '\n';
-}
-
-void append_blocks(std::ostringstream& output, const IRStageVersion& version) {
-    for (const auto& block : version.blocks()) output << block->to_string();
-}
-
-void append_signature_slots(std::ostringstream& output, const FunctionUnit& function,
-                            const std::vector<SlotId>& slots) {
-    for (std::size_t i = 0; i < slots.size(); ++i) {
-        if (i != 0) output << ", ";
-        output << "slot" << slots[i].index << ' '
-               << function.slot_table().find(slots[i]).name;
-    }
-}
-
-const char* stage_name(IRStage stage) {
-    switch (stage) {
-        case IRStage::NonSSA: return "Non-SSA";
-        case IRStage::SSA: return "Based-SSA";
-        case IRStage::OptimizedSSA: return "Optimized-SSA";
-    }
-    throw std::invalid_argument("无效的 IR 阶段");
-}
-
 void bind_module(FunctionUnit& function, IRModule* module) {
     function.set_parent(module);
     for (const auto& nested : function.nested_functions()) {
@@ -99,17 +68,6 @@ void bind_module(FunctionUnit& function, IRModule* module) {
             bind_module(*nested, module);
         }
     }
-}
-
-template <typename Pointer>
-Pointer& select_version(IRStage stage, Pointer& non_ssa, Pointer& ssa,
-                        Pointer& optimized_ssa) {
-    switch (stage) {
-        case IRStage::NonSSA: return non_ssa;
-        case IRStage::SSA: return ssa;
-        case IRStage::OptimizedSSA: return optimized_ssa;
-    }
-    throw std::invalid_argument("无效的 IR 阶段");
 }
 
 } // 匿名命名空间
@@ -125,8 +83,16 @@ std::string BasicBlock::to_string() const {
 std::string CommandUnit::to_string() const {
     std::ostringstream output;
     output << "script {\n";
-    append_slots(output, *this);
-    append_blocks(output, *version_);
+    if (slot_table().size() != 0) {
+        output << "; slots:\n";
+        for (std::size_t i = 0; i < slot_table().size(); ++i) {
+            const SlotId id{static_cast<std::uint32_t>(i)};
+            output << ";   slot" << i << " = " << slot_table().find(id).name << '\n';
+        }
+        output << '\n';
+    }
+    for (const auto& block : version_->blocks())
+        output << block->to_string();
     output << "}\n";
     return output.str();
 }
@@ -173,14 +139,21 @@ FunctionUnit& FunctionUnit::append_nested_function(
 
 std::shared_ptr<const IRStageVersion>
 FunctionUnit::stage_version(IRStage stage) const {
-    return select_version(stage, non_ssa_version_, ssa_version_,
-                          optimized_ssa_version_);
+    switch (stage) {
+        case IRStage::NonSSA:
+            return non_ssa_version_;
+        case IRStage::SSA:
+            return ssa_version_;
+        case IRStage::OptimizedSSA:
+            return optimized_ssa_version_;
+    }
+    throw std::invalid_argument("无效的 IR 阶段");
 }
 
 std::shared_ptr<IRStageVersion>
 FunctionUnit::stage_version(IRStage stage) {
-    return select_version(stage, non_ssa_version_, ssa_version_,
-                          optimized_ssa_version_);
+    return std::const_pointer_cast<IRStageVersion>(
+        std::as_const(*this).stage_version(stage));
 }
 
 std::shared_ptr<IRStageVersion> FunctionUnit::current_version() {
@@ -194,19 +167,50 @@ std::shared_ptr<const IRStageVersion> FunctionUnit::current_version() const {
 std::string FunctionUnit::to_string() const {
     std::ostringstream output;
     output << "define @" << name_ << '(';
-    append_signature_slots(output, *this, parameter_slots_);
+    for (std::size_t i = 0; i < parameter_slots_.size(); ++i) {
+        if (i != 0) output << ", ";
+        const auto slot = parameter_slots_[i];
+        output << "slot" << slot.index << ' ' << slot_table().find(slot).name;
+    }
     output << ')';
     if (!return_slots_.empty()) {
         output << " -> (";
-        append_signature_slots(output, *this, return_slots_);
+        for (std::size_t i = 0; i < return_slots_.size(); ++i) {
+            if (i != 0) output << ", ";
+            const auto slot = return_slots_[i];
+            output << "slot" << slot.index << ' ' << slot_table().find(slot).name;
+        }
         output << ')';
     }
-    output << " {\n; stage: " << stage_name(current_stage_) << '\n';
-    append_slots(output, *this);
-    append_blocks(output, *current_version());
+    output << " {\n; stage: ";
+    switch (current_stage_) {
+        case IRStage::NonSSA:
+            output << "Non-SSA";
+            break;
+        case IRStage::SSA:
+            output << "Based-SSA";
+            break;
+        case IRStage::OptimizedSSA:
+            output << "Optimized-SSA";
+            break;
+        default:
+            throw std::invalid_argument("无效的 IR 阶段");
+    }
+    output << '\n';
+    if (slot_table().size() != 0) {
+        output << "; slots:\n";
+        for (std::size_t i = 0; i < slot_table().size(); ++i) {
+            const SlotId id{static_cast<std::uint32_t>(i)};
+            output << ";   slot" << i << " = " << slot_table().find(id).name << '\n';
+        }
+        output << '\n';
+    }
+    for (const auto& block : current_version()->blocks())
+        output << block->to_string();
     output << "}\n";
     for (const auto& nested : nested_functions_) {
-        output << "\n; nested in @" << name_ << '\n' << nested->to_string();
+        output << '\n';
+        output << "; nested in @" << name_ << '\n' << nested->to_string();
     }
     return output.str();
 }
@@ -222,15 +226,10 @@ IRModule::IRModule(SourceType source_type, ModuleType module_type,
     }
 }
 
-std::string IRModule::to_string() const {
-    std::ostringstream output;
-    if (path_) output << "; ModulePath = '" << path_->string() << "'\n\n";
-    if (command_unit_) output << command_unit_->to_string();
-    for (std::size_t i = 0; i < functions_.size(); ++i) {
-        if (command_unit_ || i != 0) output << '\n';
-        output << functions_[i]->to_string();
-    }
-    return output.str();
+std::string IRModule::to_string(
+    const std::filesystem::path& resources,
+    const std::filesystem::path& constant_directory) const {
+    return IRPrinter(resources, constant_directory).print(*this);
 }
 
 const FunctionUnit* IRModule::find_function(std::string_view key) const {
@@ -262,6 +261,24 @@ void IRModule::set_functions(std::vector<std::pair<std::string, std::unique_ptr<
             bind_module(*function, this);
         }
     }
+}
+
+std::string IRModule::function_path(const FunctionUnit* target) const {
+    std::string found;
+    auto visit = [&](auto&& self, const FunctionUnit& f, std::string path) -> bool {
+        if (&f == target) {
+            found = std::move(path);
+            return true;
+        }
+        for (std::size_t i = 0; i < f.nested_functions().size(); ++i)
+            if (self(self, *f.nested_functions()[i], path + "." + std::to_string(i)))
+                return true;
+        return false;
+    };
+    for (std::size_t i = 0; i < functions_.size(); ++i)
+        if (visit(visit, *functions_[i], std::to_string(i)))
+            return found;
+    throw std::invalid_argument("静态调用目标不属于当前模块");
 }
 
 } // baltam 命名空间
