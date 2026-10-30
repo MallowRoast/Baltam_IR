@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(Baltam_IR VERSION 0.1.1 LANGUAGES CXX)
+project(Baltam_IR VERSION 0.1.2 LANGUAGES CXX)
 
 set(BALTAM_AST_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/deps/core" CACHE PATH
     "Root directory of the Baltam core and AST SDK")
@@ -8,7 +8,7 @@ set(BALTAM_LOGGER_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/deps/logger" CACHE PATH
 set(BALTAM_RUNTIME_LIBRARY_DIRS "" CACHE STRING
     "Additional runtime library directories (semicolon-separated)")
 
-# Let CMake select the library naming convention for the target platform.
+# 由 CMake 根据目标平台选择库文件命名规则。
 foreach(component core ast_base ast)
     find_library(BALTAM_${component}_LIBRARY NAMES bt_${component}
         PATHS "${BALTAM_AST_ROOT}/lib" NO_DEFAULT_PATH)
@@ -31,6 +31,8 @@ set(CMAKE_BUILD_RPATH
     ${BALTAM_RUNTIME_LIBRARY_DIRS})
 
 add_library(baltam_ir_core STATIC
+    src/ir/ir_io.cpp
+    src/ir/ir_constant.cpp
     src/ir/ir_inst.cpp
     src/ir/ir_cache.cpp
     src/ir/ir_unit.cpp
@@ -47,10 +49,17 @@ target_link_libraries(baltam_ir_core PUBLIC
     "${BALTAM_ast_LIBRARY}"
     "${BALTAM_LOGGER_LIBRARY}")
 
-option(BALTAM_BUILD_UTILS "Build the baltam_ir command-line tool" ON)
+find_package(baltam_core REQUIRED COMPONENTS core HINTS "${BALTAM_AST_ROOT}")
+find_package(MatTool 2.0.0 REQUIRED HINTS "${CMAKE_CURRENT_SOURCE_DIR}/deps/mat_tool")
+target_link_libraries(baltam_ir_core PUBLIC MatTool::MatTool)
+
+option(BALTAM_BUILD_UTILS "Build the baltam_ir and opt command-line tools" ON)
 if(BALTAM_BUILD_UTILS)
     add_executable(baltam_ir utils/baltam_ir.cpp)
     target_link_libraries(baltam_ir PRIVATE baltam_ir_core)
+    add_executable(baltam_opt utils/opt.cpp)
+    set_target_properties(baltam_opt PROPERTIES OUTPUT_NAME opt)
+    target_link_libraries(baltam_opt PRIVATE baltam_ir_core)
 endif()
 
 include(CTest)

@@ -70,7 +70,37 @@ std::string dot_member(const Operand& member) {
     return ".(%" + std::to_string(std::get<ValueId>(member).index) + ")";
 }
 
-} // namespace
+std::string result_prefix(const std::vector<ValueId> &results) {
+    if (results.empty())
+        return {};
+    if (results.size() == 1)
+        return "%" + std::to_string(results.front().index) + " = ";
+    std::string text = "[";
+    for (std::size_t i = 0; i < results.size(); ++i) {
+        if (i)
+            text += ", ";
+        text += "%" + std::to_string(results[i].index);
+    }
+    return text + "] = ";
+}
+
+const char *dispatch_name(DispatchType type) {
+    switch (type) {
+    case DispatchType::Dynamic:
+        return "dynamic";
+    case DispatchType::MFunction:
+        return "mfunction";
+    case DispatchType::Builtin:
+        return "builtin";
+    case DispatchType::Internal:
+        return "internal";
+    case DispatchType::Plugin:
+        return "plugin";
+    }
+    throw std::invalid_argument("无效的调用分派类型");
+}
+
+} // 匿名命名空间
 
 std::string ConstInst::to_string() const {
     std::string result = "%" + std::to_string(this->result.index) + " = const";
@@ -117,7 +147,7 @@ std::string BraceAssignInst::to_string() const {
 }
 
 std::string ApplyInst::to_string() const {
-    std::string text = "%" + std::to_string(results.front().index) + " = apply ";
+    std::string text = result_prefix(results) + "apply ";
     if (const auto* name = std::get_if<InternedString>(&callee_or_base))
         text += *name;
     else
@@ -131,19 +161,27 @@ std::string ApplyInst::to_string() const {
 }
 
 std::string CallInst::to_string() const {
-    std::string text;
-    if (!results.empty())
-        text = "%" + std::to_string(results.front().index) + " = ";
-    text += "call " + callee + "(";
+    std::string text = result_prefix(results) + "call " + callee + "(";
     for (std::size_t i = 0; i < arguments.size(); ++i) {
         if (i) text += ", ";
         text += "%" + std::to_string(arguments[i].index);
     }
-    return text + ")";
+    text += ")";
+    if (dispatch_type != DispatchType::Dynamic || m_function_target) {
+        text += " [dispatch=";
+        text += dispatch_name(dispatch_type);
+        if (m_function_target) {
+            if (!parent() || !parent()->parent() || !parent()->parent()->parent())
+                throw std::invalid_argument("静态调用目标需要所属 IRModule");
+            text += ",target=@" + parent()->parent()->parent()->function_path(m_function_target);
+        }
+        text += "]";
+    }
+    return text;
 }
 
 std::string ValueApplyInst::to_string() const {
-    std::string text = "value_apply %" + std::to_string(base.index) + "(";
+    std::string text = result_prefix(results) + "value_apply %" + std::to_string(base.index) + "(";
     for (std::size_t i = 0; i < arguments.size(); ++i) {
         if (i) text += ", ";
         text += "%" + std::to_string(arguments[i].index);

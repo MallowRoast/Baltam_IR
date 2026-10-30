@@ -1,5 +1,7 @@
 # Baltam IR
 
+当前版本：**0.1.2**。更新内容见 [更新日志](release_notes/version.md)。
+
 将 M 源码转换为 Non-SSA IR，为后续 SSA 优化与解释执行提供基础。目前支持的语法范围见 [M 语法与 IR 设计](docs/M语法与IR设计.md)，架构思路见 [新解释器架构](docs/新解释器架构.md)。
 
 ## 环境与依赖
@@ -7,6 +9,7 @@
 - CMake 3.16 或更新版本。
 - 支持 C++17 的编译器。
 - 同一套兼容版本的 Baltam core、AST、logger SDK，以及 AST 解析器运行时需要的内核和依赖库。
+- MatTool 2.0.0 或更新版本，用于 MAT 常量持久化。
 
 默认目录结构：
 
@@ -15,8 +18,11 @@ deps/
 ├── core/
 │   ├── include/
 │   └── lib/        # bt_core、bt_ast_base、bt_ast 等
-└── logger/
-    └── lib/        # bt_logger
+├── logger/
+│   └── lib/        # bt_logger
+└── mat_tool/
+    ├── include/
+    └── lib/        # MatTool 及其 CMake 配置
 ```
 
 CMake 使用 `find_library` 查找库，不硬编码 `.so` 等平台后缀。SDK 本身仍需要提供与目标系统和编译器兼容的库。
@@ -27,15 +33,16 @@ CMake 使用 `find_library` 查找库，不硬编码 `.so` 等平台后缀。SDK
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build --target baltam_ir
+cmake --build build --target baltam_ir baltam_opt
 ```
 
-项目的两个主要构建目标：
+项目的主要构建目标：
 
 | 目标 | 作用 |
 | --- | --- |
 | `baltam_ir_core` | 静态库，包含 IR 数据结构、缓存和 AST → IR 构建 |
-| `baltam_ir` | 命令行程序，读取 M 文件并输出 IR |
+| `baltam_ir` | 命令行程序，将 M 文件转换为 IR |
+| `baltam_opt` | 生成 `opt`，通过 pass 管线将 IR 转换为另一份 IR |
 
 构建 `baltam_ir` 会自动构建 `baltam_ir_core`。启用测试后还会产生测试目标；CTest 也会添加辅助目标。
 
@@ -76,10 +83,13 @@ export LD_LIBRARY_PATH=/home/zj/Desktop/baltam_kernel/build/src:/home/zj/Desktop
 
 ## baltam_ir 用法
 
+`baltam_ir` 负责 M 文件 → IR；`opt` 负责 IR → IR。
+
 ```bash
 ./build/baltam_ir test/syntax/if_else.m
 ./build/baltam_ir /absolute/path/to/function.m
 ./build/baltam_ir test/syntax/if_else.m -o /tmp/if_else.ir
+./build/opt -S -passes='' /tmp/if_else.ir -o /tmp/copied.ir
 ```
 
 输入、输出均支持相对路径，相对路径以当前工作目录为准。不指定 `-o` 时输出到终端；指定时写入文件并覆盖已有内容，输出不能与输入为同一个文件。
@@ -97,7 +107,7 @@ define @if_else() {
 }
 ```
 
-脚本主体表示为 `script`，局部函数随后输出；嵌套函数以 `nested in` 注释标明词法父函数。尚未支持的语法会报告错误。
+脚本主体表示为 `script`，局部函数随后输出；嵌套函数以 `nested in @函数路径` 记录词法父函数，并保留便于阅读的注释。文件末尾的 `constants` 表统一记录常量数据。尚未支持的语法会报告错误。
 
 可选：将可执行文件所在目录加入当前终端的 `PATH`，之后直接使用 `baltam_ir`：
 
@@ -105,6 +115,42 @@ define @if_else() {
 export PATH="$PWD/build:$PATH"
 baltam_ir test/syntax/if_else.m
 ```
+
+## opt
+
+CMake 目标为 `baltam_opt`，可执行文件为 `opt`。命令行参考 LLVM opt 的 `opt [options] [filename]` 形式，处理的是 Baltam IR，不接受 LLVM IR 或 LLVM bitcode。
+
+```bash
+./build/opt -S -passes='' constant.ir -o copied.ir
+./build/opt constant.ir -o -
+./build/opt -S < constant.ir
+./build/opt -disable-output constant.ir
+./build/opt -help
+./build/opt -print-passes
+```
+
+省略输入或输入为 `-` 时从标准输入读取；省略 `-o` 或输出为 `-` 时写到标准输出。`-S` 表示文本输出，目前这也是唯一输出格式。`-passes=` 与 `-passes ''` 均表示空管线。当前没有注册优化 pass，任何非空管线（包括 `simplifycfg`）都会报错，不会静默忽略。
+
+`-disable-output` 仍读取并恢复模块，包括 MAT 常量，但不生成任何输出文件。输入或参数错误返回非零退出码，诊断写到标准错误。
+
+## MAT 配套文件
+
+推荐用 `-o` 保存包含 MAT 常量的模块，程序会在输出旁生成 `<输出文件名>.constants/`，并在 IR 中记录相对路径。文件输入中的 MAT 路径始终相对于输入 IR 所在目录解析，与当前工作目录无关。
+
+从标准输入读取涉及 MAT 的 IR 时，使用 `-resource-dir` 指定输入资源基准目录。写到标准输出且需要 MAT 时，也必须显式提供资源目录，编码器在该目录的 `constants/` 下创建或复用常量文件。
+
+```bash
+./build/opt -resource-dir=/path/to/input -disable-output < input.ir
+./build/opt input.ir -o output.ir
+./build/opt input.ir -resource-dir=/path/to/export -o -
+```
+
+文件输入配合 `-resource-dir` 时，该选项只决定标准输出所配套的资源目录，不改变输入 MAT 文件的解析位置。仅含内联常量的标准输入和标准输出无需该选项。
+
+若系统无法找到 SDK 或 MatTool 的间接动态库，需要在运行环境的动态库搜索路径中包含 `deps/core/lib`、`deps/logger/lib` 和 `deps/mat_tool/lib` 及 SDK 所需的其他目录。CTest 中的新增测试已设置这些依赖目录。
+
+参考：[LLVM opt 命令行文档](https://llvm.org/docs/CommandGuide/opt.html)。
+
 
 ## 测试与代码接口
 
@@ -117,3 +163,7 @@ ctest --test-dir build --output-on-failure
 ```
 
 C++ 调用方链接 `baltam_ir_core`，通过 `IRBuilder::build_file(path)` 获取共享的 `IRModule`。同一进程内会复用有效缓存；跨世界的文件修改检查由缓存处理，运行时需要在合适边界推进世界计数。
+
+模块持久化接口为 `write_ir_file(module, path)`、`read_ir_file(path)` 和 `read_ir(text, resource_directory)`，与模块打印器 `IRPrinter` 统一定义在 `ir/ir_io.h`。格式和接口说明见 [IR 持久化](docs/IR持久化.md)。
+
+运行时调用目标缓存的设计见 [函数调用点缓存设计](docs/函数调用点缓存设计.md)。
