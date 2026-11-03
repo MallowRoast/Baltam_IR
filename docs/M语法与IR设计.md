@@ -262,7 +262,7 @@ DispatchType bound_dispatch_type; // Runtime 时为 Dynamic；Static 时为 Buil
 
 #### non-SSA IR
 
-匿名函数体使用独立的 `AnonymousFunctionUnit`：其 `lexical_parent` 指向定义处的 `IRUnit`，`param_slots` 按源码顺序保存参数 slot，`capture_slots` 保存体内读取捕获值的 `Capture` slot。函数体表达式的结果由 `ReturnInst.values` 返回。
+匿名函数体使用独立的 `AnonymousFunctionUnit`：其 `lexical_parent` 指向定义处的 `IRUnit`，`param_slots` 按源码顺序保存参数 slot，`capture_slots` 保存体内读取捕获值的 `Capture` slot。函数体表达式结果的输出槽位约定仍需在实现匿名函数时确定。
 
 外层代码在构造点使用 `CreateAnonymousFunctionHandleInst`，主要字段为：
 
@@ -355,7 +355,7 @@ struct ParenReferenceInst {
 };
 ```
 
-`ApplyInst`、`ValueApplyInst` 和 `CallInst` 的 `arguments` 在生成指令前已经分别求值，按源码顺序保存 `ValueId`；可能展开成逗号分隔列表的实参由对应 `ValueInfo.form` 标记。`ApplyInst.callee_or_base` 只保留未消歧名字或已求值的值；已确定为变量时先用 `LoadSlotInst` 得到 `ValueId`；`CallInst.callee` 只保存已确定按名字调用的函数名。`Operand` 中的空名字不在指令构造时统一检查，名称有效性由前面的语法与构建流程负责。`results` 保留请求的输出位次；普通内置圆括号取值通常产生一个值，对象索引协议可能需要多个输出。`ParenReferenceInst` 已确定“圆括号取值”这一类别；内置索引还是对象索引协议由执行时的 base 决定，不在节点中保存 `DispatchType`。`ApplyInst` 确定为索引后，沿用已求值的实参作为 `indices`；确定为按名字调用后，沿用实参生成 `CallInst`；若先得到函数句柄等运行时值，则由 `ValueApplyInst` 分派调用或索引。值包的实际展开规则仍需后续执行设计。
+`ApplyInst`、`ValueApplyInst` 和 `CallInst` 的 `arguments` 在生成指令前已经分别求值，按源码顺序保存 `ValueId`；可能展开成逗号分隔列表的实参由对应 `Value::form()` 标记。`ApplyInst.callee_or_base` 只保留未消歧名字或已求值的值；已确定为变量时先用 `LoadSlotInst` 得到 `ValueId`；`CallInst.callee` 只保存已确定按名字调用的函数名。`Operand` 中的空名字不在指令构造时统一检查，名称有效性由前面的语法与构建流程负责。`results` 保留请求的输出位次；普通内置圆括号取值通常产生一个值，对象索引协议可能需要多个输出。`ParenReferenceInst` 已确定“圆括号取值”这一类别；内置索引还是对象索引协议由执行时的 base 决定，不在节点中保存 `DispatchType`。`ApplyInst` 确定为索引后，沿用已求值的实参作为 `indices`；确定为按名字调用后，沿用实参生成 `CallInst`；若先得到函数句柄等运行时值，则由 `ValueApplyInst` 分派调用或索引。值包的实际展开规则仍需后续执行设计。
 
 当前单结果 lowering 中，`b = A()` 若 `A` 尚无变量 slot，则生成保存名字 `A` 的 `ApplyInst`，保留调用与索引歧义；`b = x(1)` 在 `x` 已绑定时先读取其 slot，再求值下标并生成 `ParenReferenceInst`。当前 `ParenReferenceInst` 只保存一个结果，上方多结果形式是后续扩展草案。
 
@@ -377,7 +377,7 @@ struct BraceReferenceInst {
 };
 ```
 
-取多个元胞内容时可能产生逗号分隔列表或多个输出，不能强制只返回一个普通值。构建调用处为可能承载整组内容的 `ValueId` 在 `ValueInfo.form` 中设置 `MaybePack`；普通单值及已拆分为独立 `ValueId` 的结果保持 `Single`。该标记使函数实参、出参等使用点能识别潜在的值包，但实际元素数量和展开规则仍须由后续运行时设计承载。具体取值仍按 base 的索引协议分派。
+取多个元胞内容时可能产生逗号分隔列表或多个输出，不能强制只返回一个普通值。构建调用处为可能承载整组内容的 `ValueId` 在 `Value::form()` 中设置 `MaybePack`；普通单值及已拆分为独立 `ValueId` 的结果保持 `Single`。该标记使函数实参、出参等使用点能识别潜在的值包，但实际元素数量和展开规则仍须由后续运行时设计承载。具体取值仍按 base 的索引协议分派。
 
 当前单层 `C{2}` lowering 先从 `C` 的 slot 读取 base，按源码顺序求值索引，再生成单结果 `BraceReferenceInst`，该结果标记为 `MaybePack`。例如 `b = C{2}` 将结果写入 `b` 的 slot。当前指令结构只保存一个可承载值包的 `result`，上方多结果结构是后续扩展草案。
 
@@ -679,11 +679,12 @@ struct PhiIncoming {
     ValueId value;
 };
 
+// 构造和 incoming(index) 查询时使用的快照；实际输入由 User 的 Use 保存。
 std::vector<PhiIncoming> incomings;
 ValueId result;
 ```
 
-`result` 是汇合后唯一的新定义。`incomings` 为汇合块的每个可达前驱记录一个输入：`predecessor` 指明控制流从哪个块到达，`value` 是沿该路径有效的定义。只有实际进入汇合块的那条路径对应的值成为 `result`；后续指令统一引用 `result`。
+`result` 是汇合后唯一的新定义。PHI 的前驱列表与 User 的 Use 列表一一对应，为汇合块的每个前驱记录一个输入：`predecessor` 指明控制流从哪个块到达，`value` 是沿该路径有效的定义。只有实际进入汇合块的那条路径对应的值成为 `result`；后续指令统一引用 `result`。
 
 例如将上面的 `@x` 提升为 SSA 值后，三个分支分别产生 `%one`、`%two`、`%three`，在出口块汇合：
 
@@ -934,23 +935,17 @@ switch.end:
 
 #### non-SSA IR
 
-显式 `return` 生成当前基本块末尾的 `ReturnInst`，主要字段为：
+显式 `return` 生成当前基本块末尾的无操作数 `ReturnInst`，文本格式为 `ret`。函数返回值按 `FunctionUnit::return_slots()` 的声明顺序从当前执行路径的输出槽位取得；源码 lowering 不为返回指令额外生成 load 或值列表。
 
-```cpp
-std::vector<ValueId> values;
-```
-
-目标设计中，函数 lowering 按 `FunctionUnit::return_slots()` 的声明顺序生成 `LoadSlotInst`，将得到的 `ValueId` 放入 `values`；各 `SlotId` 的名称和属性由函数的 `SlotTable` 提供。`return_slots()` 定义出参的身份与顺序，`ReturnInst.values` 记录此次返回路径实际交给调用方的值；源码中的 `return` 无表达式，不意味着 IR 返回指令没有操作数。脚本的 `return` 使用空列表。`ReturnInst` 不产生结果，也没有后继基本块。位于 `if` 或循环体内时，它直接结束当前代码单元，不再走分支汇合块、循环回边或 `for.latch`。
-
-代码单元执行到末尾且当前块尚无终结指令时，当前 lowering 补一条空 `ReturnInst`；未来函数返回值 lowering 应读取输出 slot，脚本的 `values` 为空。目标设计中的匿名函数没有 `return_slots`，其表达式结果直接作为 `ReturnInst.values`，这不对应源码中的 `return` 语句。
+代码单元执行到末尾且当前块尚无终结指令时，lowering 补一条 `ReturnInst`。该指令不产生结果，也没有后继基本块。位于分支或循环内时，它直接结束当前代码单元。
 
 #### SSA IR
 
-保留各条可达返回路径上的 `ReturnInst`。输出变量若已提升为 SSA 值，每个返回点应在 `values` 中引用该路径上当前有效的定义，不必为了多个 `return` 强制建立统一出口或 `phi`；若先汇合再返回，则按普通 SSA 规则在汇合处插入 `phi`。仅凭 `FunctionUnit::return_slots()` 无法表达各路径不同的 SSA 返回值；保留显式 `values` 也让优化器看到返回数据流。匿名函数没有具名出参槽位，其表达式结果同样通过 `values` 返回。输出变量尚未赋值时必须保留原有的未绑定错误语义，不能凭空填入 `ValueId`。
+保留各条可达返回路径上的 `ReturnInst`。当前 mem2reg 不提升返回槽位，返回前对输出槽位的写入继续保留。未来若要提升输出变量，需要先明确返回值交付约定。输出变量尚未赋值时必须保留原有的未绑定错误语义。
 
 #### runtime 结构
 
-执行 `ReturnInst` 时按 `values` 顺序取得返回值，立即退出当前执行 frame，并将结果交给调用方；空列表只结束当前代码单元。当前代码已实现显式和隐式 `return` 的 lowering，均生成空 `values`；IR 解释执行尚未实现。
+函数执行 `ReturnInst` 时，应按返回槽位的声明顺序收集输出，退出当前执行 frame 并交付调用方；脚本的 `ret` 只结束代码单元。IR 解释执行尚未实现，匿名函数的输出槽位布局也仍待设计。
 
 #### 注意事项
 

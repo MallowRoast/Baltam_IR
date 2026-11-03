@@ -2,22 +2,24 @@
 
 本文说明模块、指令及元数据的持久化格式。持久化应从模块入口调用，保存当前阶段的 IR，并在读取时恢复对象所有权、值引用、控制流和函数绑定关系。
 
-模块打印器 `IRPrinter` 和读写接口统一位于 `src/ir/ir_io.h`，实现位于 `src/ir/ir_io.cpp`；常量编解码接口位于 `src/ir/ir_constant.h`，实现位于 `src/ir/ir_constant.cpp`。单独调用 `ConstInst::to_string()` 仍是调试摘要。
+模块打印器 `IRPrinter` 和读写接口统一位于 `src/ir/ir_io.h`，实现位于 `src/ir/ir_io.cpp`；常量编解码接口位于 `src/ir/ir_constant.h`，实现位于 `src/ir/ir_constant.cpp`。IR 数据结构不提供文本输出成员函数，格式化统一由 ir_io 实现。
 
 实现状态：模块和常量读写已接入；本文的调用元数据格式已确定，但尚未接入打印器和读取器，当前代码仍使用行内 `[dispatch=...,target=@...]` 属性。调用元数据示例表示目标格式，当前 `opt` 尚不能读取该格式。
+
+返回指令仅接受 `ret`，不携带值列表；函数返回值由声明的返回槽位提供。读取 `ret %N` 会报错。
 
 ## 模块读写
 
 函数体和脚本主体中的注释及基本块标签顶格输出，基本块内指令缩进 4 个空格。代码单元与末尾元数据块之间、不同元数据块之间使用一个空行分隔；元数据条目缩进 4 个空格。
 
-`IRPrinter` 负责遍历模块、函数、基本块和指令，持有本次输出的 `ConstantEncoder`，统一分配常量标签并输出元数据。`IRModule` 保存 IR 数据，不保存编码器或导出目录；函数和基本块的 `to_string()` 无需传递编码器。
+`IRPrinter` 负责遍历模块、函数、基本块和指令，持有本次输出的 `ConstantEncoder`，统一分配常量标签并输出元数据。`IRModule`、代码单元、基本块和指令只保存 IR 数据，不提供 `to_string()` 成员函数，也不保存编码器或导出目录。
 
 ```cpp
 IRPrinter printer(resource_directory);
 auto text = printer.print(module);
 ```
 
-每次 `print()` 都重置编码状态，可以顺序复用同一个打印器；上一次打印失败不会污染下一次输出。模块的 `to_string(resource_directory)` 是创建打印器并调用 `print()` 的便捷入口，`write_ir_file` 也使用该打印器。单独打印函数或基本块仍用于调试，不生成可独立恢复的完整常量表。
+每次 `print()` 都重置编码状态，可以顺序复用同一个打印器；上一次打印失败不会污染下一次输出。非成员接口 `write_ir(module, resource_directory)` 创建打印器并输出完整模块，`write_ir_file` 也使用同一输出路径。不再保留独立的函数、基本块或常量调试摘要格式。
 
 ```cpp
 #include "ir/ir_io.h"
@@ -26,11 +28,11 @@ write_ir_file(module, "example.ir");
 auto restored = read_ir_file("example.ir");
 
 // 纯内联常量无需资源目录。涉及 MAT 时显式指定目录。
-auto text = module.to_string(resource_directory);
+auto text = write_ir(module, resource_directory);
 auto from_text = read_ir(text, resource_directory);
 ```
 
-`write_ir_file` 在 IR 文件末尾输出一个模块级 `constants` 表，并将 MAT 文件放在同目录的 `example.ir.constants/` 内。移动时需将 IR 和该资源目录一起移动。`to_string()` 默认不创建资源文件，遇到需要 MAT 的对象会要求调用方提供资源目录；命令行此时应使用 `-o`。
+`write_ir_file` 在 IR 文件末尾输出一个模块级 `constants` 表，并将 MAT 文件放在同目录的 `example.ir.constants/` 内。移动时需将 IR 和该资源目录一起移动。`write_ir()` 默认不创建资源文件，遇到需要 MAT 的对象会要求调用方提供资源目录；命令行此时应使用 `-o`。
 
 模块格式保留脚本、函数、嵌套函数、槽位表、当前阶段的基本块和指令；多结果调用、分派类型与同模块静态目标会一并恢复。其他非当前阶段的版本不在本次快照中。不再保存 `module_info`：存在 `ModulePath` 时来源设为 File，否则设为 Memory；有脚本主体时类型设为 Script，仅有函数定义时设为 FunctionFile。IR 文件读取用于观察，不注册到 M 源文件缓存，也不保留原始 Command 来源等当前文本结构不能区分的信息。路径头、stage 和 slot 沿用当前打印格式，读取时识别这些结构性注释；普通注释被忽略。嵌套关系另外使用 `nested in @0.1` 的函数索引路径，避免同名函数歧义。
 
@@ -160,7 +162,7 @@ define @example() {
 bb0:
     %0 = const !c0 (1.25): double 1x1
     %1 = call foo(%0), !call0
-    ret %1
+    ret
 }
 
 constants {
@@ -187,3 +189,13 @@ diff -u build/constant.ir build/constant.restored.ir
 ```
 
 运行 M 文件转换需要匹配的 AST 和内核动态库。包含 MAT 常量时，还需校验恢复对象的类型、完整形状和元素位模式；仅比较重新打印的 IR 文本不足以证明数据完全一致。
+
+## PHI 指令
+
+```text
+%3 = phi [bb1, %1], [bb2, Undefined]
+```
+
+PHI 只用于 SSA 阶段，连续位于基本块开头。每个前驱块恰好有一个输入，`Undefined` 对应 `std::nullopt`，不占用值编号。普通输入使用 `ValueId`，允许循环回边前向引用；未定义的值编号仍是错误。读取时恢复前驱块指针、输入和值表结果，并检查重复、遗漏及非前驱输入。
+
+构造期间允许输入列表暂时为空，打印完整 IR 时必须补齐。PHI 不改写槽位，也不是终结指令；运行时传递 Undefined 状态及变量读取检查尚待执行器实现。

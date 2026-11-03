@@ -1,6 +1,6 @@
 # Baltam IR
 
-当前版本：**0.1.2**。更新内容见 [更新日志](release_notes/version.md)。
+当前版本：**0.1.3**。更新内容见 [更新日志](release_notes/version.md)。
 
 将 M 源码转换为 Non-SSA IR，为后续 SSA 优化与解释执行提供基础。目前支持的语法范围见 [M 语法与 IR 设计](docs/M语法与IR设计.md)，架构思路见 [新解释器架构](docs/新解释器架构.md)。
 
@@ -44,7 +44,7 @@ cmake --build build --target baltam_ir baltam_opt
 | `baltam_ir` | 命令行程序，将 M 文件转换为 IR |
 | `baltam_opt` | 生成 `opt`，通过 pass 管线将 IR 转换为另一份 IR |
 
-构建 `baltam_ir` 会自动构建 `baltam_ir_core`。启用测试后还会产生测试目标；CTest 也会添加辅助目标。
+构建 `baltam_ir` 会自动构建 `baltam_ir_core`。
 
 可选配置：
 
@@ -54,8 +54,6 @@ cmake --build build --target baltam_ir baltam_opt
 | `BALTAM_LOGGER_ROOT` | `deps/logger` | logger SDK 根目录 |
 | `BALTAM_RUNTIME_LIBRARY_DIRS` | 空 | 额外的构建时运行库搜索目录，用分号分隔 |
 | `BALTAM_BUILD_UTILS` | `ON` | 构建命令行程序 |
-| `BUILD_TESTING` | `ON` | 注册测试 |
-| `BALTAM_ENABLE_AST_TEST` | `OFF` | 构建并注册 AST 降低与缓存集成测试 |
 
 例如指定另一套 SDK：
 
@@ -129,7 +127,16 @@ CMake 目标为 `baltam_opt`，可执行文件为 `opt`。命令行参考 LLVM o
 ./build/opt -print-passes
 ```
 
-省略输入或输入为 `-` 时从标准输入读取；省略 `-o` 或输出为 `-` 时写到标准输出。`-S` 表示文本输出，目前这也是唯一输出格式。`-passes=` 与 `-passes ''` 均表示空管线。当前没有注册优化 pass，任何非空管线（包括 `simplifycfg`）都会报错，不会静默忽略。
+省略输入或输入为 `-` 时从标准输入读取；省略 `-o` 或输出为 `-` 时写到标准输出。`-S` 表示文本输出，目前这也是唯一输出格式。`-passes=` 与 `-passes ''` 均表示空管线。已支持 `mem2reg` 和 `function(mem2reg)`，未知 pass（例如尚未实现的 `simplifycfg`）会报错。
+
+```bash
+./build/opt -S -passes=mem2reg input.ir -o ssa.ir
+./build/opt -S -passes='function(mem2reg)' input.ir -o ssa.ir
+```
+
+mem2reg 基于支配边界插入 PHI，沿支配树重命名，删除可提升局部槽位的读写并重建值表。转换在副本上完成，成功后发布基础 SSA 版本，保留原 Non-SSA。第一版保守保留参数、返回、全局、持久及捕获槽位；存在定义前读取的槽位不提升，包含可能隐式改写工作区操作的函数暂不转换。脚本主体仍保留可观察的 workspace 存储，函数及局部函数按上述规则处理。
+
+pass 管理采用函数管线、按需分析缓存和 `PreservedAnalyses` 返回值；版本切换或不保留分析时，清除 CFG 和支配结果。当前实现位于 `src/Transform`，并未链接 LLVM。
 
 `-disable-output` 仍读取并恢复模块，包括 MAT 常量，但不生成任何输出文件。输入或参数错误返回非零退出码，诊断写到标准错误。
 
@@ -147,23 +154,47 @@ CMake 目标为 `baltam_opt`，可执行文件为 `opt`。命令行参考 LLVM o
 
 文件输入配合 `-resource-dir` 时，该选项只决定标准输出所配套的资源目录，不改变输入 MAT 文件的解析位置。仅含内联常量的标准输入和标准输出无需该选项。
 
-若系统无法找到 SDK 或 MatTool 的间接动态库，需要在运行环境的动态库搜索路径中包含 `deps/core/lib`、`deps/logger/lib` 和 `deps/mat_tool/lib` 及 SDK 所需的其他目录。CTest 中的新增测试已设置这些依赖目录。
+若系统无法找到 SDK 或 MatTool 的间接动态库，需要在运行环境的动态库搜索路径中包含 `deps/core/lib`、`deps/logger/lib` 和 `deps/mat_tool/lib` 及 SDK 所需的其他目录。
 
 参考：[LLVM opt 命令行文档](https://llvm.org/docs/CommandGuide/opt.html)。
 
 
-## 测试与代码接口
+## 样例与代码接口
 
-先按上文配置运行时库，再执行：
+`test/syntax` 保留 M 文件样例。配置好运行时库后，可以手动生成并优化 IR：
 
 ```bash
-cmake -S . -B build -DBALTAM_ENABLE_AST_TEST=ON
-cmake --build build
-ctest --test-dir build --output-on-failure
+./build/baltam_ir test/syntax/if_else.m -o /tmp/if_else.ir
+./build/opt -passes=mem2reg /tmp/if_else.ir -o /tmp/if_else.ssa.ir
 ```
 
 C++ 调用方链接 `baltam_ir_core`，通过 `IRBuilder::build_file(path)` 获取共享的 `IRModule`。同一进程内会复用有效缓存；跨世界的文件修改检查由缓存处理，运行时需要在合适边界推进世界计数。
 
-模块持久化接口为 `write_ir_file(module, path)`、`read_ir_file(path)` 和 `read_ir(text, resource_directory)`，与模块打印器 `IRPrinter` 统一定义在 `ir/ir_io.h`。格式和接口说明见 [IR 持久化](docs/IR持久化.md)。
+模块持久化接口为 `write_ir(module, resource_directory)`、`write_ir_file(module, path)`、`read_ir_file(path)` 和 `read_ir(text, resource_directory)`，与模块打印器 `IRPrinter` 统一定义在 `ir/ir_io.h`。格式和接口说明见 [IR 持久化](docs/IR持久化.md)。
 
 运行时调用目标缓存的设计见 [函数调用点缓存设计](docs/函数调用点缓存设计.md)。
+
+IR 生成与回归验证的分层方案见 [IR 生成正确性测试方案](docs/IR生成正确性测试方案.md)。
+
+SSA 转换所需的分析设计见 [支配分析设计](docs/支配分析设计.md)，槽位提升的算法与限制见 [mem2reg 设计](docs/mem2reg设计.md)。
+
+## 代码格式化
+
+根目录的 `format-with-clang.sh` 使用 `.clang-format`，默认调用 `clang-format-11`，覆盖 `src`、`test` 和 `utils`，不处理依赖及构建目录。也可传入指定文件；文件路径相对于项目根目录。
+
+```bash
+./format-with-clang.sh
+./format-with-clang.sh --check
+./format-with-clang.sh src/Transform/mem2reg.cpp
+cmake --build build --target format
+cmake --build build --target format-check
+```
+
+如需在每次构建前自动格式化，显式开启：
+
+```bash
+cmake -S . -B build -DBALTAM_FORMAT_BEFORE_BUILD=ON
+cmake --build build
+```
+
+默认关闭自动修改，避免普通构建改变源码；用 `-DBALTAM_FORMAT_BEFORE_BUILD=OFF` 关闭已启用的开关。CI 可执行 `format-check`，不合规时返回失败，不自动改文件。格式化工具不负责翻译注释或自动补充分隔函数的空行，中文注释和函数间空行仍需人工保持。

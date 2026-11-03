@@ -4,14 +4,14 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <filesystem>
+#include <limits>
 #include <map>
-#include <optional>
-#include <string_view>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -39,60 +39,73 @@ private:
     std::vector<SlotInfo> slots_;
 };
 
-struct ValueInfo {
-    Instruction* def = nullptr; // 同一阶段版本的基本块拥有该指令。
-    std::uint32_t index = 0; // 定义指令的第几个结果，从 0 开始。
-    // 仅记录是否可能承载逗号分隔列表，不表示运行时元素数量。
-    enum class Form : std::uint8_t { Single, MaybePack } form = Form::Single;
-    bool is_constant = false;
-};
-
-// 值编号只在所属代码单元的当前阶段版本内有效。
+// 每个阶段独占拥有稳定的值对象，允许先预留引用、再补齐定义。
 class ValueTable final {
 public:
-    [[nodiscard]] const ValueInfo& find(ValueId id) const;
+    explicit ValueTable(IRStageVersion& version) : version_(&version) {}
+    ValueTable(const ValueTable&) = delete;
+    ValueTable& operator=(const ValueTable&) = delete;
+    ValueTable(ValueTable&&) = delete;
+    ValueTable& operator=(ValueTable&&) = delete;
+
+    [[nodiscard]] Value& reserve(ValueId id);
+    [[nodiscard]] const Value& find(ValueId id) const;
+    [[nodiscard]] Value& find(ValueId id);
+    void define(ValueId id, Instruction& definition, std::uint32_t result_index = 0,
+                Value::Form form = Value::Form::Single, bool constant = false);
+    // 包含构建中的预留记录和删除后留下的空位。
     [[nodiscard]] std::size_t size() const noexcept { return values_.size(); }
 
 private:
     friend class IRStageVersion;
-    [[nodiscard]] ValueId add_value(ValueInfo info);
-    std::vector<ValueInfo> values_;
+    IRStageVersion* version_;
+    std::vector<std::unique_ptr<Value>> values_;
 };
 
 // 当前固定基本块身份与指令所有权；控制流关系另行设计。
 class BasicBlock final {
 public:
     [[nodiscard]] IRUnit* parent() const noexcept { return parent_; }
+
     [[nodiscard]] const std::string& label() const noexcept { return label_; }
-    [[nodiscard]] std::string to_string() const;
-    [[nodiscard]] const std::vector<std::unique_ptr<Instruction>>&
-    instructions() const noexcept { return instructions_; }
-    [[nodiscard]] const Instruction* terminator() const noexcept {
-        return !instructions_.empty() && instructions_.back()->is_terminator()
-                   ? instructions_.back().get() : nullptr;
+
+    [[nodiscard]] const std::vector<std::unique_ptr<Instruction>>& instructions() const noexcept {
+        return instructions_;
     }
 
-    template <typename Inst, typename... Args>
-    Inst& add_instruction(Args&&... args) {
-        static_assert(std::is_base_of_v<Instruction, Inst>,
-                      "指令类型必须继承 Instruction");
-        if (terminator()) {
-            throw std::logic_error("终结指令之后不能添加指令");
-        }
-        auto instruction = std::make_unique<Inst>(std::forward<Args>(args)...);
-        Inst& added = *instruction;
-        instructions_.push_back(std::move(instruction));
-        added.parent_ = this;
-        return added;
+    [[nodiscard]] const Instruction* terminator() const noexcept {
+        return !instructions_.empty() && instructions_.back()->is_terminator()
+                   ? instructions_.back().get()
+                   : nullptr;
     }
+
+    template <typename Inst, typename... Args> Inst& add_instruction(Args&&... args) {
+        return insert_instruction<Inst>(instructions_.size(), std::forward<Args>(args)...);
+    }
+
+    // 插入后仍由调用方通过 add_value 登记结果，既有指令地址保持稳定。
+    template <typename Inst, typename... Args>
+    Inst& insert_instruction(std::size_t position, Args&&... args) {
+        static_assert(std::is_base_of_v<Instruction, Inst>, "指令类型必须继承 Instruction");
+        std::unique_ptr<Instruction> instruction =
+            std::make_unique<Inst>(std::forward<Args>(args)...);
+        return static_cast<Inst&>(insert_instruction(position, std::move(instruction)));
+    }
+
+    // 删除前要求所有已登记结果不再被使用；保留值编号，清除对应值表项。
+    void erase_instruction(std::size_t position);
 
 private:
     friend class IRStageVersion;
+    friend class ValueTable;
 
-    BasicBlock(IRUnit& parent, std::string label)
-        : parent_(&parent), label_(std::move(label)) {}
+    Instruction& insert_instruction(std::size_t position, std::unique_ptr<Instruction> instruction);
+
+    BasicBlock(IRUnit& parent, IRStageVersion& version, std::string label)
+        : parent_(&parent), version_(&version), label_(std::move(label)) {}
 
     IRUnit* parent_;
+    IRStageVersion* version_;
     std::string label_;
     std::vector<std::unique_ptr<Instruction>> instructions_;
 };
@@ -100,16 +113,35 @@ private:
 // 基本块和值表共同存活，供执行者持有正在使用的阶段版本。
 class IRStageVersion final {
 public:
-    IRStageVersion() = default;
+    IRStageVersion() : values_(*this) {}
+
+    ~IRStageVersion();
+    IRStageVersion(const IRStageVersion&) = delete;
+    IRStageVersion& operator=(const IRStageVersion&) = delete;
+    IRStageVersion(IRStageVersion&&) = delete;
+    IRStageVersion& operator=(IRStageVersion&&) = delete;
     [[nodiscard]] BasicBlock* entry_block() const noexcept { return entry_block_; }
-    [[nodiscard]] const std::vector<std::unique_ptr<BasicBlock>>&
-    blocks() const noexcept { return blocks_; }
+
+    [[nodiscard]] const std::vector<std::unique_ptr<BasicBlock>>& blocks() const noexcept {
+        return blocks_;
+    }
+
     [[nodiscard]] ValueTable& values() noexcept { return values_; }
+
     [[nodiscard]] const ValueTable& values() const noexcept { return values_; }
-    [[nodiscard]] ValueId add_value(ValueInfo info);
+
+    [[nodiscard]] ValueId add_value(Instruction& definition, std::uint32_t result_index = 0,
+                                    Value::Form form = Value::Form::Single, bool constant = false);
+    [[nodiscard]] std::shared_ptr<IRStageVersion> clone(IRUnit& owner) const;
+
+    // 删除留下的空位统一压缩，同时更新结果编号、输入和值表。
+    void compact_values();
+
+    // 调用方保证替换不破坏类型、支配关系及阶段语义。
+    std::size_t replace_all_uses(ValueId from, ValueId to);
+
     BasicBlock& add_block(IRUnit& parent, std::string label = {}) {
-        auto block = std::unique_ptr<BasicBlock>(
-            new BasicBlock(parent, std::move(label)));
+        auto block = std::unique_ptr<BasicBlock>(new BasicBlock(parent, *this, std::move(label)));
         blocks_.push_back(std::move(block));
         if (!entry_block_) {
             entry_block_ = blocks_.back().get();
@@ -118,6 +150,10 @@ public:
     }
 
 private:
+    friend class BasicBlock;
+
+    void erase_instruction(BasicBlock& block, std::size_t position);
+
     BasicBlock* entry_block_ = nullptr;
     std::vector<std::unique_ptr<BasicBlock>> blocks_;
     ValueTable values_;
@@ -128,11 +164,12 @@ class IRUnit {
 public:
     virtual ~IRUnit() = default;
     [[nodiscard]] IRModule* parent() const noexcept { return parent_; }
+
     void set_parent(IRModule* parent) noexcept { parent_ = parent; }
+
     [[nodiscard]] SlotTable& slot_table() noexcept { return slot_table_; }
-    [[nodiscard]] const SlotTable& slot_table() const noexcept {
-        return slot_table_;
-    }
+
+    [[nodiscard]] const SlotTable& slot_table() const noexcept { return slot_table_; }
 
 protected:
     IRUnit() = default;
@@ -145,19 +182,20 @@ private:
 class CommandUnit final : public IRUnit {
 public:
     CommandUnit() = default;
-    [[nodiscard]] std::string to_string() const;
 
-    [[nodiscard]] const std::vector<std::unique_ptr<BasicBlock>>&
-    blocks() const noexcept { return version_->blocks(); }
-    [[nodiscard]] std::shared_ptr<IRStageVersion>
-    stage_version() noexcept { return version_; }
-    [[nodiscard]] std::shared_ptr<const IRStageVersion>
-    stage_version() const noexcept { return version_; }
+    [[nodiscard]] const std::vector<std::unique_ptr<BasicBlock>>& blocks() const noexcept {
+        return version_->blocks();
+    }
+
+    [[nodiscard]] std::shared_ptr<IRStageVersion> stage_version() noexcept { return version_; }
+
+    [[nodiscard]] std::shared_ptr<const IRStageVersion> stage_version() const noexcept {
+        return version_;
+    }
     BasicBlock& add_block() { return version_->add_block(*this); }
 
 private:
-    std::shared_ptr<IRStageVersion> version_ =
-        std::make_shared<IRStageVersion>();
+    std::shared_ptr<IRStageVersion> version_ = std::make_shared<IRStageVersion>();
 };
 
 class FunctionUnit final : public IRUnit {
@@ -167,31 +205,26 @@ public:
                  std::vector<std::string> returns);
 
     [[nodiscard]] const std::string& name() const noexcept { return name_; }
-    [[nodiscard]] std::string to_string() const;
+
     [[nodiscard]] IRStage current_stage() const noexcept { return current_stage_; }
+
     void set_current_stage(IRStage stage) noexcept { current_stage_ = stage; }
+    // 仅发布属于当前函数的完整阶段版本。
+    void set_stage_version(IRStage stage, std::shared_ptr<IRStageVersion> version);
+
     [[nodiscard]] const std::vector<SlotId>& parameter_slots() const noexcept {
         return parameter_slots_;
     }
-    [[nodiscard]] const std::vector<SlotId>& return_slots() const noexcept {
-        return return_slots_;
-    }
+
+    [[nodiscard]] const std::vector<SlotId>& return_slots() const noexcept { return return_slots_; }
 
     [[nodiscard]] const std::vector<std::unique_ptr<FunctionUnit>>&
     nested_functions() const noexcept {
         return nested_functions_;
     }
     FunctionUnit& append_nested_function(std::unique_ptr<FunctionUnit> function);
-    [[nodiscard]] const std::vector<std::unique_ptr<BasicBlock>>&
-    non_ssa_blocks() const noexcept { return non_ssa_version_->blocks(); }
-    [[nodiscard]] const std::vector<std::unique_ptr<BasicBlock>>&
-    ssa_blocks() const noexcept { return ssa_version_->blocks(); }
-    [[nodiscard]] const std::vector<std::unique_ptr<BasicBlock>>&
-    optimized_ssa_blocks() const noexcept { return optimized_ssa_version_->blocks(); }
-    [[nodiscard]] std::shared_ptr<IRStageVersion>
-    stage_version(IRStage stage);
-    [[nodiscard]] std::shared_ptr<const IRStageVersion>
-    stage_version(IRStage stage) const;
+    [[nodiscard]] std::shared_ptr<IRStageVersion> stage_version(IRStage stage);
+    [[nodiscard]] std::shared_ptr<const IRStageVersion> stage_version(IRStage stage) const;
     [[nodiscard]] std::shared_ptr<IRStageVersion> current_version();
     [[nodiscard]] std::shared_ptr<const IRStageVersion> current_version() const;
 
@@ -200,12 +233,9 @@ private:
     IRStage current_stage_ = IRStage::NonSSA;
     std::vector<SlotId> parameter_slots_;
     std::vector<SlotId> return_slots_;
-    std::shared_ptr<IRStageVersion> non_ssa_version_ =
-        std::make_shared<IRStageVersion>();
-    std::shared_ptr<IRStageVersion> ssa_version_ =
-        std::make_shared<IRStageVersion>();
-    std::shared_ptr<IRStageVersion> optimized_ssa_version_ =
-        std::make_shared<IRStageVersion>();
+    std::shared_ptr<IRStageVersion> non_ssa_version_ = std::make_shared<IRStageVersion>();
+    std::shared_ptr<IRStageVersion> ssa_version_ = std::make_shared<IRStageVersion>();
+    std::shared_ptr<IRStageVersion> optimized_ssa_version_ = std::make_shared<IRStageVersion>();
     std::vector<std::unique_ptr<FunctionUnit>> nested_functions_;
 };
 
@@ -224,25 +254,21 @@ public:
     IRModule& operator=(IRModule&&) = delete;
 
     [[nodiscard]] SourceType source_type() const noexcept { return source_type_; }
-    // 持久化当前阶段，并在整个模块内共用一张常量表。
-    // 包含 MAT 常量时，必须显式指定资源目录。
-    [[nodiscard]] std::string
-    to_string(const std::filesystem::path &resource_directory = {},
-              const std::filesystem::path &constant_directory = "constants") const;
-    [[nodiscard]] std::string function_path(const FunctionUnit *function) const;
     [[nodiscard]] ModuleType module_type() const noexcept { return module_type_; }
+
     [[nodiscard]] const std::optional<std::filesystem::path>& source_path() const noexcept {
         return path_;
     }
-    [[nodiscard]] const CommandUnit* command_unit() const noexcept {
-        return command_unit_.get();
-    }
+
+    [[nodiscard]] const CommandUnit* command_unit() const noexcept { return command_unit_.get(); }
+
     [[nodiscard]] const FunctionUnit* entry_function() const noexcept {
         return module_type_ == ModuleType::FunctionFile && !functions_.empty()
-                   ? functions_.front().get() : nullptr;
+                   ? functions_.front().get()
+                   : nullptr;
     }
-    [[nodiscard]] const std::vector<std::unique_ptr<FunctionUnit>>&
-    functions() const noexcept {
+
+    [[nodiscard]] const std::vector<std::unique_ptr<FunctionUnit>>& functions() const noexcept {
         return functions_;
     }
     // 只查找模块直接拥有的函数；不遍历嵌套函数，也不执行 M 语言的可见性检查。
@@ -250,7 +276,9 @@ public:
 
     void set_command_unit(std::unique_ptr<CommandUnit>&& unit);
     // 按传入顺序保存函数；函数文件的主函数由调用处放在首位。
-    void set_functions(std::vector<std::pair<std::string, std::unique_ptr<FunctionUnit>>>&& functions);
+    void
+    set_functions(std::vector<std::pair<std::string, std::unique_ptr<FunctionUnit>>>&& functions);
+
 private:
     SourceType source_type_;
     ModuleType module_type_;

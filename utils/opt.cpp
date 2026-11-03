@@ -1,4 +1,5 @@
 #include "ir/ir_io.h"
+#include "Transform/pass_manager.h"
 
 #include <filesystem>
 #include <iostream>
@@ -18,7 +19,7 @@ OPTIONS:
   -version, --version    Show version
   -S                    Emit textual IR (currently the only output format)
   -o <filename|->       Output file; '-' or omitted means stdout
-  -passes=<pipeline>    Pass pipeline; currently only an empty pipeline is supported
+  -passes=<pipeline>    Pass pipeline; supports mem2reg and function(mem2reg)
   -disable-output       Read and validate IR without writing output
   -print-passes         List available passes and exit
   -resource-dir=<path>  Base directory for relative MAT references on stdin
@@ -27,7 +28,7 @@ OPTIONS:
 
 An omitted input filename means stdin. File input resolves MAT references relative
 to the input file. For modules with MAT constants, prefer -o to export the IR and
- its companion files together. No optimization passes are registered yet.
+ its companion files together. Available pass: mem2reg.
 )";
 }
 struct Options {
@@ -36,17 +37,17 @@ struct Options {
     bool disable_output = false;
     bool show_help = false, version = false, print_passes = false;
 };
-Options parse(int argc, char **argv) {
+Options parse(int argc, char** argv) {
     Options options;
     bool positional = false;
-    auto set = [](auto &target, auto value, const char *name) {
+    auto set = [](auto& target, auto value, const char* name) {
         if (target)
             throw std::invalid_argument(std::string("duplicate option: ") + name);
         target = std::move(value);
     };
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        auto next = [&]() -> std::string {
+        auto next = [&i, argc, argv, &arg]() -> std::string {
             if (i + 1 == argc)
                 throw std::invalid_argument("missing value for " + arg);
             return argv[++i];
@@ -92,7 +93,7 @@ Options parse(int argc, char **argv) {
 }
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
     try {
         auto options = parse(argc, argv);
         if (options.show_help) {
@@ -104,13 +105,10 @@ int main(int argc, char **argv) {
             return 0;
         }
         if (options.print_passes) {
-            std::cout
-                << "No optimization passes registered. Use -passes='' for an empty pipeline.\n";
+            std::cout << "Function passes:\n  mem2reg\n";
             return 0;
         }
-        if (options.pipeline && options.pipeline->find_first_not_of(" \t\r\n") != std::string::npos)
-            throw std::invalid_argument("unsupported pass pipeline: " + *options.pipeline +
-                                        "; no optimization passes registered");
+        auto passes = baltam::build_pass_pipeline(options.pipeline.value_or(""));
         std::unique_ptr<baltam::IRModule> module;
         if (!options.input || *options.input == "-") {
             std::ostringstream buffer;
@@ -122,6 +120,7 @@ int main(int argc, char **argv) {
         } else {
             module = baltam::read_ir_file(*options.input);
         }
+        passes.run(*module);
         if (options.disable_output)
             return 0;
         if (options.output && *options.output != "-") {
@@ -129,13 +128,13 @@ int main(int argc, char **argv) {
         } else {
             // 先生成完整文本，避免失败时向标准输出写入不完整的 IR。
             const auto text =
-                module->to_string(options.resources.value_or(std::filesystem::path{}));
+                baltam::write_ir(*module, options.resources.value_or(std::filesystem::path{}));
             std::cout << text;
             if (!std::cout)
                 throw std::runtime_error("failed to write stdout");
         }
         return 0;
-    } catch (const std::exception &error) {
+    } catch (const std::exception& error) {
         std::cerr << "opt: error: " << error.what() << '\n';
         return 1;
     }

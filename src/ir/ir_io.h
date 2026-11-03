@@ -33,6 +33,11 @@ private:
     ConstantEncoder constants_;
 };
 
+// 输出完整模块及常量元数据；包含 MAT 常量时须提供资源目录。
+[[nodiscard]] std::string write_ir(const IRModule& module,
+                                   const std::filesystem::path& resource_directory = {},
+                                   const std::filesystem::path& constant_directory = "constants");
+
 // 仅当常量引用相对 MAT 路径时，才需要提供资源目录。
 [[nodiscard]] std::unique_ptr<IRModule>
 read_ir(std::string_view text, const std::filesystem::path& resource_directory = {});

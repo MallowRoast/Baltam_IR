@@ -1,6 +1,6 @@
 # Baltam IR 组织与缓存设计
 
-本文同时记录当前结构和后续设计。标为“目标设计”“后续”或“规划中”的内容尚未由当前 builder 或运行时实现。
+本文同时记录当前结构和后续设计。Value、Use、User 已接入指令构建、阶段克隆、mem2reg 和 IR 读写。标为“目标设计”“后续”或“规划中”的其他内容尚未由当前 builder 或运行时实现。
 
 ## 一、IR 怎么组织
 
@@ -24,6 +24,24 @@ IRModule
 - 类方法和普通函数使用相同的 `FunctionUnit` 结构。
 - 类文件仍由 `ModuleType::ClassFile` 标识；类声明和属性默认值表达式的 IR 归属待类语法设计时确定。
 - IR 系统不持有运行时工作空间或已解析的类元数据。
+
+#### 值与引用关系
+
+代码单元的当前阶段版本进一步组织为：
+
+```text
+IRStageVersion
+├── ValueTable
+│   └── unique_ptr<Value>：每个结果的定义信息和使用链入口
+└── BasicBlock(s)
+    └── unique_ptr<Instruction>，Instruction 继承 User
+        ├── 输入：unique_ptr<Use>，引用同版本的 Value
+        └── 输出：一个或多个 ValueId，分别对应 ValueTable 中的 Value
+```
+
+结构所有权与引用关系分开：阶段版本拥有块和值，块拥有指令，User 拥有 Use；Value 与 Use 之间只有非拥有引用。普通值使用只能连接同一个阶段版本，不通过 use-list 管理模块、函数、基本块或 slot 的引用。
+
+`ValueId` 是编号，`Value` 是稳定对象，`Use` 是一个输入位置上的引用，`User` 是这些输入的拥有者。不同阶段的相同编号不代表同一个 Value。多结果指令的每个结果有独立 Value，不把整个 Instruction 当成单个 Value。
 
 ### 1.2 IRModule
 
@@ -142,13 +160,13 @@ private:
 | `optimized_ssa_version_` | 优化后的 SSA 基本块和值表 |
 | `nested_functions_` | 独占拥有直接嵌套的函数 |
 
-构造 `FunctionUnit` 时仍传入源码中的入参和出参名称，但函数内部只保存有序的 `SlotId` 列表；名称与槽位属性由自身的 `SlotTable` 保存。同名入参与出参复用一个 `SlotId`，例如 `function x = f(x)`；输入和输出身份由各自的列表确定，槽位不保存入参或出参类别。`FunctionUnit::current_stage()` 记录当前处理阶段，初始为 Non-SSA，可通过 `set_current_stage()` 更新；三个 IR 阶段各自保存基本块和值表。基本块通过对应的 `stage_version(stage)->add_block(function)` 创建，只保存所属 `IRUnit*`，不保存阶段内序号。嵌套函数通过 `append_nested_function()` 加入；该接口会同步设置新函数及其已有子函数的父模块指针。`current_version()` 按 `current_stage()` 返回当前阶段版本；当前没有阶段版本替换接口。
+构造 `FunctionUnit` 时仍传入源码中的入参和出参名称，但函数内部只保存有序的 `SlotId` 列表；名称与槽位属性由自身的 `SlotTable` 保存。同名入参与出参复用一个 `SlotId`，例如 `function x = f(x)`；输入和输出身份由各自的列表确定，槽位不保存入参或出参类别。`FunctionUnit::current_stage()` 记录当前处理阶段，初始为 Non-SSA，可通过 `set_current_stage()` 更新；三个 IR 阶段各自保存基本块和值表。基本块通过对应的 `stage_version(stage)->add_block(function)` 创建，只保存所属 `IRUnit*`，不保存阶段内序号。嵌套函数通过 `append_nested_function()` 加入；该接口会同步设置新函数及其已有子函数的父模块指针。`current_version()` 按 `current_stage()` 返回当前阶段版本，通过 `set_stage_version()` 发布阶段版本；mem2reg 在独立副本上转换，完成后选择 SSA 版本，保留 Non-SSA。
 
 类方法与 Local Function 不需要通过 `FunctionType`、`is_method_` 或 `is_local_` 区分。类归属、访问权限和继承关系由运行时 `object_meta` 管理。
 
 ### 1.5.1 AnonymousFunctionUnit
 
-以下是尚未实现的目标设计：`AnonymousFunctionUnit` 保存非拥有的 `IRUnit* lexical_parent_`、按源码顺序排列的 `param_slots_`、按捕获布局排列的 `capture_slots_`，并像 `FunctionUnit` 一样分别拥有三个 IR 阶段版本。匿名函数体没有普通函数名或具名输出变量；表达式结果通过 `ReturnInst.values` 返回。`IRUnit` 已有通用 slot 表，参数和捕获槽位的名称绑定仍由后续构建流程补全。
+以下是尚未实现的目标设计：`AnonymousFunctionUnit` 保存非拥有的 `IRUnit* lexical_parent_`、按源码顺序排列的 `param_slots_`、按捕获布局排列的 `capture_slots_`，并像 `FunctionUnit` 一样分别拥有三个 IR 阶段版本。匿名函数体没有普通函数名或具名输出变量；表达式结果的输出槽位约定仍需在实现匿名函数时确定。`IRUnit` 已有通用 slot 表，参数和捕获槽位的名称绑定仍由后续构建流程补全。
 
 匿名函数句柄的构造方式和捕获值表示留待后续设计。词法父指针不延长父单元生命周期。
 
@@ -205,17 +223,17 @@ IRModule
 
 ### 1.8 BasicBlock 所有权
 
-每个 `IRStageVersion` 独占拥有该阶段的基本块；`CommandUnit` 和 `FunctionUnit` 持有相应版本。`BasicBlock` 保存非拥有的 `IRUnit* parent_` 和 `std::vector<std::unique_ptr<Instruction>>`；每条指令保存指向所属基本块的非拥有父指针，通过 `add_instruction<Inst>(...)` 创建并持有指令。`GotoInst` 与 `BranchInst` 使用非拥有 `BasicBlock*` 保存跳转目标，`ReturnInst` 保存按顺序返回的值；三者都是终结指令。`BasicBlock::terminator()` 返回末尾的终结指令；添加终结指令后不得再向该块追加指令。当前不保存前驱或后继表，也未检查跳转目标是否属于同一代码单元和 IR 阶段。`IRStageVersion::entry_block()` 保存入口基本块指针，创建的第一个基本块默认作为入口。
+每个 `IRStageVersion` 独占拥有该阶段的基本块；`CommandUnit` 和 `FunctionUnit` 持有相应版本。`BasicBlock` 保存非拥有的 `IRUnit* parent_` 和 `std::vector<std::unique_ptr<Instruction>>`；每条指令保存指向所属基本块的非拥有父指针，通过 `add_instruction<Inst>(...)` 创建并持有指令。`GotoInst` 与 `BranchInst` 使用非拥有 `BasicBlock*` 保存跳转目标，`ReturnInst` 不携带操作数，函数返回值由返回槽位提供；三者都是终结指令。`BasicBlock::terminator()` 返回末尾的终结指令；添加终结指令后不得再向该块追加指令。当前不保存前驱或后继表，也未检查跳转目标是否属于同一代码单元和 IR 阶段。`IRStageVersion::entry_block()` 保存入口基本块指针，创建的第一个基本块默认作为入口。
 
 `ConstInst` 按 [M 语法 IR 设计](M语法与IR设计.md)保存 `const_ba_obj_ptr value` 和 `ValueId result`，在 Non-SSA 与 SSA 阶段使用同一种指令。`const_ba_obj_ptr` 是 `std::shared_ptr<const ba_obj>` 的别名；`value` 持有运行前确定的常量对象。运行时修改该值时仍须遵守写时复制语义。`ba_obj` 在 IR 头文件中仅前置声明，实际对象由运行时创建。`ValueId` 是只保存一个 `std::uint32_t index` 的结构体，不带无效哨兵值；构建调用处通过所属 `IRStageVersion::add_value` 分配编号并登记定义。
 
-`ConcatInst` 保存按源码顺序排列的非空 `items`、`result`、水平或竖直 `axis` 和 `is_dynamic`，Non-SSA 与 SSA 共用此结构。空 `[]` 应使用 `ConstInst`。当前已有值定义表，但尚无类型事实；当前 builder 根据输入的 `ValueInfo.is_constant` 设置 `is_dynamic`，后续优化仍需确定更完整的动态判定规则；仅凭 `is_dynamic == false` 不能跳过运行时 `horzcat`／`vertcat` 的分派检查。
+`ConcatInst` 保存按源码顺序排列的非空 `items`、`result`、水平或竖直 `axis` 和 `is_dynamic`，Non-SSA 与 SSA 共用此结构。空 `[]` 应使用 `ConstInst`。当前已有值定义表，但尚无类型事实；当前 builder 根据输入的 `Value::is_constant()` 设置 `is_dynamic`，后续优化仍需确定更完整的动态判定规则；仅凭 `is_dynamic == false` 不能跳过运行时 `horzcat`／`vertcat` 的分派检查。
 
 `CellConstructInst` 保存按源码顺序排列的非空 `items`、`rows`、`cols` 和 `result`，要求元素个数恰好等于行数乘列数；这也隐含行列数非零，无须分别检查。它不保存 `is_dynamic`；空 `{}` 使用 `ConstInst`。字段先放 `vector` 和 `size_t`，再放 `ValueId`，避免额外的字段间对齐空隙。
 
 `ColonInst` 保存 `result`、`start`、可选 `step`、`stop` 和初始为 `true` 的 `needs_runtime_dispatch`。`step` 为空表示源码省略步长，与显式写出步长区分；索引中的单独 `:` 不使用该指令。当前没有保存已解析 `colon` 目标的字段，因此将 `needs_runtime_dispatch` 改为 `false` 后如何执行已解析目标，仍须在分派设计中确定。
 
-`MagicColonInst` 只保存 `result`，表示索引中单独 `:` 的占位值，不生成序列，也不参与普通 `colon` 函数分派。索引指令的字段可引用这个结果；当前 builder 尚未生成 `MagicColonInst`。后续构建时可将其 `ValueInfo.is_constant` 标为常量；运行时占位值表示尚未实现，执行时必须按索引位置解释其语义。
+`MagicColonInst` 只保存 `result`，表示索引中单独 `:` 的占位值，不生成序列，也不参与普通 `colon` 函数分派。索引指令的字段可引用这个结果；当前 builder 尚未生成 `MagicColonInst`。后续构建时可将其 `Value::is_constant()` 标为常量；运行时占位值表示尚未实现，执行时必须按索引位置解释其语义。
 
 `MagicEndInst` 保存按内层到外层排列的候选索引上下文及 `result`；每个上下文保存 `Operand callee_or_base`、从 1 开始的 `dim` 与 `nindices`。`Operand` 用 `std::variant<ValueId, InternedString>` 区分已求出的值与未解析名字。已确定为变量的引用先通过 `LoadSlotInst` 得到 `ValueId`，不得退回名字查找；运行时绑定失效时由槽位读取报告错误。`SlotId` 与 `ValueId` 是各自保存一个 `std::uint32_t index` 的不同结构体，二者不能混用；匿名函数参数与捕获也只保存 `SlotId`。当前 `InternedString` 仍是 `std::string` 别名，并非真正的字符串池句柄；候选上下文的尺寸由该字符串备选类型主导，后续若引入字符串池可重新测量布局。
 
@@ -225,7 +243,7 @@ IRModule
 
 `GlobalDeclInst` 和 `PersistentDeclInst` 各保存非空的 `std::vector<SlotId>`，都不产生 `ValueId`。声明指令中的槽位按 `SlotId` 引用；其名称由所属代码单元的 `SlotTable` 查询。`BasicBlock` 保存所属 `IRUnit*`，但加入指令时尚不检查 `PersistentDeclInst` 是否位于函数内；重复声明复用同一 slot、静态绑定冲突及运行时环境副作用的表示仍须由后续构建与执行流程确定。
 
-`BranchInst` 按条件值选择真假目标，`GotoInst` 直接指向目标块，`ReturnInst` 结束当前代码单元；脚本或命令输入可返回空 `values`。当前只建立跳转目标与基本块末尾的结构约束，条件真假转换、返回值读取和 CFG 边的验证由后续执行与构建流程负责。
+`BranchInst` 按条件值选择真假目标，`GotoInst` 直接指向目标块，`ReturnInst` 结束当前代码单元；返回指令统一打印为无操作数的 `ret`。当前只建立跳转目标与基本块末尾的结构约束，条件真假转换、返回值读取和 CFG 边的验证由后续执行与构建流程负责。
 
 索引与成员访问按 [M 语法 IR 设计](M语法与IR设计.md)实现了 `ApplyInst`、`ValueApplyInst`、`CallInst`、`ParenReferenceInst`、`BraceReferenceInst`、`DotAccessInst`、`DotReferenceInst`、`ParenAssignInst`、`ParenDeleteInst`、`BraceAssignInst` 和 `DotAssignInst`。圆括号和点号表达式的 `Operand` 只保留未消歧名字或已求值结果；已绑定变量先生成 `LoadSlotInst`；`CallInst` 仅保存按名字调用的 `InternedString callee`，函数句柄等按值调用由 `ValueApplyInst` 处理。三种调用或应用指令的 `arguments` 均保存已求值的 `ValueId`。构造函数不再统一检查 `Operand` 中的空名字，名字有效性由语法与构建流程负责；独立的成员名等字符串字段仍各自检查。`CallInst.m_function_target` 仅指向同模块词法绑定的 M 函数，不保存外部 M 函数或插件的运行时缓存；局部函数与嵌套函数的工作区差异由词法关系处理，不增加分派类别。已确定的圆括号和花括号索引节点保存按源码顺序求值后的 `ValueId` 下标；索引与静态成员取值／赋值节点不保存 `DispatchType`，内置行为或对象协议由执行时的 base 决定。赋值与删除都输出 `updated_base`，调用处须为它分配新的值编号并负责将根变量写回。编号归属、值定义顺序和 SSA 唯一性由表及后续构建流程处理。
 
@@ -474,7 +492,7 @@ IRCache
 
 ### 4.2 各阶段 IR 的元数据与 deopt 对应关系
 
-三个基本块集合不能单独构成完整的可执行 IR。基础元数据已按以下 `SlotTable`、`ValueTable` 设计并实现。动态绑定状态、源码位置，以及 SSA 指令到 Non-SSA 恢复位置的对应关系仍需后续设计。Optimized SSA 还需要保存优化依赖和相应的回退信息。
+三个基本块集合不能单独构成完整的可执行 IR。当前已实现 `SlotTable`，以及通过 Value、Use、User 维护双向引用关系的 `ValueTable`。动态绑定状态、源码位置，以及 SSA 指令到 Non-SSA 恢复位置的对应关系仍需后续设计。Optimized SSA 还需要保存优化依赖和相应的回退信息。
 
 #### SlotTable
 
@@ -488,24 +506,122 @@ struct SlotInfo {
 
 构建调用处通过表分配 `SlotId`，`SlotTable::find()` 按 ID 返回表项的常量引用，越界时抛出 `std::out_of_range`；名字解析依赖词法作用域和运行时绑定，不能仅用这张表的名称作通用查找键，也不强制所有表项名称唯一。全局和持久变量当前是否仍绑定由运行时状态决定。表在模块发布后不再原地追加；优化版本若需要新的存储槽位，须另行确定版本私有槽位的归属。
 
-#### ValueTable
+#### 输入与结果的存储原则
 
-每个代码单元的每个 IR 阶段版本各有一张 `ValueTable`。`ValueId` 只在该代码单元的该阶段版本内有效；不同阶段、不同版本或不同代码单元可以出现相同的数字编号。表用 `std::vector<ValueInfo>` 按 `ValueId` 索引，表项不重复保存编号：
+`ValueTable` 拥有每个结果的 Value，Instruction 继承 User 并独占拥有输入 Use。输入不再保存可独立修改的 ValueId 字段；指令的结果编号仍由各子类保存。值表、输入关系和结果编号共同属于同一阶段版本。
+
+#### Value：每个结果的稳定对象
 
 ```cpp
-struct ValueInfo {
-    Instruction* def;      // 非拥有，指向同一阶段版本中的指令
-    std::uint32_t index;    // 定义指令的第几个结果，从 0 开始
-    enum class Form : std::uint8_t { Single, MaybePack } form;
-    bool is_constant;
+class Value final {
+public:
+    enum class Form : std::uint8_t { Single, MaybePack };
+
+private:
+    friend class Use;
+    friend class ValueTable;
+
+    ValueId id_;
+    Instruction* definition_ = nullptr;
+    std::uint32_t result_index_ = 0;
+    Form form_ = Form::Single;
+    bool is_constant_ = false;
+    Use* first_use_ = nullptr;
 };
 ```
 
-一个结果编号只绑定一条定义指令；`CallInst` 等多结果指令的不同 `ValueId` 分别保存各自的 `index`。`form` 默认为 `Single`；花括号取值等可能产生逗号分隔列表的结果在绑定时标记为 `MaybePack`。它只表示该结果可能承载多个值，不记录运行时元素数量，也不自动实现函数实参或出参的展开；是否标记由构建调用处根据表达式语境决定。`is_constant` 默认为 `false`，当前 builder 将 `ConstInst` 的结果标为常量，并依据输入标记传播到 `ConcatInst`、`ColonInst`、`UnaryInst` 和 `BinaryInst` 的结果；后续生成 `MagicColonInst` 时也可将其结果标为常量；索引冒号仍须由指令类型区分语义。类型和 shape 事实暂不加入表项，待运行时类型与维度表示确定后再设计。`IRStageVersion::add_value(ValueInfo)` 检查定义指令确实由该版本的基本块持有，再追加信息并返回新 `ValueId`。调用处先根据 `values().size()` 确定指令结果编号，创建指令后再追加信息；越界编号查询抛出 `std::out_of_range`。多结果指令的值表登记方式尚待设计。
+Value 提供 `id()`、`definition()`、`result_index()`、`form()`、`is_constant()`、`use_empty()` 和 `first_use()` 查询。禁止复制和移动，使用链不能通过默认拷贝产生副本。
 
-`ValueInfo::def` 的生命周期依赖同阶段的基本块。当前基本块集合与 `ValueTable` 已放在同一个 `IRStageVersion` 中，替换阶段版本时一起替换。所有值在创建时即绑定定义；`IRStageVersion::add_value()` 会拒绝空指针和其他版本拥有的指令。`SlotTable` 归代码单元所有，不随单个 SSA 版本重建。
+`definition_` 和 `result_index_` 唯一定位定义指令的某个输出。例如多结果调用的两个输出分别维护各自的使用链。`form_` 表示单值或可能承载逗号分隔列表，不记录运行时展开数量；`is_constant_` 保留现有常量性标记。暂不加入固定类型和 shape 字段。
 
-`LoadSlotInst`／`StoreSlotInst`、全局／持久声明以及普通函数的入参／出参列表已只保存 `SlotId`，名称通过所属代码单元的 `SlotTable` 查询。匿名函数参数与捕获也只保存 `SlotId`。
+值表改为 `std::vector<std::unique_ptr<Value>>`。表扩容、编号压缩都不移动 Value，Use 可以保存稳定的 Value 指针。ValueTable 通过 `reserve(id)` 预留记录，通过 `define(id, instruction, result_index)` 绑定定义，支持循环 PHI 等前向引用。
+
+`definition_ == nullptr` 仅表示构建期间定义尚未补齐，不表示运行时 Undefined。完成构建后的缺失定义由 Verifier 检查。
+
+#### Use：一个输入位置上的引用
+
+```cpp
+class Use final {
+private:
+    friend class User;
+
+    User* user_;
+    std::size_t operand_index_;
+    Value* target_ = nullptr;
+    Use* previous_ = nullptr;
+    Use* next_ = nullptr;
+    std::optional<ValueId> pending_value_;
+};
+```
+
+Use 提供 `user()`、`operand_index()`、`value()`、`target()`、`next_use()` 和 `set(optional<ValueId>)`。禁止复制和移动。`previous_`、`next_` 属于目标 Value 的使用链，`next_use()` 不是 User 的下一个操作数。
+
+同一条指令重复使用同一个值时建立独立 Use：`%2 = plus %1, %1` 对 `%1` 有两条 Use，两条 Use 的 User 相同，操作数序号不同。
+
+- User 未绑定阶段时，Use 使用 `pending_value_` 保存输入编号。
+- User 已绑定时，Use 链接到 Value，`value()` 读取目标的当前 `id()`，暂存编号清空。
+- 已绑定 Use 的空目标表示缺省输入，不加入任何普通值的使用链；PHI 将其解释为 Undefined，Colon 将其解释为未提供步长。
+- 是否已绑定取决于 User 的阶段指针，不能仅根据 `target_ == nullptr` 判断。
+
+`set()` 先解析新目标，再将自身从旧链解除并挂入新链。普通设置、设置 Undefined 和析构都要维护链关系；双向链支持常数时间解除引用。
+
+#### User：输入引用的唯一拥有者
+
+```cpp
+class User {
+private:
+    IRStageVersion* version_ = nullptr;
+    std::vector<std::unique_ptr<Use>> operands_;
+};
+
+class Instruction : public User {
+    // 指令类型、父基本块及各子类的结果信息仍由现有指令结构保存。
+};
+```
+
+User 提供 `operand_count()`、只读 `operand(index)`、`set_operand(index, value)` 和 `drop_all_references()`。子类通过受保护的 `append_operand`、`insert_operand`、`erase_operand` 维护可变输入。
+
+每个 Use 单独分配，操作数列表扩容时 Use 地址不变。插入或删除操作数后，更新后续 Use 的 `operand_index_`。
+
+输入以 User 的操作数列表为唯一存储位置。BinaryInst 的 `lhs()`、`rhs()` 和设置接口只是访问操作数 0、1，不另存公开的 `ValueId` 副本。调用实参、动态字段值、值形式的 callee/base 和 MagicEnd 候选中的值引用均已接入 Use，不保留绕过 Use 更新的修改路径。各指令的集合访问器返回当前输入编号的快照；修改输入须调用受控接口，修改快照不会修改 IR。
+
+SlotId、静态名字、基本块目标和同模块静态函数目标不属于普通值操作数，仍按各自语义保存。结果 ValueId 也不进入输入列表。
+
+#### PHI 与 Undefined
+
+PHI 的前驱列表和 User 操作数列表一一对应，通过 `add_incoming`、`set_incoming_value`、`erase_incoming` 统一维护：
+
+```text
+%3 = phi [bb1, %1], [bb2, Undefined]
+```
+
+第一个输入挂入 `%1` 的使用链，第二个输入保留一个空目标 Use。Undefined 不占值编号、不创建 Value。未回填的前驱单独跟踪，不能用 Undefined 隐藏遗漏输入。前驱本身不挂到普通值的使用链。
+
+这只是 IR 引用表示，运行时未定义状态及实际读取时报错的语义不由 Use/User 实现。
+
+#### 替换、删除与复制
+
+阶段级 `replace_all_uses(old, new)` 沿旧 Value 的使用链逐条调用 Use::set，不再扫描整个阶段。每次移动会修改链，因此循环处理旧链表头，不能沿已经失效的普通迭代器继续前进。替换成自身直接返回。
+
+删除指令前，所有结果的 use-list 必须为空；删除时解除其全部输入，清除值定义并释放对象。阶段整体销毁必须先统一断开所有输入，再释放指令和值，不能依赖成员析构次序碰巧正确。`drop_all_references()` 保留输入位置并断开目标，主要服务于删除和整体销毁，不表示普通变换可以任意生成 Undefined 输入。
+
+User 自定义拷贝构造读取原操作数编号，创建全新且未绑定的 Use，不复制所属阶段或链表指针。子类仍可复用拷贝构造。阶段克隆需创建独立 Value，重映射块目标和 PHI 前驱，最后绑定到新阶段的值记录；不能跨阶段共享 Value 或 Use。只读常量数据仍可按现有规则共享。
+
+编号压缩更新 Value::id 和结果上的 ValueId；已绑定 Use 从目标 Value 获取新编号，不重建使用链。调用方保存的旧 ValueId 在压缩后失效。
+
+#### 与分析、变换和持久化的关系
+
+use-def 和 def-use 是 IR 的基础关系，不作为可以过期的 Analysis 缓存。Analysis 和 Transform 通过受控接口修改，Verifier 检查结构一致性：每条有效 Use 恰好位于目标使用链一次，User 与操作数位置一致，定义和引用属于同阶段。
+
+支配关系、优化合法性和未定义读取语义不由 Use::set 证明，仍由相应 pass 保证。Use 析构、挂链和脱链属于结构维护，不是重复执行完整 IR 验证。
+
+持久化继续使用 `%N`，不写进程指针和使用链；读取时通过预留记录和绑定输入恢复双向关系。CFG、支配分析和调用点缓存的职责不变。SlotTable 仍由代码单元拥有，不随 ValueTable 迁移。
+
+#### 已移除的旧实现
+
+已移除 ValueInfo、逐类扫描和改写输入的分支代码，以及读取器单独保存的定义表和引用列表。读取器直接向 ValueTable 预留并补齐定义，完成后检查未定义记录；常量性也直接记录在 Value 中。`replace_all_uses` 使用使用链，`compact_values()` 不再扫描和重写输入编号。
+
+完整 IR 合法性检查仍由后续 Verifier Pass 承担；Analysis 和 Transform 不重复执行该验证。
 
 按[新解释器架构](新解释器架构.md)和[Deopt 设计思路](SSA到非SSA的运行时回退设计.md)，SSA 回退需要恢复 slot 的值及绑定状态，并区分调用前、调用后和异常路径的继续位置。后续应为每个 IR 版本固定这些元数据的归属与生命周期，避免基本块已更新而映射仍指向旧版本。
 
@@ -525,7 +641,7 @@ struct ValueInfo {
 
 ### 4.5 构建接口与当前代码状态
 
-当前仓库已实现 `IRModule`、代码单元、基本块、针对已支持语法的 `IRBuilder`，以及文件来源的 `IRCache`。`IRBuilder` 支持从脚本和函数文件构建模块，并为脚本主体、局部函数及嵌套函数生成 Non-SSA IR；动态名字消歧、独立 IR 检查和未覆盖语法仍待实现。当前 builder 生成的指令已有文本输出；`MagicColonInst` 和 `MagicEndInst` 等尚未由 builder 生成的指令仍需补充 `to_string()`。
+当前仓库已实现 `IRModule`、代码单元、基本块、针对已支持语法的 `IRBuilder`，以及文件来源的 `IRCache`。`IRBuilder` 支持从脚本和函数文件构建模块，并为脚本主体、局部函数及嵌套函数生成 Non-SSA IR；动态名字消歧、独立 IR 检查和未覆盖语法仍待实现。当前 builder 生成的指令已有文本输出；`MagicColonInst` 和 `MagicEndInst` 等尚未由 builder 生成的指令仍需在 ir_io 中补充文本编解码。
 
 ---
 
