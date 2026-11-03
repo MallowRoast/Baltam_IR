@@ -11,7 +11,398 @@
 #include <utility>
 
 namespace baltam {
+
 namespace {
+
+std::string dot_member(const Operand& member) {
+    if (const auto* name = std::get_if<InternedString>(&member))
+        return "." + *name;
+    return ".(%" + std::to_string(std::get<ValueId>(member).index) + ")";
+}
+
+std::string result_prefix(const std::vector<ValueId>& results) {
+    if (results.empty())
+        return {};
+    if (results.size() == 1)
+        return "%" + std::to_string(results.front().index) + " = ";
+    std::string text = "[";
+    for (std::size_t i = 0; i < results.size(); ++i) {
+        if (i)
+            text += ", ";
+        text += "%" + std::to_string(results[i].index);
+    }
+    return text + "] = ";
+}
+
+const char* dispatch_name(DispatchType type) {
+    switch (type) {
+    case DispatchType::Dynamic:
+        return "dynamic";
+    case DispatchType::MFunction:
+        return "mfunction";
+    case DispatchType::Builtin:
+        return "builtin";
+    case DispatchType::Internal:
+        return "internal";
+    case DispatchType::Plugin:
+        return "plugin";
+    }
+    throw std::invalid_argument("无效的调用分派类型");
+}
+
+std::string function_path(const IRModule& module, const FunctionUnit* target) {
+    std::string found;
+    auto visit = [target, &found](auto&& self, const FunctionUnit& f, std::string path) -> bool {
+        if (&f == target) {
+            found = std::move(path);
+            return true;
+        }
+        for (std::size_t i = 0; i < f.nested_functions().size(); ++i)
+            if (self(self, *f.nested_functions()[i], path + "." + std::to_string(i)))
+                return true;
+        return false;
+    };
+    for (std::size_t i = 0; i < module.functions().size(); ++i)
+        if (visit(visit, *module.functions()[i], std::to_string(i)))
+            return found;
+    throw std::invalid_argument("静态调用目标不属于当前模块");
+}
+
+std::string print_instruction(const Instruction& instruction, ConstantEncoder& constants) {
+    switch (instruction.type()) {
+    case Instruction::Type::Const:
+        return constants.encode(static_cast<const ConstInst&>(instruction));
+    case Instruction::Type::Phi: {
+        const auto& inst = static_cast<const PhiInst&>(instruction);
+        if (inst.operand_count() == 0)
+            throw std::invalid_argument("PHI 指令缺少前驱输入");
+        std::string text = "%" + std::to_string(inst.result.index) + " = phi ";
+        for (std::size_t i = 0; i < inst.operand_count(); ++i) {
+            const auto incoming = inst.incoming(i);
+            if (!incoming.predecessor)
+                throw std::invalid_argument("PHI 指令的前驱不能为空");
+            if (i)
+                text += ", ";
+            text += "[" + incoming.predecessor->label() + ", ";
+            text += incoming.value ? "%" + std::to_string(incoming.value->index) : "Undefined";
+            text += "]";
+        }
+        return text;
+    }
+    case Instruction::Type::StoreSlot: {
+        const auto& inst = static_cast<const StoreSlotInst&>(instruction);
+        return "store slot" + std::to_string(inst.slot.index) + " %" +
+               std::to_string(inst.value().index);
+    }
+    case Instruction::Type::BraceReference: {
+        const auto& inst = static_cast<const BraceReferenceInst&>(instruction);
+        const auto indices_input = inst.indices();
+        std::string text = "%" + std::to_string(inst.result.index) + " = brace_ref %" +
+                           std::to_string(inst.base().index);
+        for (ValueId index : indices_input)
+            text += ", %" + std::to_string(index.index);
+        return text;
+    }
+    case Instruction::Type::BraceAssign: {
+        const auto& inst = static_cast<const BraceAssignInst&>(instruction);
+        const auto indices_input = inst.indices();
+        std::string text = "%" + std::to_string(inst.result.index) + " = brace_assign %" +
+                           std::to_string(inst.base().index);
+        for (ValueId index : indices_input)
+            text += ", %" + std::to_string(index.index);
+        return text + ", %" + std::to_string(inst.value().index);
+    }
+    case Instruction::Type::Apply: {
+        const auto& inst = static_cast<const ApplyInst&>(instruction);
+        const auto arguments_input = inst.arguments();
+        const auto callee_or_base_input = inst.callee_or_base();
+        std::string text = result_prefix(inst.results) + "apply ";
+        if (const auto* name = std::get_if<InternedString>(&callee_or_base_input))
+            text += *name;
+        else
+            text += "%" + std::to_string(std::get<ValueId>(callee_or_base_input).index);
+        text += "(";
+        for (std::size_t i = 0; i < arguments_input.size(); ++i) {
+            if (i)
+                text += ", ";
+            text += "%" + std::to_string(arguments_input[i].index);
+        }
+        return text + ")";
+    }
+    case Instruction::Type::Call: {
+        const auto& inst = static_cast<const CallInst&>(instruction);
+        const auto arguments_input = inst.arguments();
+        std::string text = result_prefix(inst.results) + "call " + inst.callee + "(";
+        for (std::size_t i = 0; i < arguments_input.size(); ++i) {
+            if (i)
+                text += ", ";
+            text += "%" + std::to_string(arguments_input[i].index);
+        }
+        text += ")";
+        if (inst.dispatch_type != DispatchType::Dynamic || inst.m_function_target) {
+            text += " [dispatch=";
+            text += dispatch_name(inst.dispatch_type);
+            if (inst.m_function_target) {
+                if (!inst.parent() || !inst.parent()->parent() ||
+                    !inst.parent()->parent()->parent())
+                    throw std::invalid_argument("静态调用目标需要所属 IRModule");
+                text += ",target=@" +
+                        function_path(*inst.parent()->parent()->parent(), inst.m_function_target);
+            }
+            text += "]";
+        }
+        return text;
+    }
+    case Instruction::Type::ValueApply: {
+        const auto& inst = static_cast<const ValueApplyInst&>(instruction);
+        const auto arguments_input = inst.arguments();
+        std::string text =
+            result_prefix(inst.results) + "value_apply %" + std::to_string(inst.base().index) + "(";
+        for (std::size_t i = 0; i < arguments_input.size(); ++i) {
+            if (i)
+                text += ", ";
+            text += "%" + std::to_string(arguments_input[i].index);
+        }
+        return text + ")";
+    }
+    case Instruction::Type::ParenReference: {
+        const auto& inst = static_cast<const ParenReferenceInst&>(instruction);
+        const auto indices_input = inst.indices();
+        std::string text = "%" + std::to_string(inst.result.index) + " = paren_ref %" +
+                           std::to_string(inst.base().index);
+        for (ValueId index : indices_input)
+            text += ", %" + std::to_string(index.index);
+        return text;
+    }
+    case Instruction::Type::ParenAssign: {
+        const auto& inst = static_cast<const ParenAssignInst&>(instruction);
+        const auto indices_input = inst.indices();
+        std::string text = "%" + std::to_string(inst.result.index) + " = paren_assign %" +
+                           std::to_string(inst.base().index);
+        for (ValueId index : indices_input)
+            text += ", %" + std::to_string(index.index);
+        return text + ", %" + std::to_string(inst.value().index);
+    }
+    case Instruction::Type::ParenDelete: {
+        const auto& inst = static_cast<const ParenDeleteInst&>(instruction);
+        const auto indices_input = inst.indices();
+        std::string text = "%" + std::to_string(inst.result.index) + " = paren_delete %" +
+                           std::to_string(inst.base().index);
+        for (ValueId index : indices_input)
+            text += ", %" + std::to_string(index.index);
+        return text;
+    }
+    case Instruction::Type::DotAccess: {
+        const auto& inst = static_cast<const DotAccessInst&>(instruction);
+        const auto base_or_name_input = inst.base_or_name();
+        const auto member_input = inst.member();
+        std::string base;
+        if (const auto* name = std::get_if<InternedString>(&base_or_name_input))
+            base = *name;
+        else
+            base = "%" + std::to_string(std::get<ValueId>(base_or_name_input).index);
+        return "%" + std::to_string(inst.result.index) + " = dot_access " + base +
+               dot_member(member_input);
+    }
+    case Instruction::Type::DotReference: {
+        const auto& inst = static_cast<const DotReferenceInst&>(instruction);
+        const auto member_input = inst.member();
+        return "%" + std::to_string(inst.result.index) + " = dot_ref %" +
+               std::to_string(inst.base().index) + dot_member(member_input);
+    }
+    case Instruction::Type::DotAssign: {
+        const auto& inst = static_cast<const DotAssignInst&>(instruction);
+        const auto member_input = inst.member();
+        return "%" + std::to_string(inst.result.index) + " = dot_assign %" +
+               std::to_string(inst.base().index) + dot_member(member_input) + ", %" +
+               std::to_string(inst.value().index);
+    }
+    case Instruction::Type::LoadSlot: {
+        const auto& inst = static_cast<const LoadSlotInst&>(instruction);
+        return "%" + std::to_string(inst.result.index) + " = load slot" +
+               std::to_string(inst.slot.index);
+    }
+    case Instruction::Type::Concat: {
+        const auto& inst = static_cast<const ConcatInst&>(instruction);
+        const auto items_input = inst.items();
+        std::string text =
+            "%" + std::to_string(inst.result.index) +
+            (inst.axis == ConcatInst::Axis::Horizontal ? " = horzcat" : " = vertcat");
+        for (std::size_t i = 0; i < items_input.size(); ++i) {
+            text += i == 0 ? " %" : ", %";
+            text += std::to_string(items_input[i].index);
+        }
+        return text;
+    }
+    case Instruction::Type::CellConstruct: {
+        const auto& inst = static_cast<const CellConstructInst&>(instruction);
+        const auto items_input = inst.items();
+        std::string text = "%" + std::to_string(inst.result.index) + " = cell";
+        for (std::size_t i = 0; i < items_input.size(); ++i) {
+            text += i == 0 ? " %" : ", %";
+            text += std::to_string(items_input[i].index);
+        }
+        return text + " : " + std::to_string(inst.rows) + "x" + std::to_string(inst.cols) +
+               " cell array";
+    }
+    case Instruction::Type::Colon: {
+        const auto& inst = static_cast<const ColonInst&>(instruction);
+        std::string text = "%" + std::to_string(inst.result.index) + " = colon %" +
+                           std::to_string(inst.start().index);
+        if (inst.step())
+            text += ", %" + std::to_string(inst.step()->index);
+        return text + ", %" + std::to_string(inst.stop().index);
+    }
+    case Instruction::Type::Unary: {
+        const auto& inst = static_cast<const UnaryInst&>(instruction);
+        const char* name = nullptr;
+        switch (inst.op) {
+        case UnaryOp::Uplus:
+            name = "uplus";
+            break;
+        case UnaryOp::Uminus:
+            name = "uminus";
+            break;
+        case UnaryOp::LogicalNot:
+            name = "not";
+            break;
+        case UnaryOp::Transpose:
+            name = "transpose";
+            break;
+        case UnaryOp::Ctranspose:
+            name = "ctranspose";
+            break;
+        }
+        return "%" + std::to_string(inst.result.index) + " = " + name + " %" +
+               std::to_string(inst.operand().index);
+    }
+    case Instruction::Type::Binary: {
+        const auto& inst = static_cast<const BinaryInst&>(instruction);
+        const char* name = nullptr;
+        switch (inst.op) {
+        case BinaryOp::Add:
+            name = "plus";
+            break;
+        case BinaryOp::Sub:
+            name = "minus";
+            break;
+        case BinaryOp::Mul:
+            name = "mtimes";
+            break;
+        case BinaryOp::Rdiv:
+            name = "mrdivide";
+            break;
+        case BinaryOp::Ldiv:
+            name = "mldivide";
+            break;
+        case BinaryOp::Pow:
+            name = "mpower";
+            break;
+        case BinaryOp::ElemMul:
+            name = "times";
+            break;
+        case BinaryOp::ElemRdiv:
+            name = "rdivide";
+            break;
+        case BinaryOp::ElemLdiv:
+            name = "ldivide";
+            break;
+        case BinaryOp::ElemPow:
+            name = "power";
+            break;
+        case BinaryOp::And:
+            name = "and";
+            break;
+        case BinaryOp::Or:
+            name = "or";
+            break;
+        case BinaryOp::Lt:
+            name = "lt";
+            break;
+        case BinaryOp::Le:
+            name = "le";
+            break;
+        case BinaryOp::Gt:
+            name = "gt";
+            break;
+        case BinaryOp::Ge:
+            name = "ge";
+            break;
+        case BinaryOp::Eq:
+            name = "eq";
+            break;
+        case BinaryOp::Ne:
+            name = "ne";
+            break;
+        }
+        return "%" + std::to_string(inst.result.index) + " = " + name + " %" +
+               std::to_string(inst.lhs().index) + ", %" + std::to_string(inst.rhs().index);
+    }
+    case Instruction::Type::GlobalDecl: {
+        const auto& inst = static_cast<const GlobalDeclInst&>(instruction);
+        std::string text = "global";
+        for (std::size_t i = 0; i < inst.slots.size(); ++i)
+            text += (i == 0 ? " slot" : ", slot") + std::to_string(inst.slots[i].index);
+        return text;
+    }
+    case Instruction::Type::PersistentDecl: {
+        const auto& inst = static_cast<const PersistentDeclInst&>(instruction);
+        std::string text = "persistent";
+        for (std::size_t i = 0; i < inst.slots.size(); ++i)
+            text += (i == 0 ? " slot" : ", slot") + std::to_string(inst.slots[i].index);
+        return text;
+    }
+    case Instruction::Type::Goto: {
+        const auto& inst = static_cast<const GotoInst&>(instruction);
+        return "goto " + (inst.target ? inst.target->label() : "<null>");
+    }
+    case Instruction::Type::Branch: {
+        const auto& inst = static_cast<const BranchInst&>(instruction);
+        return "branch %" + std::to_string(inst.condition().index) + ", " +
+               (inst.true_target ? inst.true_target->label() : "<null>") + ", " +
+               (inst.false_target ? inst.false_target->label() : "<null>");
+    }
+    case Instruction::Type::Intrinsic: {
+        const auto& inst = static_cast<const IntrinsicInst&>(instruction);
+        const auto operands_input = inst.operands();
+        const char* name = nullptr;
+        switch (inst.id) {
+        case IntrinsicId::SwitchMatch:
+            name = "switch_match";
+            break;
+        case IntrinsicId::ForeachInit:
+            name = "foreach_init";
+            break;
+        case IntrinsicId::ForeachCount:
+            name = "foreach_count";
+            break;
+        case IntrinsicId::ForeachGet:
+            name = "foreach_get";
+            break;
+        case IntrinsicId::IntGt:
+            name = "int_gt";
+            break;
+        case IntrinsicId::IntAdd:
+            name = "int_add";
+            break;
+        case IntrinsicId::LogicalScalar:
+            name = "logical_scalar";
+            break;
+        }
+        std::string text = "%" + std::to_string(inst.result.index) + " = intrinsic." + name;
+        for (std::size_t i = 0; i < operands_input.size(); ++i)
+            text += (i == 0 ? " %" : ", %") + std::to_string(operands_input[i].index);
+        return text;
+    }
+    case Instruction::Type::Return: {
+        return "ret";
+    }
+    case Instruction::Type::MagicColon:
+    case Instruction::Type::MagicEnd:
+        throw std::logic_error("尚不支持索引占位指令的持久化");
+    }
+    throw std::logic_error("无法输出未知的指令类型");
+}
 
 std::string trim(std::string_view text) {
     const auto first = text.find_first_not_of(" \t\r");
@@ -159,53 +550,81 @@ public:
                                             error.what());
             }
         }
-        if (!definitions_.empty() &&
-            static_cast<std::uint64_t>(definitions_.rbegin()->first) + 1 != definitions_.size())
-            throw std::invalid_argument("IR 值定义编号不连续");
-        for (const auto id : references_)
-            if (!definitions_.count(id))
-                throw std::invalid_argument("IR 引用了未定义的值 %" + std::to_string(id));
-        const auto constant = [&](ValueId id) { return definitions_.at(id.index).is_constant; };
+        const auto& values = version_.values();
+        for (std::size_t i = 0; i < values.size(); ++i)
+            if (!values.find(ValueId{static_cast<std::uint32_t>(i)}).definition())
+                throw std::invalid_argument("IR 缺少值定义 %" + std::to_string(i));
+        // 每个真实前驱必须显式提供输入，Undefined 不是遗漏输入的替代品。
+        for (const auto& block : version_.blocks()) {
+            for (const auto& instruction : block->instructions()) {
+                if (instruction->type() != Instruction::Type::Phi)
+                    continue;
+                const auto& phi = static_cast<const PhiInst&>(*instruction);
+                std::size_t count = 0;
+                for (const auto& predecessor : version_.blocks()) {
+                    const auto* terminator = predecessor->terminator();
+                    bool incoming = false;
+                    if (terminator && terminator->type() == Instruction::Type::Goto)
+                        incoming = static_cast<const GotoInst*>(terminator)->target == block.get();
+                    if (terminator && terminator->type() == Instruction::Type::Branch) {
+                        const auto& branch = static_cast<const BranchInst&>(*terminator);
+                        incoming =
+                            branch.true_target == block.get() || branch.false_target == block.get();
+                    }
+                    if (!incoming)
+                        continue;
+                    ++count;
+                    if (std::none_of(phi.predecessors().begin(), phi.predecessors().end(),
+                                     [&predecessor](const auto& input) {
+                                         return input == predecessor.get();
+                                     }))
+                        throw std::invalid_argument("PHI 指令缺少前驱块的输入");
+                }
+                if (count != phi.operand_count())
+                    throw std::invalid_argument("PHI 输入包含非前驱块");
+            }
+        }
+        const auto constant = [&values](ValueId id) { return values.find(id).is_constant(); };
         // 基本块打印顺序可能与 ValueId 分配顺序不同，全部定义收集后再推导常量性。
-        for (std::size_t pass = 0; pass < definitions_.size(); ++pass) {
+        for (std::size_t pass = 0; pass < values.size(); ++pass) {
             bool changed = false;
-            for (auto& [id, info] : definitions_) {
-                bool known = info.is_constant;
-                switch (info.def->type()) {
+            for (std::size_t i = 0; i < values.size(); ++i) {
+                auto& info = version_.values().find(ValueId{static_cast<std::uint32_t>(i)});
+                bool known = info.is_constant();
+                switch (info.definition()->type()) {
                 case Instruction::Type::Concat: {
-                    auto& inst = static_cast<ConcatInst&>(*info.def);
-                    known = std::all_of(inst.items.begin(), inst.items.end(),
-                                        [&](ValueId item) { return constant(item); });
+                    auto& inst = static_cast<ConcatInst&>(*info.definition());
+                    const auto items = inst.items();
+                    known = std::all_of(items.begin(), items.end(),
+                                        [&constant](ValueId item) { return constant(item); });
                     inst.is_dynamic = !known;
                     break;
                 }
                 case Instruction::Type::Colon: {
-                    const auto& inst = static_cast<const ColonInst&>(*info.def);
-                    known = constant(inst.start) && (!inst.step || constant(*inst.step)) &&
-                            constant(inst.stop);
+                    const auto& inst = static_cast<const ColonInst&>(*info.definition());
+                    known = constant(inst.start()) && (!inst.step() || constant(*inst.step())) &&
+                            constant(inst.stop());
                     break;
                 }
                 case Instruction::Type::Unary:
-                    known = constant(static_cast<const UnaryInst&>(*info.def).operand);
+                    known = constant(static_cast<const UnaryInst&>(*info.definition()).operand());
                     break;
                 case Instruction::Type::Binary: {
-                    const auto& inst = static_cast<const BinaryInst&>(*info.def);
-                    known = constant(inst.lhs) && constant(inst.rhs);
+                    const auto& inst = static_cast<const BinaryInst&>(*info.definition());
+                    known = constant(inst.lhs()) && constant(inst.rhs());
                     break;
                 }
                 default:
                     break;
                 }
-                if (known != info.is_constant) {
-                    info.is_constant = known;
+                if (known != info.is_constant()) {
+                    info.set_constant(known);
                     changed = true;
                 }
             }
             if (!changed)
                 break;
         }
-        for (const auto& [id, info] : definitions_)
-            (void)version_.add_value(info);
     }
 
 private:
@@ -216,8 +635,6 @@ private:
     bool stage_seen_ = false;
     std::map<std::string, BasicBlock*> blocks_;
     const ConstantDecoder& constants_;
-    std::map<std::uint32_t, ValueInfo> definitions_;
-    std::vector<std::uint32_t> references_;
     BasicBlock* block_ = nullptr;
 
     void read_slot(const Line& line) {
@@ -237,16 +654,10 @@ private:
             throw std::invalid_argument("槽位编号不连续");
     }
 
-    ValueId use(std::string_view text) {
-        const auto id = value_id(text);
-        references_.push_back(id.index);
-        return id;
-    }
-
     std::vector<ValueId> uses(std::string_view text) {
         std::vector<ValueId> ids;
         for (const auto& part : split(text))
-            ids.push_back(use(part));
+            ids.push_back(value_id(part));
         return ids;
     }
 
@@ -264,10 +675,9 @@ private:
         return it->second;
     }
 
-    void define(ValueId id, Instruction& inst, ValueInfo::Form form = ValueInfo::Form::Single,
+    void define(ValueId id, Instruction& inst, Value::Form form = Value::Form::Single,
                 bool constant = false, std::uint32_t result_index = 0) {
-        if (!definitions_.emplace(id.index, ValueInfo{&inst, result_index, form, constant}).second)
-            throw std::invalid_argument("值定义编号重复");
+        version_.values().define(id, inst, result_index, form, constant);
     }
 
     void read_instruction(const Line& line) {
@@ -286,19 +696,57 @@ private:
                 result = value_id(lhs);
             rhs.erase(0, equal + 3);
         }
-        auto require_result = [&]() -> ValueId {
+        auto require_result = [&result, &result_list]() -> ValueId {
             if (!result || !result_list.empty())
                 throw std::invalid_argument("指令需要单个结果编号");
             return *result;
         };
-        auto no_result = [&]() {
+        auto no_result = [&result, &result_list]() {
             if (result || !result_list.empty())
                 throw std::invalid_argument("该指令不应定义结果");
         };
         if (begins(rhs, "const ")) {
             auto decoded = constants_.decode(line.text);
             auto& inst = block_->add_instruction<ConstInst>(decoded->value, require_result());
-            define(*result, inst, ValueInfo::Form::Single, true);
+            define(*result, inst, Value::Form::Single, true);
+        } else if (begins(rhs, "phi ")) {
+            const auto* function = dynamic_cast<const FunctionUnit*>(&unit_);
+            if (!function || function->current_stage() == IRStage::NonSSA)
+                throw std::invalid_argument("PHI 指令只能出现在 SSA 阶段");
+            for (const auto& instruction : block_->instructions())
+                if (instruction->type() != Instruction::Type::Phi)
+                    throw std::invalid_argument("PHI 指令必须连续放在基本块开头");
+            std::vector<PhiInst::Incoming> inputs;
+            std::string remaining = trim(std::string_view(rhs).substr(4));
+            while (!remaining.empty()) {
+                if (remaining.front() != '[')
+                    throw std::invalid_argument("PHI 输入缺少左方括号");
+                const auto close = remaining.find(']');
+                if (close == std::string::npos)
+                    throw std::invalid_argument("PHI 输入缺少右方括号");
+                const auto parts = split(std::string_view(remaining).substr(1, close - 1));
+                if (parts.size() != 2)
+                    throw std::invalid_argument("PHI 输入必须包含前驱块和输入值");
+                auto* predecessor = target(parts[0]);
+                for (const auto& input : inputs)
+                    if (input.predecessor == predecessor)
+                        throw std::invalid_argument("PHI 输入的前驱块重复");
+                inputs.push_back({predecessor, parts[1] == "Undefined"
+                                                   ? std::nullopt
+                                                   : std::optional<ValueId>{value_id(parts[1])}});
+                remaining = trim(std::string_view(remaining).substr(close + 1));
+                if (remaining.empty())
+                    break;
+                if (remaining.front() != ',')
+                    throw std::invalid_argument("PHI 输入之间缺少逗号");
+                remaining = trim(std::string_view(remaining).substr(1));
+                if (remaining.empty())
+                    throw std::invalid_argument("PHI 末尾逗号后缺少输入");
+            }
+            if (inputs.empty())
+                throw std::invalid_argument("PHI 指令缺少前驱输入");
+            auto& inst = block_->add_instruction<PhiInst>(require_result(), std::move(inputs));
+            define(*result, inst);
         } else if (begins(rhs, "load ")) {
             auto& inst =
                 block_->add_instruction<LoadSlotInst>(require_result(), slot(rhs.substr(5)));
@@ -308,7 +756,7 @@ private:
             const auto parts = split(rhs.substr(6), ' ');
             if (parts.size() != 2)
                 throw std::invalid_argument("存储指令的操作数无效");
-            block_->add_instruction<StoreSlotInst>(slot(parts[0]), use(parts[1]));
+            block_->add_instruction<StoreSlotInst>(slot(parts[0]), value_id(parts[1]));
         } else if (begins(rhs, "horzcat ") || begins(rhs, "vertcat ")) {
             const bool horizontal = begins(rhs, "horzcat ");
             auto items = uses(rhs.substr(8));
@@ -357,10 +805,13 @@ private:
             const auto parts = split(rhs.substr(7));
             if (parts.size() != 3)
                 throw std::invalid_argument("条件分支指令的操作数无效");
-            block_->add_instruction<BranchInst>(use(parts[0]), target(parts[1]), target(parts[2]));
+            block_->add_instruction<BranchInst>(value_id(parts[0]), target(parts[1]),
+                                                target(parts[2]));
         } else if (rhs == "ret" || begins(rhs, "ret ")) {
             no_result();
-            block_->add_instruction<ReturnInst>(uses(rhs.substr(3)));
+            if (rhs != "ret")
+                throw std::invalid_argument("ret 不接受操作数，函数返回值由返回槽位提供");
+            block_->add_instruction<ReturnInst>();
         } else if (begins(rhs, "intrinsic.")) {
             const auto end = rhs.find(' ');
             const auto name = rhs.substr(10, end == std::string::npos ? end : end - 10);
@@ -418,9 +869,9 @@ private:
             std::vector<ValueId> results = std::move(result_list);
             if (result)
                 results.push_back(*result);
-            auto define_all = [&](Instruction& inst) {
+            auto define_all = [this, &results](Instruction& inst) {
                 for (std::size_t i = 0; i < results.size(); ++i)
-                    define(results[i], inst, ValueInfo::Form::Single, false,
+                    define(results[i], inst, Value::Form::Single, false,
                            static_cast<std::uint32_t>(i));
             };
             if (is_call) {
@@ -430,13 +881,13 @@ private:
                 if (!static_target.empty())
                     pending_targets_.push_back({&inst, static_target});
             } else if (begins(rhs, "apply ")) {
-                Operand base = begins(callee, "%") ? Operand{use(callee)} : Operand{callee};
+                Operand base = begins(callee, "%") ? Operand{value_id(callee)} : Operand{callee};
                 auto& inst =
                     block_->add_instruction<ApplyInst>(results, std::move(base), std::move(args));
                 define_all(inst);
             } else {
-                auto& inst =
-                    block_->add_instruction<ValueApplyInst>(results, std::move(args), use(callee));
+                auto& inst = block_->add_instruction<ValueApplyInst>(results, std::move(args),
+                                                                     value_id(callee));
                 define_all(inst);
             }
         } else if (begins(rhs, "paren_ref ") || begins(rhs, "brace_ref ") ||
@@ -458,7 +909,7 @@ private:
                 } else {
                     auto& inst = block_->add_instruction<BraceReferenceInst>(
                         require_result(), std::move(indices), args[0]);
-                    define(*result, inst, ValueInfo::Form::MaybePack);
+                    define(*result, inst, Value::Form::MaybePack);
                 }
             } else {
                 if (args.size() < (op == "paren_delete" ? 2U : 3U))
@@ -489,7 +940,7 @@ private:
                 const auto comma = object.rfind(", %");
                 if (comma == std::string::npos)
                     throw std::invalid_argument("字段赋值指令缺少赋值数据");
-                assigned = use(object.substr(comma + 2));
+                assigned = value_id(object.substr(comma + 2));
                 object.erase(comma);
             }
             const auto dynamic = object.find(".(%");
@@ -497,24 +948,25 @@ private:
             if (dot == std::string::npos || dot == 0 || dot + 1 == object.size())
                 throw std::invalid_argument("点号成员格式无效");
             const auto base_text = object.substr(0, dot);
-            Operand base = begins(base_text, "%") ? Operand{use(base_text)} : Operand{base_text};
+            Operand base =
+                begins(base_text, "%") ? Operand{value_id(base_text)} : Operand{base_text};
             Operand member;
             if (dynamic != std::string::npos) {
                 if (object.back() != ')')
                     throw std::invalid_argument("动态字段名称缺少右括号");
-                member = use(object.substr(dot + 2, object.size() - dot - 3));
+                member = value_id(object.substr(dot + 2, object.size() - dot - 3));
             } else {
                 member = object.substr(dot + 1);
             }
             if (op == "dot_access") {
                 auto& inst = block_->add_instruction<DotAccessInst>(require_result(), base, member);
-                define(*result, inst, ValueInfo::Form::MaybePack);
+                define(*result, inst, Value::Form::MaybePack);
             } else if (op == "dot_ref") {
                 if (!std::holds_alternative<ValueId>(base))
                     throw std::invalid_argument("字段引用的基值必须是值编号");
                 auto& inst = block_->add_instruction<DotReferenceInst>(require_result(), member,
                                                                        std::get<ValueId>(base));
-                define(*result, inst, ValueInfo::Form::MaybePack);
+                define(*result, inst, Value::Form::MaybePack);
             } else {
                 if (!std::holds_alternative<ValueId>(base))
                     throw std::invalid_argument("字段赋值的基值必须是值编号");
@@ -549,7 +1001,7 @@ private:
             const auto space = rhs.find(' ');
             const auto name = rhs.substr(0, space);
             if (unary.count(name)) {
-                auto arg = use(rhs.substr(space + 1));
+                auto arg = value_id(rhs.substr(space + 1));
                 auto& inst =
                     block_->add_instruction<UnaryInst>(require_result(), arg, unary.at(name));
                 define(*result, inst);
@@ -690,10 +1142,7 @@ void IRPrinter::print_blocks(std::ostream& output, const IRStageVersion& version
         output << block->label() << ":\n";
         for (const auto& instruction : block->instructions()) {
             output << "    ";
-            if (instruction->type() == Instruction::Type::Const)
-                output << constants_.encode(static_cast<const ConstInst&>(*instruction));
-            else
-                output << instruction->to_string();
+            output << print_instruction(*instruction, constants_);
             output << '\n';
         }
     }
@@ -701,7 +1150,7 @@ void IRPrinter::print_blocks(std::ostream& output, const IRStageVersion& version
 
 void IRPrinter::print_function(std::ostream& output, const FunctionUnit& function,
                                const std::string& path) {
-    const auto signature = [&](const std::vector<SlotId>& slots) {
+    const auto signature = [&output, &function](const std::vector<SlotId>& slots) {
         for (std::size_t i = 0; i < slots.size(); ++i) {
             if (i)
                 output << ", ";
@@ -738,6 +1187,11 @@ void IRPrinter::print_function(std::ostream& output, const FunctionUnit& functio
         output << "\nnested in @" << path << "\n; nested in @" << function.name() << '\n';
         print_function(output, *function.nested_functions()[i], path + "." + std::to_string(i));
     }
+}
+
+std::string write_ir(const IRModule& module, const std::filesystem::path& resource_directory,
+                     const std::filesystem::path& constant_directory) {
+    return IRPrinter(resource_directory, constant_directory).print(module);
 }
 
 std::unique_ptr<IRModule> read_ir(std::string_view text,
@@ -819,9 +1273,9 @@ std::unique_ptr<IRModule> read_ir(std::string_view text,
         throw std::invalid_argument("IR 文件没有完整的代码单元");
     const bool script = !units.empty() && units.front().header == "script {";
     // IR 文件读取仅用于观察，不注册到 M 源文件缓存。
-    auto module = std::make_unique<IRModule>(
-        path ? SourceType::File : SourceType::Memory,
-        script ? ModuleType::Script : ModuleType::FunctionFile, path);
+    auto module =
+        std::make_unique<IRModule>(path ? SourceType::File : SourceType::Memory,
+                                   script ? ModuleType::Script : ModuleType::FunctionFile, path);
     std::vector<std::pair<std::string, std::unique_ptr<FunctionUnit>>> functions;
     std::vector<PendingCallTarget> pending_targets;
     for (const auto& unit : units) {
@@ -862,7 +1316,7 @@ std::unique_ptr<IRModule> read_ir_file(const std::filesystem::path& path) {
 void write_ir_file(const IRModule& module, const std::filesystem::path& path) {
     const auto absolute = std::filesystem::absolute(path);
     const auto text =
-        IRPrinter(absolute.parent_path(), path.filename().string() + ".constants").print(module);
+        write_ir(module, absolute.parent_path(), path.filename().string() + ".constants");
     std::ofstream output(absolute, std::ios::binary | std::ios::trunc);
     if (!output)
         throw std::runtime_error("无法打开 IR 输出文件：" + path.string());

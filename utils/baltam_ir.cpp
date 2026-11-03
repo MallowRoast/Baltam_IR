@@ -38,7 +38,7 @@ int main(int argc, char* argv[]) {
             baltam::write_ir_file(*module, *output);
         } else {
             // 大常量需要资源目录；标准输出模式不创建配套文件。
-            std::cout << module->to_string();
+            std::cout << baltam::write_ir(*module);
         }
         return 0;
     } catch (const std::exception& error) {

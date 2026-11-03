@@ -8,7 +8,6 @@
 #include <memory>
 #include <optional>
 #include <stdexcept>
-#include <string>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -21,7 +20,7 @@ class FunctionUnit;
 using const_ba_obj_ptr = std::shared_ptr<const ba_obj>;
 
 // 动态分派保留到运行时；其余类别由后续解析或优化阶段确定。
-enum class DispatchType : std::uint8_t { Dynamic, MFunction, Builtin, Internal, Plugin};
+enum class DispatchType : std::uint8_t { Dynamic, MFunction, Builtin, Internal, Plugin };
 
 // 保留一元运算在源码中的具体操作种类。
 enum class UnaryOp : std::uint8_t {
@@ -69,7 +68,7 @@ enum class IntrinsicId : std::uint8_t {
 enum class Effect : std::uint8_t { NoSlotWrite, MayWriteSlot };
 
 // 基本块通过该基类独占拥有不同种类的指令。
-class Instruction {
+class Instruction : public User {
 public:
     enum class Type : std::uint8_t {
         Const,
@@ -99,23 +98,27 @@ public:
         Binary,
         LoadSlot,
         StoreSlot,
+        Phi,
     };
 
     virtual ~Instruction() = default;
 
-    // 预留各类指令的文本表示入口，具体格式由后续逐类实现。
-    [[nodiscard]] virtual std::string to_string() const;
+    // 复制指令内容；块、值和静态目标引用由阶段克隆流程处理。
+    [[nodiscard]] std::unique_ptr<Instruction> clone() const;
 
     [[nodiscard]] Type type() const noexcept { return type_; }
+
     [[nodiscard]] Effect effect() const noexcept;
     [[nodiscard]] BasicBlock* parent() const noexcept { return parent_; }
+
     [[nodiscard]] bool is_terminator() const noexcept {
-        return type_ == Type::Goto || type_ == Type::Branch ||
-               type_ == Type::Return;
+        return type_ == Type::Goto || type_ == Type::Branch || type_ == Type::Return;
     }
 
 protected:
     explicit Instruction(Type type) noexcept : type_(type) {}
+
+    Instruction(const Instruction& other) : User(other), type_(other.type_) {}
 
 private:
     friend class BasicBlock;
@@ -130,10 +133,59 @@ public:
     ConstInst(const_ba_obj_ptr value, ValueId result)
         : Instruction(Type::Const), value(std::move(value)), result(result) {}
 
-    [[nodiscard]] std::string to_string() const override;
-
     const_ba_obj_ptr value;
     ValueId result;
+};
+
+// 根据进入当前基本块的前驱选择输入值；空值表示该路径上的变量未定义。
+class PhiInst final : public Instruction {
+public:
+    struct Incoming {
+        BasicBlock* predecessor;
+        std::optional<ValueId> value;
+    };
+
+    explicit PhiInst(ValueId result, const std::vector<Incoming>& incomings = {})
+        : Instruction(Type::Phi), result(result) {
+        for (const auto& incoming : incomings)
+            add_incoming(incoming.predecessor, incoming.value);
+    }
+
+    [[nodiscard]] const std::vector<BasicBlock*>& predecessors() const noexcept {
+        return predecessors_;
+    }
+
+    [[nodiscard]] Incoming incoming(std::size_t index) const {
+        return {predecessors_.at(index), User::operand(index).value()};
+    }
+
+    void add_incoming(BasicBlock* predecessor, std::optional<ValueId> value) {
+        predecessors_.push_back(predecessor);
+        try {
+            append_operand(value);
+        } catch (...) {
+            predecessors_.pop_back();
+            throw;
+        }
+    }
+
+    void set_incoming_value(std::size_t index, std::optional<ValueId> value) {
+        set_operand(index, value);
+    }
+
+    void set_predecessor(std::size_t index, BasicBlock* predecessor) {
+        predecessors_.at(index) = predecessor;
+    }
+
+    void erase_incoming(std::size_t index) {
+        erase_operand(index);
+        predecessors_.erase(predecessors_.begin() + index);
+    }
+
+    ValueId result;
+
+private:
+    std::vector<BasicBlock*> predecessors_;
 };
 
 // 从已绑定的槽位读取一个值；槽位类别从所属代码单元的槽位表查询。
@@ -142,8 +194,6 @@ public:
     LoadSlotInst(ValueId result, SlotId slot)
         : Instruction(Type::LoadSlot), result(result), slot(slot) {}
 
-    [[nodiscard]] std::string to_string() const override;
-
     ValueId result;
     SlotId slot;
 };
@@ -151,13 +201,15 @@ public:
 // 将已求值的结果写入已绑定的槽位；不产生新的 ValueId。
 class StoreSlotInst final : public Instruction {
 public:
-    StoreSlotInst(SlotId slot, ValueId value)
-        : Instruction(Type::StoreSlot), slot(slot), value(value) {}
+    StoreSlotInst(SlotId slot, ValueId value) : Instruction(Type::StoreSlot), slot(slot) {
+        append_operand(value);
+    }
 
-    [[nodiscard]] std::string to_string() const override;
+    [[nodiscard]] ValueId value() const { return input(0); }
+
+    void set_value(ValueId value) { User::set_operand(0, value); }
 
     SlotId slot;
-    ValueId value;
 };
 
 // 非空的水平或竖直并置；输入是否包含非常量值由构建调用处提供。
@@ -165,39 +217,32 @@ class ConcatInst final : public Instruction {
 public:
     enum class Axis : std::uint8_t { Horizontal, Vertical };
 
-    ConcatInst(std::vector<ValueId> items, ValueId result, Axis axis,
-               bool is_dynamic)
-        : Instruction(Type::Concat), items(std::move(items)), result(result),
-          axis(axis), is_dynamic(is_dynamic) {}
+    ConcatInst(std::vector<ValueId> items, ValueId result, Axis axis, bool is_dynamic)
+        : Instruction(Type::Concat), result(result), axis(axis), is_dynamic(is_dynamic) {
+        append_values(items);
+    }
 
-    [[nodiscard]] std::string to_string() const override;
+    [[nodiscard]] std::vector<ValueId> items() const { return input_values(0); }
 
-    // 空 [] 生成常量，普通单值 [x] 透传 x；实际并置至少有一项输入。
-    // 输入值即使是空数组，也不能删除对应的项。
-    std::vector<ValueId> items;
     ValueId result;
     Axis axis;
-    // 输入中是否包含非常量值；不能据此判断是否需要运行时分派。
     bool is_dynamic;
 };
 
 // 按源码顺序保存非空元胞构造的元素及二维形状。
 class CellConstructInst final : public Instruction {
 public:
-    CellConstructInst(std::vector<ValueId> items, std::size_t rows,
-                      std::size_t cols, ValueId result)
-        : Instruction(Type::CellConstruct), items(std::move(items)),
-          rows(rows), cols(cols), result(result) {
-        // 空 {} 已由 ConstInst 表示；非空输入与形状一致性隐含行列非零。
+    CellConstructInst(std::vector<ValueId> items, std::size_t rows, std::size_t cols,
+                      ValueId result)
+        : Instruction(Type::CellConstruct), rows(rows), cols(cols), result(result) {
         if ((cols != 0 && rows > std::numeric_limits<std::size_t>::max() / cols) ||
-            this->items.size() != rows * cols) {
+            items.size() != rows * cols)
             throw std::invalid_argument("元胞构造指令的元素数量与形状不一致");
-        }
+        append_values(items);
     }
 
-    [[nodiscard]] std::string to_string() const override;
+    [[nodiscard]] std::vector<ValueId> items() const { return input_values(0); }
 
-    std::vector<ValueId> items;
     std::size_t rows;
     std::size_t cols;
     ValueId result;
@@ -206,25 +251,33 @@ public:
 // 生成序列的冒号表达式；缺省步长与显式给出步长保持区分。
 class ColonInst final : public Instruction {
 public:
-    ColonInst(ValueId result, ValueId start, std::optional<ValueId> step,
-              ValueId stop)
-        : Instruction(Type::Colon), result(result), start(start),
-          step(step), stop(stop) {}
+    ColonInst(ValueId result, ValueId start, std::optional<ValueId> step, ValueId stop)
+        : Instruction(Type::Colon), result(result) {
+        append_operand(start);
+        append_operand(step);
+        append_operand(stop);
+    }
 
-    [[nodiscard]] std::string to_string() const override;
+    [[nodiscard]] ValueId start() const { return input(0); }
+
+    void set_start(ValueId value) { User::set_operand(0, value); }
+
+    [[nodiscard]] std::optional<ValueId> step() const { return User::operand(1).value(); }
+
+    void set_step(std::optional<ValueId> value) { set_operand(1, value); }
+
+    [[nodiscard]] ValueId stop() const { return input(2); }
+
+    void set_stop(ValueId value) { set_operand(2, value); }
 
     ValueId result;
-    ValueId start;
-    std::optional<ValueId> step;
-    ValueId stop;
     bool needs_runtime_dispatch = true;
 };
 
 // 索引中的单独冒号只产生占位值，不生成序列。
 class MagicColonInst final : public Instruction {
 public:
-    explicit MagicColonInst(ValueId result)
-        : Instruction(Type::MagicColon), result(result) {}
+    explicit MagicColonInst(ValueId result) : Instruction(Type::MagicColon), result(result) {}
 
     ValueId result;
 };
@@ -238,26 +291,36 @@ public:
         std::uint32_t nindices;
     };
 
-    MagicEndInst(std::vector<MagicEndContext> candidate_contexts,
-                 ValueId result)
-        : Instruction(Type::MagicEnd),
-          candidate_contexts(std::move(candidate_contexts)), result(result) {
-        for (const auto& context : this->candidate_contexts) {
-            if (context.dim == 0 || context.nindices == 0 ||
-                context.dim > context.nindices) {
+    MagicEndInst(const std::vector<MagicEndContext>& candidate_contexts, ValueId result)
+        : Instruction(Type::MagicEnd), result(result) {
+        for (const auto& context : candidate_contexts) {
+            if (context.dim == 0 || context.nindices == 0 || context.dim > context.nindices)
                 throw std::invalid_argument("索引 end 指令的维度或索引数量无效");
-            }
-            if (const auto* name =
-                           std::get_if<InternedString>(&context.callee_or_base)) {
-                if (name->empty()) {
+            if (const auto* name = std::get_if<InternedString>(&context.callee_or_base))
+                if (name->empty())
                     throw std::invalid_argument("索引 end 指令的候选名字不能为空");
-                }
-            }
+            contexts_.push_back(
+                {append_named_operand(context.callee_or_base), context.dim, context.nindices});
         }
     }
 
-    std::vector<MagicEndContext> candidate_contexts;
+    [[nodiscard]] std::vector<MagicEndContext> candidate_contexts() const {
+        std::vector<MagicEndContext> result;
+        for (const auto& context : contexts_)
+            result.push_back(
+                {named_operand(context.callee_or_base), context.dim, context.nindices});
+        return result;
+    }
+
     ValueId result;
+
+private:
+    struct Context {
+        NamedOperand callee_or_base;
+        std::uint32_t dim;
+        std::uint32_t nindices;
+    };
+    std::vector<Context> contexts_;
 };
 
 // 将当前代码单元中的名字绑定到全局存储；槽位类别由构建调用处查询槽位表。
@@ -265,8 +328,6 @@ class GlobalDeclInst final : public Instruction {
 public:
     explicit GlobalDeclInst(std::vector<SlotId> slots)
         : Instruction(Type::GlobalDecl), slots(std::move(slots)) {}
-
-    [[nodiscard]] std::string to_string() const override;
 
     std::vector<SlotId> slots;
 };
@@ -277,18 +338,13 @@ public:
     explicit PersistentDeclInst(std::vector<SlotId> slots)
         : Instruction(Type::PersistentDecl), slots(std::move(slots)) {}
 
-    [[nodiscard]] std::string to_string() const override;
-
     std::vector<SlotId> slots;
 };
 
 // 无条件跳转到目标基本块；目标归属由后续 CFG 检查确定。
 class GotoInst final : public Instruction {
 public:
-    explicit GotoInst(BasicBlock* target)
-        : Instruction(Type::Goto), target(target) {}
-
-    [[nodiscard]] std::string to_string() const override;
+    explicit GotoInst(BasicBlock* target) : Instruction(Type::Goto), target(target) {}
 
     BasicBlock* target;
 };
@@ -296,83 +352,82 @@ public:
 // 根据已求值的条件选择两个后继基本块之一。
 class BranchInst final : public Instruction {
 public:
-    BranchInst(ValueId condition, BasicBlock* true_target,
-               BasicBlock* false_target)
-        : Instruction(Type::Branch), true_target(true_target),
-          false_target(false_target), condition(condition) {}
+    BranchInst(ValueId condition, BasicBlock* true_target, BasicBlock* false_target)
+        : Instruction(Type::Branch), true_target(true_target), false_target(false_target) {
+        append_operand(condition);
+    }
 
-    [[nodiscard]] std::string to_string() const override;
+    [[nodiscard]] ValueId condition() const { return input(0); }
+
+    void set_condition(ValueId value) { User::set_operand(0, value); }
 
     BasicBlock* true_target;
     BasicBlock* false_target;
-    ValueId condition;
 };
 
-// 结束当前代码单元，按顺序返回已有的值；脚本可使用空列表。
+// 结束当前代码单元；函数返回值由返回槽位提供。
 class ReturnInst final : public Instruction {
 public:
-    explicit ReturnInst(std::vector<ValueId> values)
-        : Instruction(Type::Return), values(std::move(values)) {
-    }
-
-    [[nodiscard]] std::string to_string() const override;
-
-    std::vector<ValueId> values;
+    ReturnInst() : Instruction(Type::Return) {}
 };
 
 // 保留 A(...) 的名字歧义，后续再确定调用或索引。
 class ApplyInst final : public Instruction {
 public:
-    ApplyInst(std::vector<ValueId> results, Operand callee_or_base,
-              std::vector<ValueId> arguments)
-        : Instruction(Type::Apply), results(std::move(results)),
-          callee_or_base(std::move(callee_or_base)),
-          arguments(std::move(arguments)) {}
+    ApplyInst(std::vector<ValueId> results, Operand callee_or_base, std::vector<ValueId> arguments)
+        : Instruction(Type::Apply), results(std::move(results)) {
+        callee_or_base_ = append_named_operand(callee_or_base);
+        arguments_offset_ = operand_count();
+        append_values(arguments);
+    }
 
-    [[nodiscard]] std::string to_string() const override;
+    [[nodiscard]] Operand callee_or_base() const { return named_operand(callee_or_base_); }
+
+    [[nodiscard]] std::vector<ValueId> arguments() const { return input_values(arguments_offset_); }
 
     std::vector<ValueId> results;
-    Operand callee_or_base;
-    std::vector<ValueId> arguments;
+
+private:
+    NamedOperand callee_or_base_;
+    std::size_t arguments_offset_;
 };
 
 // base 已经求值，圆括号语义仍可能是句柄调用或索引。
 class ValueApplyInst final : public Instruction {
 public:
-    ValueApplyInst(std::vector<ValueId> results,
-                   std::vector<ValueId> arguments, ValueId base)
-        : Instruction(Type::ValueApply), results(std::move(results)),
-          arguments(std::move(arguments)), base(base) {}
+    ValueApplyInst(std::vector<ValueId> results, std::vector<ValueId> arguments, ValueId base)
+        : Instruction(Type::ValueApply), results(std::move(results)) {
+        append_operand(base);
+        append_values(arguments);
+    }
 
-    [[nodiscard]] std::string to_string() const override;
+    [[nodiscard]] ValueId base() const { return input(0); }
+
+    void set_base(ValueId value) { User::set_operand(0, value); }
+
+    [[nodiscard]] std::vector<ValueId> arguments() const { return input_values(1); }
 
     std::vector<ValueId> results;
-    std::vector<ValueId> arguments;
-    ValueId base;
 };
 
 // 已确定按函数名调用；函数句柄调用由 ValueApplyInst 按运行时值处理。
 // 跨模块 M 函数可能随源码和查找环境变化，IR 不保存其静态目标。
 class CallInst final : public Instruction {
 public:
-    CallInst(std::vector<ValueId> results, InternedString callee,
-             std::vector<ValueId> arguments,
+    CallInst(std::vector<ValueId> results, InternedString callee, std::vector<ValueId> arguments,
              DispatchType dispatch_type = DispatchType::Dynamic,
              FunctionUnit* m_function_target = nullptr)
-        : Instruction(Type::Call), results(std::move(results)),
-          callee(std::move(callee)), arguments(std::move(arguments)),
-          m_function_target(m_function_target),
-          dispatch_type(dispatch_type) {}
+        : Instruction(Type::Call), results(std::move(results)), callee(std::move(callee)),
+          m_function_target(m_function_target), dispatch_type(dispatch_type) {
+        append_values(arguments);
+    }
 
-    [[nodiscard]] std::string to_string() const override;
+    [[nodiscard]] std::vector<ValueId> arguments() const { return input_values(0); }
 
     std::vector<ValueId> results;
     InternedString callee;
-    std::vector<ValueId> arguments;
-    // 仅指向同一 IRModule 内词法绑定的 M 函数；由构建流程保证归属。
-    // 局部函数与嵌套函数的区别由函数的词法关系表示，不增加分派类型。
+    // 静态目标仅引用同模块内词法绑定的函数。
     FunctionUnit* m_function_target;
-    // 外部 M 函数与可替换的插件函数保留 Dynamic，由运行时解析。
     DispatchType dispatch_type;
 };
 
@@ -380,149 +435,199 @@ public:
 class IntrinsicInst final : public Instruction {
 public:
     IntrinsicInst(ValueId result, IntrinsicId id, std::vector<ValueId> operands)
-        : Instruction(Type::Intrinsic), result(result), id(id),
-          operands(std::move(operands)) {}
+        : Instruction(Type::Intrinsic), result(result), id(id) {
+        append_values(operands);
+    }
 
-    [[nodiscard]] std::string to_string() const override;
+    [[nodiscard]] std::vector<ValueId> operands() const { return input_values(0); }
 
     ValueId result;
     IntrinsicId id;
-    std::vector<ValueId> operands;
 };
 
 // 已确定为圆括号取值，保留多个输出及索引实参的源码顺序。
 class ParenReferenceInst final : public Instruction {
 public:
-    ParenReferenceInst(ValueId result,
-                       std::vector<ValueId> indices, ValueId base)
-        : Instruction(Type::ParenReference), result(result),
-          indices(std::move(indices)), base(base) {}
+    ParenReferenceInst(ValueId result, std::vector<ValueId> indices, ValueId base)
+        : Instruction(Type::ParenReference), result(result) {
+        append_operand(base);
+        append_values(indices);
+    }
 
-    [[nodiscard]] std::string to_string() const override;
+    [[nodiscard]] ValueId base() const { return input(0); }
+
+    void set_base(ValueId value) { User::set_operand(0, value); }
+
+    [[nodiscard]] std::vector<ValueId> indices() const { return input_values(1); }
 
     ValueId result;
-    std::vector<ValueId> indices;
-    ValueId base;
 };
 
 // 更新圆括号选中的元素，并定义新的 base 值。
 class ParenAssignInst final : public Instruction {
 public:
-    ParenAssignInst(std::vector<ValueId> indices, ValueId result,
-                    ValueId base, ValueId value)
-        : Instruction(Type::ParenAssign), indices(std::move(indices)),
-          result(result), base(base), value(value) {}
+    ParenAssignInst(std::vector<ValueId> indices, ValueId result, ValueId base, ValueId value)
+        : Instruction(Type::ParenAssign), result(result) {
+        append_operand(base);
+        append_operand(value);
+        append_values(indices);
+    }
 
-    [[nodiscard]] std::string to_string() const override;
+    [[nodiscard]] ValueId base() const { return input(0); }
 
-    std::vector<ValueId> indices;
+    void set_base(ValueId value) { User::set_operand(0, value); }
+
+    [[nodiscard]] ValueId value() const { return input(1); }
+
+    void set_value(ValueId value) { set_operand(1, value); }
+
+    [[nodiscard]] std::vector<ValueId> indices() const { return input_values(2); }
+
     ValueId result;
-    ValueId base;
-    ValueId value;
 };
 
 // A(I) = [] 的删除语义不携带右值，结果是更新后的 base。
 class ParenDeleteInst final : public Instruction {
 public:
-    ParenDeleteInst(std::vector<ValueId> indices, ValueId result,
-                    ValueId base)
-        : Instruction(Type::ParenDelete), indices(std::move(indices)),
-          result(result), base(base) {}
+    ParenDeleteInst(std::vector<ValueId> indices, ValueId result, ValueId base)
+        : Instruction(Type::ParenDelete), result(result) {
+        append_operand(base);
+        append_values(indices);
+    }
 
-    [[nodiscard]] std::string to_string() const override;
+    [[nodiscard]] ValueId base() const { return input(0); }
 
-    std::vector<ValueId> indices;
+    void set_base(ValueId value) { User::set_operand(0, value); }
+
+    [[nodiscard]] std::vector<ValueId> indices() const { return input_values(1); }
+
     ValueId result;
-    ValueId base;
 };
 
 // 花括号访问的单个 IR 结果可承载逗号分隔列表。
 class BraceReferenceInst final : public Instruction {
 public:
-    BraceReferenceInst(ValueId result,
-                       std::vector<ValueId> indices, ValueId base)
-        : Instruction(Type::BraceReference), result(result),
-          indices(std::move(indices)), base(base) {}
+    BraceReferenceInst(ValueId result, std::vector<ValueId> indices, ValueId base)
+        : Instruction(Type::BraceReference), result(result) {
+        append_operand(base);
+        append_values(indices);
+    }
 
-    [[nodiscard]] std::string to_string() const override;
+    [[nodiscard]] ValueId base() const { return input(0); }
+
+    void set_base(ValueId value) { User::set_operand(0, value); }
+
+    [[nodiscard]] std::vector<ValueId> indices() const { return input_values(1); }
 
     ValueId result;
-    std::vector<ValueId> indices;
-    ValueId base;
 };
 
 // 花括号赋值的单个 IR 输入值可承载逗号分隔列表。
 class BraceAssignInst final : public Instruction {
 public:
-    BraceAssignInst(std::vector<ValueId> indices, ValueId value,
-                    ValueId result, ValueId base)
-        : Instruction(Type::BraceAssign), indices(std::move(indices)),
-          value(value), result(result), base(base) {}
+    BraceAssignInst(std::vector<ValueId> indices, ValueId value, ValueId result, ValueId base)
+        : Instruction(Type::BraceAssign), result(result) {
+        append_operand(base);
+        append_operand(value);
+        append_values(indices);
+    }
 
-    [[nodiscard]] std::string to_string() const override;
+    [[nodiscard]] ValueId base() const { return input(0); }
 
-    std::vector<ValueId> indices;
-    ValueId value;
+    void set_base(ValueId value) { User::set_operand(0, value); }
+
+    [[nodiscard]] ValueId value() const { return input(1); }
+
+    void set_value(ValueId value) { set_operand(1, value); }
+
+    [[nodiscard]] std::vector<ValueId> indices() const { return input_values(2); }
+
     ValueId result;
-    ValueId base;
 };
 
 // 保留点号访问左侧名字尚未绑定时的歧义；member 可为静态名字或动态求值结果。
 class DotAccessInst final : public Instruction {
 public:
-    DotAccessInst(ValueId result, Operand base_or_name,
-                  Operand member)
-        : Instruction(Type::DotAccess), result(result),
-          base_or_name(std::move(base_or_name)), member(std::move(member)) {}
+    DotAccessInst(ValueId result, Operand base_or_name, Operand member)
+        : Instruction(Type::DotAccess), result(result) {
+        base_or_name_ = append_named_operand(base_or_name);
+        member_ = append_named_operand(member);
+    }
 
-    [[nodiscard]] std::string to_string() const override;
+    [[nodiscard]] Operand base_or_name() const { return named_operand(base_or_name_); }
+
+    [[nodiscard]] Operand member() const { return named_operand(member_); }
 
     ValueId result;
-    Operand base_or_name;
-    Operand member;
+
+private:
+    NamedOperand base_or_name_;
+    NamedOperand member_;
 };
 
 // 已确定按值读取成员，具体实现仍由对象协议分派。
 class DotReferenceInst final : public Instruction {
 public:
-    DotReferenceInst(ValueId result, Operand member,
-                     ValueId base)
-        : Instruction(Type::DotReference), result(result),
-          member(std::move(member)), base(base) {}
+    DotReferenceInst(ValueId result, Operand member, ValueId base)
+        : Instruction(Type::DotReference), result(result) {
+        append_operand(base);
+        member_ = append_named_operand(member);
+    }
 
-    [[nodiscard]] std::string to_string() const override;
+    [[nodiscard]] ValueId base() const { return input(0); }
+
+    void set_base(ValueId value) { User::set_operand(0, value); }
+
+    [[nodiscard]] Operand member() const { return named_operand(member_); }
 
     ValueId result;
-    Operand member;
-    ValueId base;
+
+private:
+    NamedOperand member_;
 };
 
 // 设置静态或动态成员，并定义更新后的 base 值。
 class DotAssignInst final : public Instruction {
 public:
-    DotAssignInst(Operand member, ValueId result, ValueId base,
-                  ValueId value)
-        : Instruction(Type::DotAssign), member(std::move(member)),
-          result(result), base(base), value(value) {}
+    DotAssignInst(Operand member, ValueId result, ValueId base, ValueId value)
+        : Instruction(Type::DotAssign), result(result) {
+        append_operand(base);
+        append_operand(value);
+        member_ = append_named_operand(member);
+    }
 
-    [[nodiscard]] std::string to_string() const override;
+    [[nodiscard]] ValueId base() const { return input(0); }
 
-    Operand member;
+    void set_base(ValueId value) { User::set_operand(0, value); }
+
+    [[nodiscard]] ValueId value() const { return input(1); }
+
+    void set_value(ValueId value) { set_operand(1, value); }
+
+    [[nodiscard]] Operand member() const { return named_operand(member_); }
+
     ValueId result;
-    ValueId base;
-    ValueId value;
+
+private:
+    NamedOperand member_;
 };
 
 // 一元运算保留正负号、逻辑非及两种转置的源码区别。
 class UnaryInst final : public Instruction {
 public:
     UnaryInst(ValueId result, ValueId operand, UnaryOp op)
-        : Instruction(Type::Unary), result(result), operand(operand), op(op) {}
+        : Instruction(Type::Unary), result(result), op(op) {
+        append_operand(operand);
+    }
 
-    [[nodiscard]] std::string to_string() const override;
+    using User::operand;
+    using User::set_operand;
+
+    [[nodiscard]] ValueId operand() const { return input(0); }
+
+    void set_operand(ValueId value) { User::set_operand(0, value); }
 
     ValueId result;
-    ValueId operand;
     UnaryOp op;
     bool needs_runtime_dispatch = true;
 };
@@ -531,13 +636,20 @@ public:
 class BinaryInst final : public Instruction {
 public:
     BinaryInst(ValueId result, ValueId lhs, ValueId rhs, BinaryOp op)
-        : Instruction(Type::Binary), result(result), lhs(lhs), rhs(rhs), op(op) {}
+        : Instruction(Type::Binary), result(result), op(op) {
+        append_operand(lhs);
+        append_operand(rhs);
+    }
 
-    [[nodiscard]] std::string to_string() const override;
+    [[nodiscard]] ValueId lhs() const { return input(0); }
+
+    void set_lhs(ValueId value) { User::set_operand(0, value); }
+
+    [[nodiscard]] ValueId rhs() const { return input(1); }
+
+    void set_rhs(ValueId value) { set_operand(1, value); }
 
     ValueId result;
-    ValueId lhs;
-    ValueId rhs;
     BinaryOp op;
     bool needs_runtime_dispatch = true;
 };

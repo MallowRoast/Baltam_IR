@@ -1,0 +1,22 @@
+# 本文件控制 C/C++ 代码排版；注释语言仍需人工保持为中文。
+
+BasedOnStyle: LLVM                          # 以 LLVM 样式为基础，未在本文件指定的选项沿用其默认值。
+Language: Cpp                               # 按 C++ 语法解析和格式化代码。
+Standard: c++17                             # 使用 C++17 语法规则，避免按旧标准处理模板等语法。
+IndentWidth: 4                              # 每个嵌套层级缩进 4 个空格。
+TabWidth: 4                                 # 将已有制表符按宽度 4 计算，用于判断对齐位置和行宽。
+UseTab: Never                               # 缩进和对齐均使用空格，不生成制表符。
+AccessModifierOffset: -4                    # public、protected、private 相对类成员减少 4 个空格缩进，与类声明对齐。
+ColumnLimit: 100                            # 目标行宽为 100 列，超长表达式、参数列表等尽量换行；不可拆分内容可能超出。
+ContinuationIndentWidth: 4                  # 需要续行且没有采用其他对齐规则时，额外缩进 4 个空格。
+PointerAlignment: Left                      # 指针和引用符号靠近类型，例如 BasicBlock* block、const ValueId& value。
+DerivePointerAlignment: false               # 不根据现有代码推断指针风格，始终使用上面的 PointerAlignment。
+BreakBeforeBraces: Attach                   # 函数和控制语句等的左花括号尽量跟在声明或条件同一行，而不是另起一行。
+AllowShortFunctionsOnASingleLine: Inline    # 允许类内定义的短函数及空函数放在同一行；类外非空短函数仍展开。
+AllowShortIfStatementsOnASingleLine: Never  # 不将短 if 语句及其主体压缩在同一行；此选项不负责添加花括号。
+AllowShortLoopsOnASingleLine: false         # 不将短循环及其主体压缩在同一行，便于阅读循环体。
+MaxEmptyLinesToKeep: 1                      # 连续空行最多保留一行；不会自动为每两个函数补充空行。
+NamespaceIndentation: None                  # 命名空间内部不额外缩进，避免所有代码整体向右移动。
+FixNamespaceComments: false                 # 不自动添加或修改命名空间结束注释，保留人工编写的中文说明。
+SortIncludes: false                         # 不自动排序头文件，保留已有包含顺序。
+ReflowComments: false                       # 不自动重排或按行宽拆分注释正文，保留中文注释的原有组织方式。
