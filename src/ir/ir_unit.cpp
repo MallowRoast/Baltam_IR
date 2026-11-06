@@ -11,6 +11,10 @@ namespace baltam {
 using IRStage = FunctionUnit::IRStage;
 
 SlotId SlotTable::add_slot(InternedString name) {
+    // 同一代码单元中的同名变量共用一个槽位。
+    for (std::size_t i = 0; i < slots_.size(); ++i)
+        if (slots_[i].name == name)
+            return SlotId{static_cast<std::uint32_t>(i)};
     if (slots_.size() > std::numeric_limits<std::uint32_t>::max()) {
         throw std::overflow_error("槽位编号已用尽");
     }
@@ -20,6 +24,10 @@ SlotId SlotTable::add_slot(InternedString name) {
 }
 
 const SlotInfo& SlotTable::find(SlotId id) const {
+    return slots_.at(id.index);
+}
+
+SlotInfo& SlotTable::find(SlotId id) {
     return slots_.at(id.index);
 }
 
@@ -88,10 +96,29 @@ Instruction& BasicBlock::insert_instruction(std::size_t position,
                instructions_[position]->type() == Instruction::Type::Phi) {
         throw std::logic_error("普通指令不能插在 PHI 指令之前");
     }
+    // 声明的静态属性在所有插入路径统一登记；实际绑定仍由声明指令执行。
+    const std::vector<SlotId>* declared_slots = nullptr;
+    const bool global = instruction->type() == Instruction::Type::GlobalDecl;
+    if (global)
+        declared_slots = &static_cast<const GlobalDeclInst&>(*instruction).slots;
+    else if (instruction->type() == Instruction::Type::PersistentDecl)
+        declared_slots = &static_cast<const PersistentDeclInst&>(*instruction).slots;
+    if (declared_slots)
+        for (const auto slot : *declared_slots)
+            (void)parent_->slot_table().find(slot);
     instruction->bind(*version_);
     auto* added = instruction.get();
     instructions_.insert(instructions_.begin() + position, std::move(instruction));
     added->parent_ = this;
+    if (declared_slots) {
+        for (const auto slot : *declared_slots) {
+            auto& info = parent_->slot_table().find(slot);
+            if (global)
+                info.has_global_decl = true;
+            else
+                info.has_persistent_decl = true;
+        }
+    }
     return *added;
 }
 
@@ -104,6 +131,10 @@ std::size_t IRStageVersion::replace_all_uses(ValueId from, ValueId to) {
         return 0;
     auto& source = values_.find(from);
     (void)values_.find(to);
+    if (deopt_baseline_) {
+        deopt_replacements_.resize(values_.size());
+        deopt_replacements_[from.index] = to;
+    }
     std::size_t changed = 0;
     while (source.first_use_) {
         source.first_use_->set(to);
@@ -119,6 +150,9 @@ void IRStageVersion::erase_instruction(BasicBlock& block, std::size_t position) 
     for (const auto& value : values_.values_)
         if (value->definition_ == removed && !value->use_empty())
             throw std::logic_error("不能删除仍有结果被引用的指令，请先替换所有使用");
+    for (const auto& value : values_.values_)
+        if (value->definition_ == removed && value->assigned_slot_)
+            throw std::logic_error("不能删除仍承担变量赋值的值定义");
     removed->drop_all_references();
     for (const auto& value : values_.values_) {
         if (value->definition_ != removed)
@@ -160,11 +194,47 @@ std::shared_ptr<IRStageVersion> IRStageVersion::clone(IRUnit& owner) const {
             instructions.emplace(instruction.get(), &added);
         }
     }
-    for (const auto& value : values_.values_)
-        if (value->definition_)
+    for (const auto& value : values_.values_) {
+        if (value->definition_) {
             copy->values_.define(value->id(), *instructions.at(value->definition_),
                                  value->result_index_, value->form_, value->is_constant_);
+            copy->values_.find(value->id()).assigned_slot_ = value->assigned_slot_;
+        }
+    }
+    copy->return_count_ = return_count_;
+    copy->deopt_baseline_ = deopt_baseline_;
+    copy->baseline_to_ssa_ = baseline_to_ssa_;
+    copy->deopt_replacements_ = deopt_replacements_;
     return copy;
+}
+
+void IRStageVersion::initialize_deopt(const IRStageVersion* baseline) {
+    if (!baseline || baseline == this || deopt_baseline_)
+        throw std::invalid_argument("回退基线必须是独立且尚未关联的版本");
+    deopt_baseline_ = baseline;
+    baseline_to_ssa_.resize(deopt_baseline_->values().size());
+    for (std::size_t i = 0; i < baseline_to_ssa_.size(); ++i) {
+        const ValueId id{static_cast<std::uint32_t>(i)};
+        if (deopt_baseline_->values().find(id).definition())
+            baseline_to_ssa_[i] = id;
+    }
+    for (std::size_t b = 0; b < blocks_.size(); ++b) {
+        const auto& originals = deopt_baseline_->blocks()[b]->instructions();
+        for (std::size_t i = 0; i < originals.size(); ++i)
+            blocks_[b]->instructions_[i]->baseline_instruction_ = originals[i].get();
+    }
+}
+
+std::optional<ValueId> IRStageVersion::deopt_source(ValueId baseline_value) const {
+    auto source = baseline_to_ssa_.at(baseline_value.index);
+    std::size_t remaining = deopt_replacements_.size();
+    while (source && source->index < deopt_replacements_.size() &&
+           deopt_replacements_[source->index]) {
+        if (!remaining--)
+            throw std::logic_error("回退寄存器替换关系存在循环");
+        source = deopt_replacements_[source->index];
+    }
+    return source;
 }
 
 void IRStageVersion::compact_values() {
@@ -172,16 +242,87 @@ void IRStageVersion::compact_values() {
     for (const auto& value : values_.values_)
         if (!value->definition_ && !value->use_empty())
             throw std::logic_error("压缩值表时发现未定义的值引用");
+    // 入参、各返回位置引用的结果、函数体结果依次编号，同一值只登记一次。
+    std::vector<ValueId> order;
+    std::vector<bool> seen(values_.size(), false);
+    const auto append = [&order, &seen](ValueId id) {
+        if (!seen[id.index]) {
+            seen[id.index] = true;
+            order.push_back(id);
+        }
+    };
+    std::vector<const ParameterInst*> parameters;
+    for (const auto& block : blocks_)
+        for (const auto& inst : block->instructions())
+            if (inst->type() == Instruction::Type::Parameter)
+                parameters.push_back(static_cast<const ParameterInst*>(inst.get()));
+    std::sort(
+        parameters.begin(), parameters.end(),
+        [](const ParameterInst* lhs, const ParameterInst* rhs) { return lhs->index < rhs->index; });
+    for (const auto* parameter : parameters)
+        append(parameter->result);
+    for (const auto& block : blocks_)
+        for (const auto& inst : block->instructions())
+            if (inst->type() == Instruction::Type::Return)
+                for (const auto value : static_cast<const ReturnInst&>(*inst).values())
+                    append(value);
+    std::unordered_map<const Instruction*, std::vector<ValueId>> results;
+    for (const auto& value : values_.values_)
+        if (value->definition_)
+            results[value->definition_].push_back(value->id());
+    for (const auto& block : blocks_) {
+        for (const auto& inst : block->instructions()) {
+            auto& ids = results[inst.get()];
+            std::sort(ids.begin(), ids.end(), [this](ValueId lhs, ValueId rhs) {
+                return values_.find(lhs).result_index() < values_.find(rhs).result_index();
+            });
+            for (const auto id : ids)
+                append(id);
+        }
+    }
+    std::vector<std::optional<ValueId>> renumber(values_.size());
+    for (std::size_t i = 0; i < order.size(); ++i)
+        renumber[order[i].index] = ValueId{static_cast<std::uint32_t>(i)};
+    // 统一压缩替换链，避免每个基线值重复遍历长链。
+    std::vector<std::size_t> path;
+    for (std::size_t i = 0; i < deopt_replacements_.size(); ++i) {
+        if (!deopt_replacements_[i])
+            continue;
+        path.clear();
+        ValueId source{static_cast<std::uint32_t>(i)};
+        while (source.index < deopt_replacements_.size() && deopt_replacements_[source.index]) {
+            if (path.size() == deopt_replacements_.size())
+                throw std::logic_error("回退寄存器替换关系存在循环");
+            path.push_back(source.index);
+            source = *deopt_replacements_[source.index];
+        }
+        for (const auto index : path)
+            deopt_replacements_[index] = source;
+    }
+    auto sources = baseline_to_ssa_;
+    for (std::size_t i = 0; i < sources.size(); ++i) {
+        const auto source = deopt_source(ValueId{static_cast<std::uint32_t>(i)});
+        if (source) {
+            sources[i] = renumber.at(source->index);
+            if (!sources[i])
+                throw std::logic_error("回退所需的寄存器来源已被删除");
+        }
+    }
     std::vector<std::unique_ptr<Value>> values;
     values.reserve(values_.size());
-    for (auto& value : values_.values_)
-        if (value->definition_)
-            values.push_back(std::move(value));
+    for (const auto id : order)
+        values.push_back(std::move(values_.values_[id.index]));
     for (std::size_t i = 0; i < values.size(); ++i) {
         auto& info = *values[i];
         const ValueId id{static_cast<std::uint32_t>(i)};
         info.id_ = id;
         switch (info.definition_->type()) {
+        case Instruction::Type::Parameter:
+            static_cast<ParameterInst&>(*info.definition_).result = id;
+            break;
+        case Instruction::Type::Copy:
+            static_cast<CopyInst&>(*info.definition_).result = id;
+            break;
         case Instruction::Type::Const:
             static_cast<ConstInst&>(*info.definition_).result = id;
             break;
@@ -253,6 +394,8 @@ void IRStageVersion::compact_values() {
         }
     }
     values_.values_ = std::move(values);
+    baseline_to_ssa_ = std::move(sources);
+    deopt_replacements_.clear();
 }
 
 void FunctionUnit::set_stage_version(IRStage stage, std::shared_ptr<IRStageVersion> version) {
@@ -323,8 +466,30 @@ FunctionUnit& FunctionUnit::append_nested_function(std::unique_ptr<FunctionUnit>
         throw std::invalid_argument("嵌套函数不能为空");
     }
     nested_functions_.push_back(std::move(function));
+    nested_functions_.back()->lexical_parent_ = this;
     bind_module(*nested_functions_.back(), parent());
     return *nested_functions_.back();
+}
+
+void FunctionUnit::bind_shared_slot(SlotId local, FunctionUnit& owner, SlotId target) {
+    auto* ancestor = lexical_parent_;
+    while (ancestor && ancestor != &owner)
+        ancestor = ancestor->lexical_parent_;
+    if (!ancestor)
+        throw std::invalid_argument("共享槽位必须指向词法外层函数");
+
+    auto& local_info = slot_table().find(local);
+    const auto& target_info = owner.slot_table().find(target);
+    const auto reference = target_info.shared_target.value_or(SharedSlotRef{&owner, target});
+    if (local_info.shared_by_nested)
+        throw std::logic_error("已有嵌套引用的拥有者槽位不能改为共享引用，请从外到内登记");
+    if (local_info.shared_target && (local_info.shared_target->function != reference.function ||
+                                     local_info.shared_target->slot != reference.slot))
+        throw std::logic_error("共享槽位已经绑定到其他变量");
+
+    auto& shared = reference.function->slot_table().find(reference.slot);
+    local_info.shared_target = reference;
+    shared.shared_by_nested = true;
 }
 
 std::shared_ptr<const IRStageVersion> FunctionUnit::stage_version(IRStage stage) const {

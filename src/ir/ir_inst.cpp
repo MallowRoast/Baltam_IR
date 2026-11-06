@@ -4,6 +4,13 @@ namespace baltam {
 
 std::unique_ptr<Instruction> Instruction::clone() const {
     switch (type()) {
+    case Type::WorkspaceBarrier:
+        return std::make_unique<WorkspaceBarrierInst>(
+            static_cast<const WorkspaceBarrierInst&>(*this));
+    case Type::Parameter:
+        return std::make_unique<ParameterInst>(static_cast<const ParameterInst&>(*this));
+    case Type::Copy:
+        return std::make_unique<CopyInst>(static_cast<const CopyInst&>(*this));
     case Type::Const:
         return std::make_unique<ConstInst>(static_cast<const ConstInst&>(*this));
     case Type::Phi:
@@ -67,6 +74,8 @@ std::unique_ptr<Instruction> Instruction::clone() const {
 Effect Instruction::effect() const noexcept {
     switch (type_) {
     case Type::Phi:
+    case Type::Parameter:
+    case Type::Copy:
     case Type::Const:
     case Type::CellConstruct:
     case Type::MagicColon:
@@ -96,6 +105,8 @@ Effect Instruction::effect() const noexcept {
     case Type::Unary:
     case Type::Binary:
     case Type::StoreSlot:
+    // 屏障使工作区绑定失效；支持它的变换须按指令类型单独处理。
+    case Type::WorkspaceBarrier:
         return Effect::MayWriteSlot;
     }
     return Effect::MayWriteSlot;

@@ -21,8 +21,6 @@ public:
     [[nodiscard]] std::string print(const IRModule& module);
 
 private:
-    void print_slots(std::ostream& output, const IRUnit& unit) const;
-
     void print_blocks(std::ostream& output, const IRStageVersion& version);
 
     void print_function(std::ostream& output, const FunctionUnit& function,

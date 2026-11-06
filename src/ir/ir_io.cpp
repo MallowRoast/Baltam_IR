@@ -68,10 +68,19 @@ std::string function_path(const IRModule& module, const FunctionUnit* target) {
     throw std::invalid_argument("静态调用目标不属于当前模块");
 }
 
-std::string print_instruction(const Instruction& instruction, ConstantEncoder& constants) {
+std::string print_instruction(const Instruction& instruction, const IRStageVersion& version,
+                              ConstantEncoder& constants) {
+    const auto slot = [&instruction](SlotId id) {
+        return "slot_" + instruction.parent()->parent()->slot_table().find(id).name;
+    };
+    const auto assignment = [&version, &slot](ValueId id) {
+        const auto target = version.values().find(id).assigned_slot();
+        return target ? " [assigned_slot=" + slot(*target) + "]" : std::string{};
+    };
     switch (instruction.type()) {
     case Instruction::Type::Const:
-        return constants.encode(static_cast<const ConstInst&>(instruction));
+        return constants.encode(static_cast<const ConstInst&>(instruction)) +
+               assignment(static_cast<const ConstInst&>(instruction).result);
     case Instruction::Type::Phi: {
         const auto& inst = static_cast<const PhiInst&>(instruction);
         if (inst.operand_count() == 0)
@@ -91,8 +100,7 @@ std::string print_instruction(const Instruction& instruction, ConstantEncoder& c
     }
     case Instruction::Type::StoreSlot: {
         const auto& inst = static_cast<const StoreSlotInst&>(instruction);
-        return "store slot" + std::to_string(inst.slot.index) + " %" +
-               std::to_string(inst.value().index);
+        return "store " + slot(inst.slot) + " %" + std::to_string(inst.value().index);
     }
     case Instruction::Type::BraceReference: {
         const auto& inst = static_cast<const BraceReferenceInst&>(instruction);
@@ -217,10 +225,24 @@ std::string print_instruction(const Instruction& instruction, ConstantEncoder& c
                std::to_string(inst.base().index) + dot_member(member_input) + ", %" +
                std::to_string(inst.value().index);
     }
+    case Instruction::Type::WorkspaceBarrier:
+        return "workspace_barrier";
+    case Instruction::Type::Copy: {
+        const auto& inst = static_cast<const CopyInst&>(instruction);
+        std::string text = "%" + std::to_string(inst.result.index) + " = copy %" +
+                           std::to_string(inst.value().index);
+        if (const auto assigned = version.values().find(inst.result).assigned_slot())
+            text += " to " + slot(*assigned);
+        return text;
+    }
     case Instruction::Type::LoadSlot: {
         const auto& inst = static_cast<const LoadSlotInst&>(instruction);
-        return "%" + std::to_string(inst.result.index) + " = load slot" +
-               std::to_string(inst.slot.index);
+        std::string text = "%" + std::to_string(inst.result.index) + " = load " + slot(inst.slot);
+        if (inst.has_source()) {
+            const auto source = inst.source();
+            text += ", " + (source ? "%" + std::to_string(source->index) : "Undefined");
+        }
+        return text;
     }
     case Instruction::Type::Concat: {
         const auto& inst = static_cast<const ConcatInst&>(instruction);
@@ -342,14 +364,14 @@ std::string print_instruction(const Instruction& instruction, ConstantEncoder& c
         const auto& inst = static_cast<const GlobalDeclInst&>(instruction);
         std::string text = "global";
         for (std::size_t i = 0; i < inst.slots.size(); ++i)
-            text += (i == 0 ? " slot" : ", slot") + std::to_string(inst.slots[i].index);
+            text += (i == 0 ? " " : ", ") + slot(inst.slots[i]);
         return text;
     }
     case Instruction::Type::PersistentDecl: {
         const auto& inst = static_cast<const PersistentDeclInst&>(instruction);
         std::string text = "persistent";
         for (std::size_t i = 0; i < inst.slots.size(); ++i)
-            text += (i == 0 ? " slot" : ", slot") + std::to_string(inst.slots[i].index);
+            text += (i == 0 ? " " : ", ") + slot(inst.slots[i]);
         return text;
     }
     case Instruction::Type::Goto: {
@@ -392,11 +414,17 @@ std::string print_instruction(const Instruction& instruction, ConstantEncoder& c
         std::string text = "%" + std::to_string(inst.result.index) + " = intrinsic." + name;
         for (std::size_t i = 0; i < operands_input.size(); ++i)
             text += (i == 0 ? " %" : ", %") + std::to_string(operands_input[i].index);
-        return text;
+        return text + assignment(inst.result);
     }
     case Instruction::Type::Return: {
-        return "ret";
+        const auto values = static_cast<const ReturnInst&>(instruction).values();
+        std::string text = "ret";
+        for (std::size_t i = 0; i < values.size(); ++i)
+            text += (i ? ", %" : " %") + std::to_string(values[i].index);
+        return text;
     }
+    case Instruction::Type::Parameter:
+        throw std::logic_error("SSA 参数必须在函数签名中输出");
     case Instruction::Type::MagicColon:
     case Instruction::Type::MagicEnd:
         throw std::logic_error("尚不支持索引占位指令的持久化");
@@ -445,10 +473,11 @@ ValueId value_id(std::string_view text) {
     return ValueId{number(text.substr(1))};
 }
 
-SlotId slot_id(std::string_view text) {
-    if (!begins(text, "slot"))
-        throw std::invalid_argument("缺少槽位编号：" + std::string(text));
-    return SlotId{number(text.substr(4))};
+std::string slot_name(std::string_view text) {
+    if (!begins(text, "slot_") || text.size() == 5 ||
+        text.substr(5).find_first_of(" \t\r\n,(){}%") != text.npos)
+        throw std::invalid_argument("槽位名称格式无效：" + std::string(text));
+    return std::string(text.substr(5));
 }
 
 std::string unquote_path(std::string_view text) {
@@ -505,9 +534,15 @@ struct PendingCallTarget {
 class UnitReader {
 public:
     UnitReader(IRUnit& unit, IRStageVersion& version, const UnitText& text,
-               std::vector<PendingCallTarget>& pending_targets, const ConstantDecoder& constants)
+               std::vector<PendingCallTarget>& pending_targets, const ConstantDecoder& constants,
+               std::vector<ValueId> parameters = {})
         : unit_(unit), version_(version), text_(text), pending_targets_(pending_targets),
-          constants_(constants) {}
+          constants_(constants), parameters_(std::move(parameters)) {
+        for (std::size_t i = 0; i < unit_.slot_table().size(); ++i) {
+            const SlotId id{static_cast<std::uint32_t>(i)};
+            slots_.emplace(unit_.slot_table().find(id).name, id);
+        }
+    }
 
     void read() {
         // 首先创建全部基本块，允许控制流前向引用。
@@ -518,6 +553,16 @@ public:
                     throw std::invalid_argument("IR 第 " + std::to_string(line.number) +
                                                 " 行：基本块标签重复");
                 blocks_[label] = &version_.add_block(unit_, label);
+            }
+        }
+        if (!parameters_.empty()) {
+            auto* function = dynamic_cast<FunctionUnit*>(&unit_);
+            if (!function || !version_.entry_block())
+                throw std::invalid_argument("SSA 参数需要函数入口基本块");
+            for (std::size_t i = 0; i < parameters_.size(); ++i) {
+                auto& parameter = version_.entry_block()->add_instruction<ParameterInst>(
+                    parameters_[i], i, function->parameter_slots()[i]);
+                version_.values().define(parameters_[i], parameter);
             }
         }
         for (const auto& line : text_.body) {
@@ -531,10 +576,6 @@ public:
                     if (line.text != "stage Non-SSA" && line.text != "stage Based-SSA" &&
                         line.text != "stage Optimized-SSA")
                         throw std::invalid_argument("未知的 IR 阶段");
-                    continue;
-                }
-                if (begins(line.text, "slot ")) {
-                    read_slot(line);
                     continue;
                 }
 
@@ -631,28 +672,13 @@ private:
     IRUnit& unit_;
     IRStageVersion& version_;
     const UnitText& text_;
+    std::vector<ValueId> parameters_;
     std::vector<PendingCallTarget>& pending_targets_;
     bool stage_seen_ = false;
     std::map<std::string, BasicBlock*> blocks_;
     const ConstantDecoder& constants_;
     BasicBlock* block_ = nullptr;
-
-    void read_slot(const Line& line) {
-        const auto equal = line.text.find(" = ");
-        if (equal == std::string::npos)
-            throw std::invalid_argument("槽位声明缺少名称");
-        const auto id = slot_id(line.text.substr(5, equal - 5));
-        const auto name = line.text.substr(equal + 3);
-        if (name.empty())
-            throw std::invalid_argument("槽位名称为空");
-        if (id.index < unit_.slot_table().size()) {
-            if (unit_.slot_table().find(id).name != name)
-                throw std::invalid_argument("槽位声明与函数签名冲突");
-        } else if (id.index == unit_.slot_table().size()) {
-            (void)unit_.slot_table().add_slot(name);
-        } else
-            throw std::invalid_argument("槽位编号不连续");
-    }
+    std::map<std::string, SlotId> slots_;
 
     std::vector<ValueId> uses(std::string_view text) {
         std::vector<ValueId> ids;
@@ -661,10 +687,13 @@ private:
         return ids;
     }
 
-    SlotId slot(std::string_view text) const {
-        const auto id = slot_id(text);
-        if (id.index >= unit_.slot_table().size())
-            throw std::invalid_argument("引用了未定义的槽位：" + std::string(text));
+    SlotId slot(std::string_view text) {
+        const auto name = slot_name(text);
+        const auto found = slots_.find(name);
+        if (found != slots_.end())
+            return found->second;
+        const auto id = unit_.slot_table().add_slot(name);
+        slots_.emplace(name, id);
         return id;
     }
 
@@ -682,6 +711,12 @@ private:
 
     void read_instruction(const Line& line) {
         std::string rhs = line.text;
+        std::optional<SlotId> assigned;
+        const auto annotation = rhs.rfind(" [assigned_slot=");
+        if (annotation != std::string::npos && rhs.back() == ']') {
+            assigned = slot(rhs.substr(annotation + 16, rhs.size() - annotation - 17));
+            rhs.erase(annotation);
+        }
         std::optional<ValueId> result;
         std::vector<ValueId> result_list;
         const auto equal = rhs.find(" = ");
@@ -747,9 +782,26 @@ private:
                 throw std::invalid_argument("PHI 指令缺少前驱输入");
             auto& inst = block_->add_instruction<PhiInst>(require_result(), std::move(inputs));
             define(*result, inst);
+        } else if (rhs == "workspace_barrier") {
+            no_result();
+            block_->add_instruction<WorkspaceBarrierInst>();
+        } else if (begins(rhs, "copy ")) {
+            const auto parts = split(rhs.substr(5), ' ');
+            if (parts.size() != 1 && (parts.size() != 3 || parts[1] != "to"))
+                throw std::invalid_argument("复制指令需要输入值及可选的赋值槽位");
+            auto& inst = block_->add_instruction<CopyInst>(require_result(), value_id(parts[0]));
+            define(*result, inst);
+            if (parts.size() == 3)
+                version_.values().find(*result).set_assigned_slot(slot(parts[2]));
         } else if (begins(rhs, "load ")) {
-            auto& inst =
-                block_->add_instruction<LoadSlotInst>(require_result(), slot(rhs.substr(5)));
+            const auto parts = split(rhs.substr(5));
+            if (parts.size() != 1 && parts.size() != 2)
+                throw std::invalid_argument("读取指令需要槽位及可选的 SSA 来源");
+            auto& inst = block_->add_instruction<LoadSlotInst>(require_result(), slot(parts[0]));
+            if (parts.size() == 2)
+                inst.set_source(parts[1] == "Undefined"
+                                    ? std::nullopt
+                                    : std::optional<ValueId>{value_id(parts[1])});
             define(*result, inst);
         } else if (begins(rhs, "store ")) {
             no_result();
@@ -809,9 +861,12 @@ private:
                                                 target(parts[2]));
         } else if (rhs == "ret" || begins(rhs, "ret ")) {
             no_result();
-            if (rhs != "ret")
-                throw std::invalid_argument("ret 不接受操作数，函数返回值由返回槽位提供");
-            block_->add_instruction<ReturnInst>();
+            const auto* function = dynamic_cast<const FunctionUnit*>(&unit_);
+            const auto results = rhs == "ret" ? std::vector<ValueId>{} : uses(rhs.substr(4));
+            const bool ssa = function && function->current_stage() != IRStage::NonSSA;
+            if ((!ssa && !results.empty()) || (ssa && results.size() != version_.return_count()))
+                throw std::invalid_argument("返回寄存器数量与函数签名不符");
+            block_->add_instruction<ReturnInst>(results);
         } else if (begins(rhs, "intrinsic.")) {
             const auto end = rhs.find(' ');
             const auto name = rhs.substr(10, end == std::string::npos ? end : end - 10);
@@ -1015,18 +1070,15 @@ private:
             } else
                 throw std::invalid_argument("未知或尚未支持的指令：" + rhs);
         }
+        if (assigned)
+            version_.values().find(require_result()).set_assigned_slot(assigned);
     }
 };
 
-std::vector<std::string> signature(std::string_view text, std::vector<SlotId>& ids) {
+std::vector<std::string> signature(std::string_view text) {
     std::vector<std::string> names;
-    for (const auto& part : split(text)) {
-        const auto space = part.find(' ');
-        if (space == std::string::npos || space + 1 == part.size())
-            throw std::invalid_argument("函数签名无效");
-        ids.push_back(slot_id(part.substr(0, space)));
-        names.push_back(part.substr(space + 1));
-    }
+    for (const auto& part : split(text))
+        names.push_back(slot_name(part));
     return names;
 }
 
@@ -1038,18 +1090,6 @@ std::unique_ptr<FunctionUnit> read_function(const UnitText& text,
         close == std::string::npos || text.header.back() != '{')
         throw std::invalid_argument("函数定义格式无效");
     const auto name = text.header.substr(8, open - 8);
-    std::vector<SlotId> param_ids, return_ids;
-    auto params = signature(text.header.substr(open + 1, close - open - 1), param_ids);
-    std::vector<std::string> returns;
-    const auto tail = trim(std::string_view(text.header).substr(close + 1));
-    if (tail != "{") {
-        if (!begins(tail, "-> (") || tail.size() < 6 || tail.substr(tail.size() - 3) != ") {")
-            throw std::invalid_argument("函数返回值签名无效");
-        returns = signature(tail.substr(4, tail.size() - 7), return_ids);
-    }
-    auto function = std::make_unique<FunctionUnit>(name, std::move(params), std::move(returns));
-    if (function->parameter_slots() != param_ids || function->return_slots() != return_ids)
-        throw std::invalid_argument("函数签名的槽位编号不一致");
     IRStage stage = IRStage::NonSSA;
     for (const auto& line : text.body) {
         if (line.text == "stage Based-SSA")
@@ -1057,8 +1097,48 @@ std::unique_ptr<FunctionUnit> read_function(const UnitText& text,
         if (line.text == "stage Optimized-SSA")
             stage = IRStage::OptimizedSSA;
     }
+    std::vector<std::string> params, returns;
+    std::vector<ValueId> parameters;
+    const auto parameter_text = text.header.substr(open + 1, close - open - 1);
+    if (stage == IRStage::NonSSA) {
+        params = signature(parameter_text);
+    } else {
+        for (const auto& part : split(parameter_text)) {
+            const auto colon = part.find(": ");
+            if (colon == std::string::npos)
+                throw std::invalid_argument("SSA 参数需要寄存器编号及源码变量名");
+            parameters.push_back(value_id(part.substr(0, colon)));
+            params.push_back(slot_name("slot_" + part.substr(colon + 2)));
+        }
+    }
+    std::size_t return_count = 0;
+    const auto tail = trim(std::string_view(text.header).substr(close + 1));
+    if (stage == IRStage::NonSSA) {
+        if (tail != "{") {
+            if (!begins(tail, "-> (") || tail.size() < 6 || tail.substr(tail.size() - 3) != ") {")
+                throw std::invalid_argument("函数返回值签名无效");
+            returns = signature(tail.substr(4, tail.size() - 7));
+        }
+    } else {
+        if (!begins(tail, "-> ") || tail.size() < 6 || tail.substr(tail.size() - 2) != " {")
+            throw std::invalid_argument("SSA 函数签名需要返回值数量");
+        return_count = number(tail.substr(3, tail.size() - 5));
+    }
+    auto function = std::make_unique<FunctionUnit>(name, std::move(params), std::move(returns));
     function->set_current_stage(stage);
-    UnitReader(*function, *function->stage_version(stage), text, pending_targets, constants).read();
+    auto version = function->stage_version(stage);
+    version->set_return_count(return_count);
+    UnitReader(*function, *version, text, pending_targets, constants, parameters).read();
+    if (version->entry_block())
+        for (const auto& instruction : version->entry_block()->instructions()) {
+            if (instruction->type() != Instruction::Type::Parameter)
+                continue;
+            const auto& parameter = static_cast<const ParameterInst&>(*instruction);
+            const auto& info = function->slot_table().find(parameter.slot);
+            if (!info.has_global_decl && !info.has_persistent_decl && !info.shared_by_nested &&
+                !info.shared_target)
+                version->values().find(parameter.result).set_assigned_slot(parameter.slot);
+        }
     return function;
 }
 
@@ -1111,7 +1191,6 @@ std::string IRPrinter::print(const IRModule& module) {
     }
     if (const auto* command = module.command_unit()) {
         output << "script {\n";
-        print_slots(output, *command);
         print_blocks(output, *command->stage_version());
         output << "}\n";
     }
@@ -1126,23 +1205,14 @@ std::string IRPrinter::print(const IRModule& module) {
     return output.str();
 }
 
-void IRPrinter::print_slots(std::ostream& output, const IRUnit& unit) const {
-    if (unit.slot_table().size() == 0)
-        return;
-    output << "; slots:\n";
-    for (std::size_t i = 0; i < unit.slot_table().size(); ++i) {
-        output << ";   slot" << i << " = "
-               << unit.slot_table().find(SlotId{static_cast<std::uint32_t>(i)}).name << '\n';
-    }
-    output << '\n';
-}
-
 void IRPrinter::print_blocks(std::ostream& output, const IRStageVersion& version) {
     for (const auto& block : version.blocks()) {
         output << block->label() << ":\n";
         for (const auto& instruction : block->instructions()) {
+            if (instruction->type() == Instruction::Type::Parameter)
+                continue;
             output << "    ";
-            output << print_instruction(*instruction, constants_);
+            output << print_instruction(*instruction, version, constants_);
             output << '\n';
         }
     }
@@ -1154,16 +1224,36 @@ void IRPrinter::print_function(std::ostream& output, const FunctionUnit& functio
         for (std::size_t i = 0; i < slots.size(); ++i) {
             if (i)
                 output << ", ";
-            output << "slot" << slots[i].index << ' ' << function.slot_table().find(slots[i]).name;
+            output << "slot_" << function.slot_table().find(slots[i]).name;
         }
     };
     output << "define @" << function.name() << '(';
-    signature(function.parameter_slots());
-    output << ')';
-    if (!function.return_slots().empty()) {
-        output << " -> (";
-        signature(function.return_slots());
+    if (function.current_stage() == IRStage::NonSSA) {
+        signature(function.parameter_slots());
         output << ')';
+        if (!function.return_slots().empty()) {
+            output << " -> (";
+            signature(function.return_slots());
+            output << ')';
+        }
+    } else {
+        const auto version = function.current_version();
+        std::vector<const ParameterInst*> parameters(function.parameter_slots().size(), nullptr);
+        if (version->entry_block())
+            for (const auto& instruction : version->entry_block()->instructions())
+                if (instruction->type() == Instruction::Type::Parameter) {
+                    const auto& parameter = static_cast<const ParameterInst&>(*instruction);
+                    parameters.at(parameter.index) = &parameter;
+                }
+        for (std::size_t i = 0; i < parameters.size(); ++i) {
+            if (!parameters[i])
+                throw std::logic_error("SSA 函数缺少参数值定义");
+            if (i)
+                output << ", ";
+            output << '%' << parameters[i]->result.index << ": "
+                   << function.slot_table().find(parameters[i]->slot).name;
+        }
+        output << ") -> " << version->return_count();
     }
     const char* stage;
     switch (function.current_stage()) {
@@ -1179,8 +1269,7 @@ void IRPrinter::print_function(std::ostream& output, const FunctionUnit& functio
     default:
         throw std::invalid_argument("无效的 IR 阶段");
     }
-    output << " {\n; stage: " << stage << '\n';
-    print_slots(output, function);
+    output << " {\n; stage: " << stage << "\n\n";
     print_blocks(output, *function.current_version());
     output << "}\n";
     for (std::size_t i = 0; i < function.nested_functions().size(); ++i) {
@@ -1215,8 +1304,6 @@ std::unique_ptr<IRModule> read_ir(std::string_view text,
         // 现有打印器通过这些注释记录阶段和槽位等结构信息。
         if (begins(line, "; stage: "))
             line = "stage " + line.substr(9);
-        if (begins(line, ";   slot"))
-            line = "slot " + line.substr(4);
         lines.push_back({line, n});
     }
     if (metadata.empty())

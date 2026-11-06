@@ -223,7 +223,7 @@ IRModule
 
 ### 1.8 BasicBlock 所有权
 
-每个 `IRStageVersion` 独占拥有该阶段的基本块；`CommandUnit` 和 `FunctionUnit` 持有相应版本。`BasicBlock` 保存非拥有的 `IRUnit* parent_` 和 `std::vector<std::unique_ptr<Instruction>>`；每条指令保存指向所属基本块的非拥有父指针，通过 `add_instruction<Inst>(...)` 创建并持有指令。`GotoInst` 与 `BranchInst` 使用非拥有 `BasicBlock*` 保存跳转目标，`ReturnInst` 不携带操作数，函数返回值由返回槽位提供；三者都是终结指令。`BasicBlock::terminator()` 返回末尾的终结指令；添加终结指令后不得再向该块追加指令。当前不保存前驱或后继表，也未检查跳转目标是否属于同一代码单元和 IR 阶段。`IRStageVersion::entry_block()` 保存入口基本块指针，创建的第一个基本块默认作为入口。
+每个 `IRStageVersion` 独占拥有该阶段的基本块；`CommandUnit` 和 `FunctionUnit` 持有相应版本。`BasicBlock` 保存非拥有的 `IRUnit* parent_` 和 `std::vector<std::unique_ptr<Instruction>>`；每条指令保存指向所属基本块的非拥有父指针，通过 `add_instruction<Inst>(...)` 创建并持有指令。`GotoInst` 与 `BranchInst` 使用非拥有 `BasicBlock*` 保存跳转目标，Non-SSA 的 `ReturnInst` 不携带操作数，函数返回值由返回槽位提供；SSA 参数由入口 ParameterInst 定义，签名直接引用参数寄存器，ReturnInst 的输入 Use 直接引用结果寄存器，阶段版本记录返回数量；三者都是终结指令。`BasicBlock::terminator()` 返回末尾的终结指令；添加终结指令后不得再向该块追加指令。当前不保存前驱或后继表，也未检查跳转目标是否属于同一代码单元和 IR 阶段。`IRStageVersion::entry_block()` 保存入口基本块指针，创建的第一个基本块默认作为入口。
 
 `ConstInst` 按 [M 语法 IR 设计](M语法与IR设计.md)保存 `const_ba_obj_ptr value` 和 `ValueId result`，在 Non-SSA 与 SSA 阶段使用同一种指令。`const_ba_obj_ptr` 是 `std::shared_ptr<const ba_obj>` 的别名；`value` 持有运行前确定的常量对象。运行时修改该值时仍须遵守写时复制语义。`ba_obj` 在 IR 头文件中仅前置声明，实际对象由运行时创建。`ValueId` 是只保存一个 `std::uint32_t index` 的结构体，不带无效哨兵值；构建调用处通过所属 `IRStageVersion::add_value` 分配编号并登记定义。
 
@@ -504,7 +504,7 @@ struct SlotInfo {
 };
 ```
 
-构建调用处通过表分配 `SlotId`，`SlotTable::find()` 按 ID 返回表项的常量引用，越界时抛出 `std::out_of_range`；名字解析依赖词法作用域和运行时绑定，不能仅用这张表的名称作通用查找键，也不强制所有表项名称唯一。全局和持久变量当前是否仍绑定由运行时状态决定。表在模块发布后不再原地追加；优化版本若需要新的存储槽位，须另行确定版本私有槽位的归属。
+构建调用处通过表分配 `SlotId`，`SlotTable::find()` 按 ID 返回表项的常量引用，越界时抛出 `std::out_of_range`；名字解析依赖词法作用域和运行时绑定，不能仅用这张表的名称作通用查找键，同一代码单元内同名变量复用同一个 SlotId。全局和持久变量当前是否仍绑定由运行时状态决定。表在模块发布后不再原地追加；优化版本若需要新的存储槽位，须另行确定版本私有槽位的归属。
 
 #### 输入与结果的存储原则
 
@@ -623,7 +623,7 @@ use-def 和 def-use 是 IR 的基础关系，不作为可以过期的 Analysis �
 
 完整 IR 合法性检查仍由后续 Verifier Pass 承担；Analysis 和 Transform 不重复执行该验证。
 
-按[新解释器架构](新解释器架构.md)和[Deopt 设计思路](SSA到非SSA的运行时回退设计.md)，SSA 回退需要恢复 slot 的值及绑定状态，并区分调用前、调用后和异常路径的继续位置。后续应为每个 IR 版本固定这些元数据的归属与生命周期，避免基本块已更新而映射仍指向旧版本。
+按[回退机制设计](SSA化与回退机制.md)，静态确认的工作区调用通过运行时工作区访问协议和 workspace_barrier 继续 SSA（访问协议尚待实现，不再设置显式同步指令）；未受保护的动态工作区访问在实际访问入口同步 caller 并标记，caller 正常或异常返回边界再转 Non-SSA，调用不重放。现在由静态 Value 保存赋值 SlotId，执行帧维护 slot 到最近赋值 ValueId 的来源表，实际回退时恢复槽位及绑定状态，避免工作区恢复专用 PHI。调用点关联原 Non-SSA 调用身份和返回继续点；中间寄存器在构建时保留 Non-SSA 到 SSA 的紧凑来源映射，首次实际回退时再分析继续边界的 liveness 并缓存恢复计划。首版保留潜在恢复来源且不复用寄存器存储，SSA 构建侧元数据已接入 mem2reg，延迟分析与运行时机制仍待实现。
 
 ### 4.3 世界验证与源文件版本判定
 

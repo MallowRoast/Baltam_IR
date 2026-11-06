@@ -1,8 +1,6 @@
 # mem2reg 设计
 
-## 1. 目标与范围
-
-mem2reg 将能够安全提升的局部 slot 读写转换为直接的值引用。原本通过 `StoreSlotInst` 保存、再通过 `LoadSlotInst` 取出的值，在转换后直接通过 ValueId 使用；不同控制流路径产生的定义由 PHI 汇合。
+mem2reg 确定每条 load 的当前定义，将读取转换为 SSA 值引用，再移除不需要真实存储的 store。当前采用按需查询方案，仅依赖 CFG，不预先计算支配树、支配边界或变量活跃性。
 
 实现位于 `src/Transform/mem2reg.h/.cpp`，入口为：
 
@@ -11,220 +9,148 @@ PreservedAnalyses Mem2RegPass::run(FunctionUnit& function,
                                  FunctionAnalysisManager& analyses);
 ```
 
-当前 pass 只处理处于 Non-SSA 阶段的函数，将结果发布为基础 SSA，即文本中的 `Based-SSA`。基础 SSA 可以保留不可提升 slot 的 load/store，并不要求所有工作区变量都消失。转换不涉及运行时对象的复制或数组数据搬运，也不进行常量折叠、公共子表达式消除或控制流简化。
+只处理 Non-SSA 函数，成功后发布 Based-SSA；脚本主体暂不处理。整体机制与 IR 字段背景见 [SSA 化与回退机制](SSA化与回退机制.md)。
 
-脚本主体的 workspace 对外可观察，函数 pass 管理器不处理 `CommandUnit`。模块中的普通函数和局部函数可以参与转换；捕获与嵌套函数目前采用保守策略。
+## 1. 流程
 
-## 2. 输入前提与安全边界
+```text
+筛选 slot，计算入口可达块
+→ 克隆 Non-SSA，建立参数与返回值接口
+→ 为候选 store 预留稳定赋值结果
+→ 从每条 load 按需查询当前定义
+→ 必要时生成 PHI 或工作区读取
+→ 将 store 转为赋值 copy
+→ 删除多余读取、简化 PHI、合并可省去的 copy
+→ 更新恢复映射、压缩编号并发布 SSA
+```
 
-Analysis 和 Transform 假定输入 IR 满足结构约束，包括合法的值定义、块归属、入口和终结指令。CFG 入口不能有前驱。完整正确性检查由后续独立的 Verifier Pass 承担，mem2reg 不重复执行结构验证。
+变换只操作副本。输入结构合法性由 Verifier 保证，Analysis 和 Transform 不重复验证。
 
-可提升性分析判断的是优化能否保持语义。例如某个 slot 可能在赋值前读取，这是合法程序中可能触发的运行时行为，不能当作非法 IR，也不能直接删除这次读取。
+## 2. 提升范围
 
-### 2.1 函数级限制
+SlotInfo 包含全局、持久声明或任一种共享关系时，保留相应 load/store。标记只表示声明存在，不代替运行时绑定。
 
-出现以下任一情况，整个函数保持原阶段、原版本：
+内部迭代槽位、不可达块中访问的槽位、MaybePack 写入目标，以及输入中已有带 SSA 来源 load 或带 assigned_slot copy 的槽位，也暂不提升。
 
-- 当前阶段不是 Non-SSA。
-- 函数拥有嵌套函数。
-- 函数属于模块中的嵌套函数，而非模块直接拥有的函数。
-- 当前版本没有入口块。
-- 存在除 slot 写入、全局声明和持久声明之外的 `Effect::MayWriteSlot` 指令。
-- 没有任何可提升的 slot。
+参数使用入口 ParameterInst 的寄存器定义，返回值由各条 ret 的输入给出。需要保留存储的参数在入口建立 slot 绑定。返回变量在每个返回点生成读取，与普通 load 一同求解。
 
-`Effect` 描述是否可能改写已有 slot，不等同于“是否有副作用”。动态调用、重载运算等操作可能影响工作区；当前缺少更精确的效果与别名信息，因此遇到这些操作时跳过整个函数，尚不做局部区间提升。扫描也包括不可达块，当前不会先删除不可达代码来放宽这一条件。
+自动捕获分析尚未接入，嵌套函数及其父函数仍保守跳过。MayWriteSlot 操作只有与后继 workspace_barrier 在同块紧邻时才按显式保护处理，否则整个函数保持 Non-SSA。运行时工作区访问和异常保护协议仍待实现。
 
-### 2.2 slot 级限制
+## 3. 稳定赋值结果
 
-| slot 的情况 | 当前处理 |
+为每条候选 store 预留 ValueId，记录：
+
+```text
+StoreSlotInst* → 最终赋值结果 ValueId
+```
+
+load 和 PHI 可以先引用它。完成读取分析后，在原 store 位置定义同编号的 copy，并设置 assigned_slot。原始 Non-SSA StoreSlotInst 仍不产生结果，不改变其文本格式。
+
+如果常量或 intrinsic 紧邻 copy，且来源未关联其他 slot，可以转移 assigned_slot 并直接复用来源，省去 copy。其他赋值保留独立身份。
+
+## 4. 查询某个位置的当前定义
+
+固定克隆指令的原始序列，辅助插入不改变查询位置。对于 load slot_x，从其前一条原指令开始逆序查找：
+
+| 先遇到的相关指令 | 来源 |
 | --- | --- |
-| 函数参数或返回值槽位 | 保留读写 |
-| 被 GlobalDeclInst 或 PersistentDeclInst 声明 | 保留读写 |
-| 在不可达块中发生读取或写入 | 保留该 slot 的全部读写 |
-| 任意一次写入的值为 `Value::Form::MaybePack` | 保留读写 |
-| 可达路径存在赋值前读取 | 保留读写 |
-| 没有任何 load/store | 不参与提升 |
-| 其余局部 slot | 参与提升 |
+| 同 slot 的 store | 预留的赋值结果 |
+| 同 slot 的原 load | 该读取的结果，即使它尚未处理也可引用 |
+| workspace_barrier | 工作区来源，不能继续越过屏障查旧定义 |
+| 到达块首 | 查询当前块入口 |
 
-参数和返回值的存储约定、全局与持久绑定以及值包展开都需要额外语义支持。第一版优先保留这些行为。
+无关指令直接跳过。相同变量的新赋值、读取或屏障自然截断对更早定义的查找。
 
-## 3. 必然已定义分析
+如果当前 load 的来源是工作区，在其原位置前增加一个普通 load 取得状态，原读取通过可选 SSA 来源保留使用语义；后续读取可以复用已经取得的结果。辅助读取允许得到 Undefined，不在前驱路径上提前报错。
 
-对每个候选 slot 单独进行前向数据流分析，判断每次读取之前是否已经完成写入。
+## 5. 块入口与出口查询
 
-对可达块 B：
+分别缓存：
 
 ```text
-IN(entry) = false
-IN(B) = 所有可达前驱 P 的 OUT(P) 的逻辑与
-OUT(B) = IN(B) 或 B 中存在该 slot 的 store
+IN[B, slot]  → 块入口的定义
+OUT[B, slot] → 块出口的定义
 ```
 
-非入口可达块的状态初始为 true，入口边界固定为 false，反复扫描直到出口状态稳定。前驱求交只考虑可达前驱。随后从每个块的 IN 状态出发，按指令顺序扫描：store 将状态置为 true；若 load 遇到 false，则取消该 slot 的提升资格。
+入口块使用参数初始值；没有入口定义的普通局部变量使用 Undefined。其他块先登记一个占位 PHI，再递归查询各个可达前驱出口，将结果作为输入。
 
-这一分析同时处理跨块路径和块内顺序。例如一个分支给 x 赋值、另一个分支没有赋值，汇合处读取 x 时必须保留原 load，以保留未定义变量的运行时报错行为。
-
-当前不通过生成 Undefined 值来代替原读取检查。PHI 的 Undefined 输入只是引用表示，不能自行提供运行时检查语义。
-
-## 4. 在独立版本上转换
-
-确定至少有一个可提升 slot 后，克隆源 `IRStageVersion`，在副本中完成后续步骤：
+出口查询等价于从原块末尾逆序执行第 4 节的规则。若先遇到 barrier，且后面没有同 slot 的赋值或读取，则在该块终结指令前补一次普通 load，并缓存结果，供多个后继复用。若已有读取则直接使用，不能跨后续屏障复用旧值。
 
 ```text
-筛选可提升 slot
-    ↓
-克隆 Non-SSA 版本
-    ↓
-按 slot 在迭代支配边界插入 PHI
-    ↓
-沿支配树重命名并填充 PHI 输入
-    ↓
-删除已替换的 load/store
-    ↓
-压缩值编号并发布 SSA 版本
+then:
+    %x1 = copy %a to slot_x
+    goto merge
+else:
+    call builtin.load(%file)
+    workspace_barrier
+    %x2 = load slot_x
+    goto merge
+merge:
+    %x3 = phi [then, %x1], [else, %x2]
+    %r = load slot_x, %x3
 ```
 
-源 CFG 和支配分析始终读取原 Non-SSA 版本。克隆保持基本块顺序，算法通过块索引定位副本中的对应块，不把源版本的块指针写入副本。
+辅助读取只取得绑定状态，不做名字消歧或重载，也不因 Undefined 提前报错，因此可放在前驱终结指令前。读取位置不能越过后续工作区修改。
 
-转换完成前不修改函数的当前阶段或发布目标版本。成功后通过 `set_stage_version(IRStage::SSA, version)` 发布，再选择 SSA 阶段。原 Non-SSA 版本继续保留；构建副本期间抛出异常时，不会发布部分转换结果。
+不可达前驱不参与定义求解，只按 PHI 结构要求提供 Undefined 输入。
 
-## 5. PHI 放置：迭代支配边界
+## 6. 循环与 PHI 清理
 
-CFG、直接支配、支配树及支配边界由 [支配分析](支配分析设计.md) 提供。mem2reg 为每个可提升 slot 单独计算迭代支配边界 IDF：
+不能要求所有前驱先处理完成。查询入口时先将占位 PHI 写入缓存，再查询前驱；沿回边再次查询同一入口，直接返回已登记的 PHI，因此单前驱循环和多块循环都不会无限递归。
 
-1. 收集该 slot 的所有 store 所在块，去重后放入工作列表。
-2. 弹出定义块 X，遍历 `frontier(X)`。
-3. 若边界块 Y 尚未为该 slot 放置 PHI，则在块开头插入 PHI，并登记新结果。
-4. PHI 也是新定义；若 Y 尚未加入工作列表，则将其加入。
-5. 直到工作列表为空。
+每个 (块, slot) 只创建一个入口 PHI。查询结束后统一清理：相同确定来源以及只含自身和一个确定来源的 PHI，可以替换为该来源。包含 Undefined 或没有外部来源的循环 PHI 保守保留。
 
-`phis[块索引][slot 索引]` 记录新 PHI，避免重复插入。PHI 连续位于基本块开头，每个结果是独立的 Value。
+实现可以先为单前驱入口创建占位 PHI，再在清理阶段消除。没有实际读取就不查询该变量，也不会为其构造 PHI 或工作区读取。
 
-循环头可能位于自身的支配边界中，不能排除这一情况：循环头 PHI 正是用来汇合循环入口值和回边值的。
-
-当前不结合活跃变量分析剪枝。因此，即使某个汇合后的值没有实际用途，也可能插入 PHI；也不在本 pass 中折叠所有输入相同的 PHI。这些清理可以由后续变换处理。
-
-## 6. 沿支配树重命名
-
-为每个 slot 维护一个当前定义栈，使用显式栈遍历支配树。进入与退出块分别执行：
-
-| 时机 | 动作 |
-| --- | --- |
-| 进入块 | 保存所有 slot 定义栈的深度 |
-| 处理块首 PHI | 将对应 slot 的 PHI 结果压栈 |
-| 遇到可提升 slot 的 store | 将写入值压栈，记录待删除指令位置 |
-| 遇到可提升 slot 的 load | 用当前栈顶替换 load 结果的所有使用，记录待删除位置 |
-| 扫描完当前块 | 为每个 CFG 后继的 PHI 添加当前块对应的输入 |
-| 退出块 | 将定义栈恢复到进入块时的深度 |
-
-遍历支配树能让每个块继承支配它的定义；退出时恢复深度，避免一个兄弟分支的定义泄漏到另一个分支。
-
-必然已定义分析保证参与提升的可达 load 有有效的栈顶。为后继 PHI 添加输入时，栈为空则显式记录 Undefined；这也可能发生在未剪枝但无后续读取的 PHI 上。
-
-PHI 的前驱和输入通过 `add_incoming(predecessor, value)` 同时登记。可达区域重命名完成后，对不可达前驱补充 Undefined 输入，使每个真实前驱都有对应项。不可达块本身不参与重命名，来自同一前驱的重复控制流边只填一次输入。
-
-## 7. Value、Use、User 与清理
-
-load 结果的替换调用 `IRStageVersion::replace_all_uses`，沿 Value 的使用链修改 Use，不扫描整个函数，也不维护第二份公开操作数字段。后续读取 store 输入、动态操作数或 PHI 输入时，访问器会取得替换后的编号。
-
-扫描阶段只记录待删除位置，不立即改变指令数组。重命名结束后，各块按位置倒序删除 load/store，避免删除导致后续位置偏移。删除 load 前，其结果使用已全部替换；删除 store 时，其输入 Use 自动脱链。
-
-最后调用 `compact_values()`：移除空定义记录，更新存活 Value 的编号及指令结果编号。Value 地址保持稳定，已绑定 Use 自动从目标 Value 取得新编号，无须再遍历全部输入改写编号。SlotTable 保持原有槽位布局。
-
-阶段克隆会创建独立 Value 和 Use，并重映射块引用；源、目标版本的使用链互不共享。具体所有权与销毁规则见 [IR 组织与缓存设计](IR组织与缓存设计.md)。
-
-## 8. 示例
-
-以下为分支场景的函数体片段，省略签名、slot 声明及常量元数据。slot0 为参数 c，slot1 为返回值 y，slot2 为局部变量 x。
-
-转换前：
+## 7. 读取、Undefined 与替换
 
 ```text
-bb0:
-    %0 = load slot0
-    branch %0, bb1, bb2
-bb1:
-    %1 = const !c0 (1): double 1x1
-    store slot2 %1
-    goto bb3
-bb2:
-    %2 = const !c1 (2): double 1x1
-    store slot2 %2
-    goto bb3
-bb3:
-    %3 = load slot2
-    store slot1 %3
-    ret
+%state = load slot_x
+%value = load slot_x, %state
+%error = load slot_x, Undefined
 ```
 
-转换后：
+无来源的 SSA load 取得槽位状态，允许 Undefined；有 SSA 来源的 load 不重新读取实际槽位，在原变量读取位置保留读取和未定义错误语义。两者都不构成新的变量赋值。
+
+定义图完成后，通过输入传播判断值是否必然已定义，移除可证明多余的带来源 load。这个分析只服务于读取简化，不用于预先放置 PHI，也不替代未来 clear 绑定有效性检查。
+
+## 8. 发布与恢复信息
+
+将候选 store 改为预留结果编号的 copy，再统一删除旧 store。普通值替换通过 replace_all_uses 更新 Use 和恢复来源；不能因没有普通 Use 删除仍承担变量赋值的定义。
+
+简化 PHI、消除多余读取、合并安全的赋值 copy 后，再次清理 PHI。最终按参数、返回值、函数体结果排列编号，更新跨阶段映射并发布 Based-SSA。克隆改变了块身份，旧 CFG 和其他已缓存分析均失效。
+
+## 9. 验证范围
+
+验证包含重复读取、分支汇合、Undefined、屏障后读取复用和补读取、多次工作区修改、条件读取不提前报错、循环零次和多次执行、回边屏障、参数与多返回值、未保护调用保持原阶段，以及原基线、Use 链、支配关系和恢复映射的保留。
+
+运行时工作区接口、Undefined 使用语义和实际回退尚未接入。此文描述 IR 构建与变换，不表示已有完整解释执行支持。
+
+## 10. 函数接口与使用
+
+SSA 参数是入口寄存器，普通参数和返回变量都参与提升：
 
 ```text
-bb0:
-    %0 = load slot0
-    branch %0, bb1, bb2
-bb1:
-    %1 = const !c0 (1): double 1x1
-    goto bb3
-bb2:
-    %2 = const !c1 (2): double 1x1
-    goto bb3
-bb3:
-    %3 = phi [bb1, %1], [bb2, %2]
-    store slot1 %3
-    ret
-```
+define @identity(%0: x) -> 1 {
+; stage: Based-SSA
 
-x 的读写全部消失，y 直接使用 PHI 结果。参数和返回值仍沿用原有 slot 约定。具体 ValueId 和 PHI 输入顺序由当前块与遍历顺序决定。
-
-### 循环中的定义汇合
-
-对于入口初始化 x、循环体更新 x 的控制流，循环头需要同时接收入口值和上一次迭代的结果。提升后的核心结构如下，省略条件计算和退出块：
-
-```text
 entry:
-    %0 = const !c0 (0): double 1x1
-    goto header
-header:
-    %1 = phi [entry, %0], [body, %2]
-    ...
-body:
-    %2 = intrinsic.int_add %1, %step
-    goto header
+    ret %0
+}
 ```
 
-其中 `%step` 表示在循环外已定义且支配循环体的步长值。此片段仅展示值关系，不是可直接读取的完整 IR 文件。
-
-重命名先把循环头的 PHI 结果压入 x 的定义栈，循环体据此产生下一次定义。处理 body 到 header 的回边时，再为 PHI 补上 `%2`。PHI 可以引用文本中稍后出现的定义，读取器通过预留 Value 并补齐定义恢复这一关系。
-
-## 9. Pass 管理与使用
-
-`FunctionAnalysisManager` 按当前阶段版本按需构造 CFG 和支配分析。mem2reg 未转换时返回 `PreservedAnalyses::all()`；成功发布 SSA 后返回 `none()`。
-
-提升本身没有改变控制流边，但副本中的基本块指针已经变化，因此源版本的分析不能作为新版本的分析继续使用。管理器清除旧结果，后续 pass 按需重建。分析失效不使用全局世界计数。
-
-命令行：
+`: x` 是源码变量关联，不是参数存储方式。ParameterInst 由签名隐式定义，不在块内重复打印。返回数量保存在阶段版本中，每个 ret 引用该路径的结果。需要实际存储的参数在入口建立 slot 绑定；返回变量在每个返回点取得当前定义。Non-SSA 签名和无操作数 ret 保持原有槽位约定。
 
 ```bash
+cmake --build build -j4
 ./build/baltam_ir test/syntax/if_else.m -o /tmp/if_else.ir
 ./build/opt -passes=mem2reg /tmp/if_else.ir -o /tmp/if_else.ssa.ir
-./build/opt -passes='function(mem2reg)' /tmp/if_else.ir -o /tmp/if_else.ssa.ir
 ```
 
-C++ 管线：
-
 ```cpp
-#include "Transform/mem2reg.h"
-
 FunctionPassManager passes;
 passes.add_pass(Mem2RegPass{});
 passes.run(module);
 ```
 
-重复运行时，已经处于 SSA 的函数直接跳过。若原函数因安全限制被跳过，则保持 Non-SSA，不会只修改阶段标签。
-
-## 10. 后续方向
-
-后续可结合 slot 活跃性减少 PHI，增加无用及平凡 PHI 清理，并在明确参数、返回值、捕获与值包语义后扩大提升范围。更精确的效果分析可以减少整函数跳过，但必须先证明相关操作不会破坏 slot 的定义关系。
-
-验证应覆盖直线读写、分支汇合、循环回边、多层循环、定义前读取、不可达前驱和动态调用屏障，同时检查优化前后可观察结果、源 Non-SSA 的保留，以及 Value/Use 使用链的一致性。专门的 Verifier 仍是独立 pass。
+已经是 SSA 的函数再次运行时直接跳过。新版 IR 转换可独立测试，实际执行仍需接入工作区状态读取、定义检查和运行时回退机制。

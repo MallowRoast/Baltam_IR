@@ -21,11 +21,22 @@ namespace baltam {
 class IRModule;
 class IRStageVersion;
 class IRUnit;
+class FunctionUnit;
 
 enum class IRStage : std::uint8_t { NonSSA, SSA, OptimizedSSA };
 
+struct SharedSlotRef {
+    FunctionUnit* function; // 最终拥有变量的词法外层函数，非拥有引用。
+    SlotId slot;            // 目标函数 SlotTable 中的编号。
+};
+
 struct SlotInfo {
     InternedString name;
+    // 声明标记不代表当前执行已经建立对应绑定。
+    bool has_global_decl = false;
+    bool has_persistent_decl = false;
+    bool shared_by_nested = false;              // 当前函数拥有，且被嵌套函数共享。
+    std::optional<SharedSlotRef> shared_target; // 引用外层拥有的共享槽位。
 };
 
 // 槽位编号只在所属代码单元内有效，表项不重复保存编号。
@@ -33,6 +44,7 @@ class SlotTable final {
 public:
     [[nodiscard]] SlotId add_slot(InternedString name);
     [[nodiscard]] const SlotInfo& find(SlotId id) const;
+    [[nodiscard]] SlotInfo& find(SlotId id);
     [[nodiscard]] std::size_t size() const noexcept { return slots_.size(); }
 
 private:
@@ -134,6 +146,17 @@ public:
                                     Value::Form form = Value::Form::Single, bool constant = false);
     [[nodiscard]] std::shared_ptr<IRStageVersion> clone(IRUnit& owner) const;
 
+    // 仅用于与基线结构和编号相同的初始克隆；变换后调用 compact_values 归一来源。
+    void initialize_deopt(const IRStageVersion* baseline);
+
+    [[nodiscard]] const IRStageVersion* deopt_baseline() const noexcept { return deopt_baseline_; }
+
+    [[nodiscard]] std::optional<ValueId> deopt_source(ValueId baseline_value) const;
+
+    [[nodiscard]] std::size_t return_count() const noexcept { return return_count_; }
+
+    void set_return_count(std::size_t count) noexcept { return_count_ = count; }
+
     // 删除留下的空位统一压缩，同时更新结果编号、输入和值表。
     void compact_values();
 
@@ -157,6 +180,11 @@ private:
     BasicBlock* entry_block_ = nullptr;
     std::vector<std::unique_ptr<BasicBlock>> blocks_;
     ValueTable values_;
+    std::size_t return_count_ = 0;
+    // 非拥有引用；所属函数须保证基线在 SSA 使用期间存活且不被替换。
+    const IRStageVersion* deopt_baseline_ = nullptr;
+    std::vector<std::optional<ValueId>> baseline_to_ssa_;
+    std::vector<std::optional<ValueId>> deopt_replacements_;
 };
 
 // 每个代码单元拥有一张跨阶段共用的槽位表。
@@ -223,6 +251,12 @@ public:
         return nested_functions_;
     }
     FunctionUnit& append_nested_function(std::unique_ptr<FunctionUnit> function);
+
+    // 在函数树建立后，由词法绑定分析按从外到内的顺序登记共享引用。
+    void bind_shared_slot(SlotId local, FunctionUnit& owner, SlotId target);
+
+    [[nodiscard]] FunctionUnit* lexical_parent() const noexcept { return lexical_parent_; }
+
     [[nodiscard]] std::shared_ptr<IRStageVersion> stage_version(IRStage stage);
     [[nodiscard]] std::shared_ptr<const IRStageVersion> stage_version(IRStage stage) const;
     [[nodiscard]] std::shared_ptr<IRStageVersion> current_version();
@@ -230,6 +264,7 @@ public:
 
 private:
     std::string name_;
+    FunctionUnit* lexical_parent_ = nullptr;
     IRStage current_stage_ = IRStage::NonSSA;
     std::vector<SlotId> parameter_slots_;
     std::vector<SlotId> return_slots_;

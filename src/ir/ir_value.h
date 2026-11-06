@@ -63,6 +63,11 @@ public:
 
     void set_constant(bool constant) noexcept { is_constant_ = constant; }
 
+    // 静态赋值身份，运行时据此更新槽位来源表。
+    [[nodiscard]] std::optional<SlotId> assigned_slot() const noexcept { return assigned_slot_; }
+
+    void set_assigned_slot(std::optional<SlotId> slot) noexcept { assigned_slot_ = slot; }
+
     [[nodiscard]] bool use_empty() const noexcept { return first_use_ == nullptr; }
 
     [[nodiscard]] const Use* first_use() const noexcept { return first_use_; }
@@ -80,6 +85,7 @@ private:
     Form form_ = Form::Single;
     bool is_constant_ = false;
     Use* first_use_ = nullptr;
+    std::optional<SlotId> assigned_slot_;
 };
 
 // 每个输入位置独立拥有一条引用，空值表示 Undefined。

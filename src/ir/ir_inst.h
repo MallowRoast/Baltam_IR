@@ -71,7 +71,9 @@ enum class Effect : std::uint8_t { NoSlotWrite, MayWriteSlot };
 class Instruction : public User {
 public:
     enum class Type : std::uint8_t {
+        Parameter,
         Const,
+        Copy,
         Concat,
         CellConstruct,
         Colon,
@@ -98,6 +100,7 @@ public:
         Binary,
         LoadSlot,
         StoreSlot,
+        WorkspaceBarrier,
         Phi,
     };
 
@@ -107,6 +110,11 @@ public:
     [[nodiscard]] std::unique_ptr<Instruction> clone() const;
 
     [[nodiscard]] Type type() const noexcept { return type_; }
+
+    // 非拥有引用，基线版本由所属函数持有；不参与文本持久化。
+    [[nodiscard]] const Instruction* baseline_instruction() const noexcept {
+        return baseline_instruction_;
+    }
 
     [[nodiscard]] Effect effect() const noexcept;
     [[nodiscard]] BasicBlock* parent() const noexcept { return parent_; }
@@ -118,13 +126,33 @@ public:
 protected:
     explicit Instruction(Type type) noexcept : type_(type) {}
 
-    Instruction(const Instruction& other) : User(other), type_(other.type_) {}
+    Instruction(const Instruction& other)
+        : User(other), type_(other.type_), baseline_instruction_(other.baseline_instruction_) {}
 
 private:
     friend class BasicBlock;
+    friend class IRStageVersion;
 
     Type type_;
     BasicBlock* parent_ = nullptr;
+    const Instruction* baseline_instruction_ = nullptr;
+};
+
+// 使工作区变量的旧绑定失效；不使此前已经计算出的 SSA 值失效。
+class WorkspaceBarrierInst final : public Instruction {
+public:
+    WorkspaceBarrierInst() : Instruction(Type::WorkspaceBarrier) {}
+};
+
+// SSA 入口参数，文本定义放在函数签名中，槽位只保留源码变量身份。
+class ParameterInst final : public Instruction {
+public:
+    ParameterInst(ValueId result, std::size_t index, SlotId slot)
+        : Instruction(Type::Parameter), result(result), index(index), slot(slot) {}
+
+    ValueId result;
+    std::size_t index;
+    SlotId slot;
 };
 
 // 将运行前确定的对象物化为一个 IR 值；non-SSA 和 SSA 使用同一结构。
@@ -134,6 +162,18 @@ public:
         : Instruction(Type::Const), value(std::move(value)), result(result) {}
 
     const_ba_obj_ptr value;
+    ValueId result;
+};
+
+// 保留赋值发生的位置和独立结果身份，不要求深拷贝底层数组。
+class CopyInst final : public Instruction {
+public:
+    CopyInst(ValueId result, ValueId value) : Instruction(Type::Copy), result(result) {
+        append_operand(value);
+    }
+
+    [[nodiscard]] ValueId value() const { return input(0); }
+
     ValueId result;
 };
 
@@ -188,11 +228,23 @@ private:
     std::vector<BasicBlock*> predecessors_;
 };
 
-// 从已绑定的槽位读取一个值；槽位类别从所属代码单元的槽位表查询。
+// 读取槽位状态；SSA 中允许取得 Undefined，变量实际使用保留原读取语义。
 class LoadSlotInst final : public Instruction {
 public:
     LoadSlotInst(ValueId result, SlotId slot)
         : Instruction(Type::LoadSlot), result(result), slot(slot) {}
+
+    // 有来源输入时直接读取 SSA 值，Undefined 在原变量读取位置报告错误。
+    [[nodiscard]] bool has_source() const noexcept { return operand_count() != 0; }
+
+    [[nodiscard]] std::optional<ValueId> source() const { return operand(0).value(); }
+
+    void set_source(std::optional<ValueId> value) {
+        if (has_source())
+            set_operand(0, value);
+        else
+            append_operand(value);
+    }
 
     ValueId result;
     SlotId slot;
@@ -365,10 +417,20 @@ public:
     BasicBlock* false_target;
 };
 
-// 结束当前代码单元；函数返回值由返回槽位提供。
+// Non-SSA 返回值由槽位提供；SSA 直接引用返回寄存器。
 class ReturnInst final : public Instruction {
 public:
-    ReturnInst() : Instruction(Type::Return) {}
+    explicit ReturnInst(const std::vector<ValueId>& values = {}) : Instruction(Type::Return) {
+        append_values(values);
+    }
+
+    [[nodiscard]] std::vector<ValueId> values() const { return input_values(); }
+
+    void set_values(const std::vector<ValueId>& values) {
+        while (operand_count())
+            erase_operand(operand_count() - 1);
+        append_values(values);
+    }
 };
 
 // 保留 A(...) 的名字歧义，后续再确定调用或索引。

@@ -38,8 +38,7 @@ std::string quote(std::string_view s, char delimiter = '"') {
     return out + delimiter;
 }
 
-template <class T>
-T integer(std::string_view s, int base = 10) {
+template <class T> T integer(std::string_view s, int base = 10) {
     T result{};
     auto parsed = std::from_chars(s.data(), s.data() + s.size(), result, base);
     if (parsed.ec != std::errc{} || parsed.ptr != s.data() + s.size())
@@ -110,12 +109,9 @@ struct Cursor {
         }
         throw std::invalid_argument("字符串缺少结束引号");
     }
-
-
 };
 
-template <class T>
-std::string encode_element(T x) {
+template <class T> std::string encode_element(T x) {
     if constexpr (std::is_floating_point_v<T>) {
         using U = std::conditional_t<sizeof(T) == 4, std::uint32_t, std::uint64_t>;
         U bits;
@@ -136,8 +132,7 @@ std::string encode_element(T x) {
         return "(" + encode_element(x.real()) + ", " + encode_element(x.imag()) + ")";
 }
 
-template <class T>
-T decode_element(Cursor& in) {
+template <class T> T decode_element(Cursor& in) {
     if constexpr (std::is_floating_point_v<T>) {
         auto text = in.token();
         if (text.size() != 2 + sizeof(T) * 2 || text.substr(0, 2) != "0x")
@@ -172,21 +167,21 @@ T decode_element(Cursor& in) {
 }
 
 // 文件类型名称与运行时矩阵类型的对应关系。
-#define SIMPLE_TYPES(X) \
-    X(ba_double_mat, double, "double") \
-    X(ba_single_mat, float, "single") \
-    X(ba_int8_mat, std::int8_t, "int8") \
-    X(ba_int16_mat, std::int16_t, "int16") \
-    X(ba_int_mat, std::int32_t, "int32") \
-    X(ba_int64_mat, std::int64_t, "int64") \
-    X(ba_uint8_mat, std::uint8_t, "uint8") \
-    X(ba_uint16_mat, std::uint16_t, "uint16") \
-    X(ba_uint_mat, std::uint32_t, "uint32") \
-    X(ba_uint64_mat, std::uint64_t, "uint64") \
-    X(ba_bool_mat, bool, "logical") \
-    X(ba_char_mat, char, "char") \
-    X(ba_string, std::string, "string") \
-    X(ba_complex_double_mat, std::complex<double>, "complex<double>") \
+#define SIMPLE_TYPES(X)                                                                            \
+    X(ba_double_mat, double, "double")                                                             \
+    X(ba_single_mat, float, "single")                                                              \
+    X(ba_int8_mat, std::int8_t, "int8")                                                            \
+    X(ba_int16_mat, std::int16_t, "int16")                                                         \
+    X(ba_int_mat, std::int32_t, "int32")                                                           \
+    X(ba_int64_mat, std::int64_t, "int64")                                                         \
+    X(ba_uint8_mat, std::uint8_t, "uint8")                                                         \
+    X(ba_uint16_mat, std::uint16_t, "uint16")                                                      \
+    X(ba_uint_mat, std::uint32_t, "uint32")                                                        \
+    X(ba_uint64_mat, std::uint64_t, "uint64")                                                      \
+    X(ba_bool_mat, bool, "logical")                                                                \
+    X(ba_char_mat, char, "char")                                                                   \
+    X(ba_string, std::string, "string")                                                            \
+    X(ba_complex_double_mat, std::complex<double>, "complex<double>")                              \
     X(ba_complex_single_mat, std::complex<float>, "complex<single>")
 
 std::string descriptor(const ba_obj& obj) {
@@ -219,8 +214,7 @@ std::string descriptor(const ba_obj& obj) {
     return out;
 }
 
-template <class T>
-std::string encode_array(const ba_obj& obj, std::string* display) {
+template <class T> std::string encode_array(const ba_obj& obj, std::string* display) {
     auto& m = *obj.cget<matrix<T>>();
     if constexpr (std::is_arithmetic_v<T> && !std::is_same_v<T, char> && !std::is_same_v<T, bool>) {
         if (display && m.size() == 1) {
@@ -229,6 +223,20 @@ std::string encode_array(const ba_obj& obj, std::string* display) {
             text << std::setprecision(17) << +m(0);
             *display = text.str();
         }
+    }
+
+    if constexpr (std::is_same_v<T, char>) {
+        const auto& dims = m.dim_vec();
+        if (display && dims.size() == 2 &&
+            (dims[0] == 1 || dims[1] == 1 || (dims[0] == 0 && dims[1] == 0))) {
+            std::string text;
+            for (baIndex i = 0; i < m.size(); ++i)
+                text += m(i);
+            *display = quote(text, '\'');
+        }
+    } else if constexpr (std::is_same_v<T, std::string>) {
+        if (display && m.size() == 1)
+            *display = quote(m(0));
     }
 
     std::string out = "[";
@@ -314,8 +322,7 @@ Shape parse_shape(const std::string& desc) {
     return result;
 }
 
-template <class T>
-const_ba_obj_ptr decode_array(Cursor& in, const Shape& shape) {
+template <class T> const_ba_obj_ptr decode_array(Cursor& in, const Shape& shape) {
     // 每个元素至少占一个字符，分配内存前先排除明显过大的元素数量。
     if (shape.count > in.s.size())
         throw std::invalid_argument("常量元素数量超过内联数据长度");
@@ -336,7 +343,7 @@ struct Line {
 };
 Line parse_line(std::string_view text) {
     static const std::regex expression(
-        R"(^\s*%([0-9]+)\s*=\s*const\s+(!c[0-9]+)\s*(?:\([^()]*\))?\s*:\s*(\S+\s+[0-9]+(?:x[0-9]+)+)\s*$)");
+        R"IR(^\s*%([0-9]+)\s*=\s*const\s+(!c[0-9]+)\s*(?:\((?:[^()'"]|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')*\))?\s*:\s*(\S+\s+[0-9]+(?:x[0-9]+)+)\s*(?:\[assigned_slot=slot_[^\s\]]+\])?\s*$)IR");
     std::smatch m;
     std::string s(text);
     if (!std::regex_match(s, m, expression))

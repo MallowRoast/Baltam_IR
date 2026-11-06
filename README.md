@@ -92,15 +92,13 @@ export LD_LIBRARY_PATH=/home/zj/Desktop/baltam_kernel/build/src:/home/zj/Desktop
 
 输入、输出均支持相对路径，相对路径以当前工作目录为准。不指定 `-o` 时输出到终端；指定时写入文件并覆盖已有内容，输出不能与输入为同一个文件。
 
-输出包括模块路径、函数或脚本、当前 IR 阶段、slot 表、基本块与指令。例如：
+输出包括模块路径、函数或脚本、当前 IR 阶段、基本块与指令，槽位直接显示为 `slot_变量名`。例如：
 
 ```text
 ; ModulePath = '/absolute/path/to/if_else.m'
 
 define @if_else() {
 ; stage: Non-SSA
-; slots:
-;   slot0 = x
 ...
 }
 ```
@@ -134,7 +132,7 @@ CMake 目标为 `baltam_opt`，可执行文件为 `opt`。命令行参考 LLVM o
 ./build/opt -S -passes='function(mem2reg)' input.ir -o ssa.ir
 ```
 
-mem2reg 基于支配边界插入 PHI，沿支配树重命名，删除可提升局部槽位的读写并重建值表。转换在副本上完成，成功后发布基础 SSA 版本，保留原 Non-SSA。第一版保守保留参数、返回、全局、持久及捕获槽位；存在定义前读取的槽位不提升，包含可能隐式改写工作区操作的函数暂不转换。脚本主体仍保留可观察的 workspace 存储，函数及局部函数按上述规则处理。
+mem2reg 从 load 按需查询块内及前驱定义，使用缓存和占位 PHI 处理分支与循环，先替换 load 再将 store 转为独立赋值 copy。可能未定义的变量保留原位置的 `load` 读取语义；显式屏障后的值通过 `load` 按需取得。转换在副本上完成，保留原 Non-SSA 和恢复映射。SSA 参数从签名寄存器进入，ret 直接引用返回寄存器；全局、持久及共享槽位等仍保守保留；未受同块紧邻后继屏障保护的动态操作使函数保持 Non-SSA。自动捕获分析尚未接入，嵌套函数及其父函数仍暂不转换。详细流程见 [mem2reg 设计](docs/mem2reg设计.md)。工作区访问、定义检查和回退的运行时执行仍待接入。
 
 pass 管理采用函数管线、按需分析缓存和 `PreservedAnalyses` 返回值；版本切换或不保留分析时，清除 CFG 和支配结果。当前实现位于 `src/Transform`，并未链接 LLVM。
 
@@ -176,7 +174,7 @@ C++ 调用方链接 `baltam_ir_core`，通过 `IRBuilder::build_file(path)` 获�
 
 IR 生成与回归验证的分层方案见 [IR 生成正确性测试方案](docs/IR生成正确性测试方案.md)。
 
-SSA 转换所需的分析设计见 [支配分析设计](docs/支配分析设计.md)，槽位提升的算法与限制见 [mem2reg 设计](docs/mem2reg设计.md)。
+通用控制流与支配分析设计见 [支配分析设计](docs/支配分析设计.md)，槽位提升的算法与限制见 [mem2reg 设计](docs/mem2reg设计.md)。
 
 ## 代码格式化
 
