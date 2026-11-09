@@ -101,7 +101,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (options.version) {
-            std::cout << "Baltam IR opt 0.1.2\n";
+            std::cout << "Baltam IR opt " << BALTAM_IR_VERSION << '\n';
             return 0;
         }
         if (options.print_passes) {

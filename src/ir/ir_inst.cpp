@@ -4,6 +4,9 @@ namespace baltam {
 
 std::unique_ptr<Instruction> Instruction::clone() const {
     switch (type()) {
+    case Type::WorkspaceBarrier:
+        return std::make_unique<WorkspaceBarrierInst>(
+            static_cast<const WorkspaceBarrierInst&>(*this));
     case Type::Const:
         return std::make_unique<ConstInst>(static_cast<const ConstInst&>(*this));
     case Type::Phi:
@@ -14,8 +17,6 @@ std::unique_ptr<Instruction> Instruction::clone() const {
         return std::make_unique<CellConstructInst>(static_cast<const CellConstructInst&>(*this));
     case Type::Colon:
         return std::make_unique<ColonInst>(static_cast<const ColonInst&>(*this));
-    case Type::MagicColon:
-        return std::make_unique<MagicColonInst>(static_cast<const MagicColonInst&>(*this));
     case Type::MagicEnd:
         return std::make_unique<MagicEndInst>(static_cast<const MagicEndInst&>(*this));
     case Type::GlobalDecl:
@@ -60,6 +61,8 @@ std::unique_ptr<Instruction> Instruction::clone() const {
         return std::make_unique<LoadSlotInst>(static_cast<const LoadSlotInst&>(*this));
     case Type::StoreSlot:
         return std::make_unique<StoreSlotInst>(static_cast<const StoreSlotInst&>(*this));
+    case Type::Record:
+        return std::make_unique<RecordInst>(static_cast<const RecordInst&>(*this));
     }
     throw std::logic_error("无法复制未知的指令类型");
 }
@@ -69,13 +72,16 @@ Effect Instruction::effect() const noexcept {
     case Type::Phi:
     case Type::Const:
     case Type::CellConstruct:
-    case Type::MagicColon:
     case Type::Goto:
     case Type::Branch:
     case Type::Return:
     case Type::LoadSlot:
-    case Type::Intrinsic:
         return Effect::NoSlotWrite;
+    case Type::Intrinsic:
+        // 初始化可能执行重载 size/double，不能作为纯内部算术处理。
+        return static_cast<const IntrinsicInst&>(*this).id == IntrinsicId::ForeachInit
+                   ? Effect::MayWriteSlot
+                   : Effect::NoSlotWrite;
 
     case Type::Concat:
     case Type::Colon:
@@ -96,6 +102,10 @@ Effect Instruction::effect() const noexcept {
     case Type::Unary:
     case Type::Binary:
     case Type::StoreSlot:
+    // record 提交可观察的工作区来源，不能作为无副作用计算删除或移动。
+    case Type::Record:
+    // 屏障使工作区绑定失效；支持它的变换须按指令类型单独处理。
+    case Type::WorkspaceBarrier:
         return Effect::MayWriteSlot;
     }
     return Effect::MayWriteSlot;

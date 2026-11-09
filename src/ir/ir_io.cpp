@@ -1,5 +1,6 @@
 #include "ir/ir_io.h"
 #include "ir/ir_constant.h"
+#include "ba_obj/ba_type.h"
 
 #include <algorithm>
 #include <charconv>
@@ -14,40 +15,101 @@ namespace baltam {
 
 namespace {
 
+std::string slot_reference(const SlotInfo& info) {
+    return (info.is_internal ? "internal_" : "slot_") + info.name;
+}
+
 std::string dot_member(const Operand& member) {
     if (const auto* name = std::get_if<InternedString>(&member))
         return "." + *name;
     return ".(%" + std::to_string(std::get<ValueId>(member).index) + ")";
 }
 
-std::string result_prefix(const std::vector<ValueId>& results) {
+// 类型名与常量描述保持一致，未知信息不输出占位符。
+const std::map<ba_type, std::string> type_names{
+    {ba_double_mat, "double"},
+    {ba_single_mat, "single"},
+    {ba_int8_mat, "int8"},
+    {ba_int16_mat, "int16"},
+    {ba_int_mat, "int32"},
+    {ba_int64_mat, "int64"},
+    {ba_uint8_mat, "uint8"},
+    {ba_uint16_mat, "uint16"},
+    {ba_uint_mat, "uint32"},
+    {ba_uint64_mat, "uint64"},
+    {ba_bool_mat, "logical"},
+    {ba_char_mat, "char"},
+    {ba_string, "string"},
+    {ba_complex_double_mat, "complex<double>"},
+    {ba_complex_single_mat, "complex<single>"},
+    {ba_cell, "cell"},
+    {ba_struct, "struct"},
+    {ba_function_handle, "function_handle"},
+    {ba_range, "range"},
+    {ba_class_mat, "class"},
+    {ba_extern, "extern"},
+    {ba_sparse_double, "sparse<double>"},
+    {ba_sparse_single, "sparse<single>"},
+    {ba_sparse_complex_double, "sparse<complex<double>>"},
+    {ba_sparse_complex_single, "sparse<complex<single>>"},
+    {ba_sparse_logical, "sparse<logical>"},
+    {ba_error, "error"},
+    {ba_control, "control"},
+    {ba_void, "void"},
+    {ba_exit, "exit"},
+    {ba_eof, "eof"},
+    {ba_var_list, "var_list"},
+    {ba_table, "table"},
+    {ba_datetime, "datetime"},
+    {ba_duration, "duration"},
+    {ba_calendar_duration, "calendar_duration"},
+    {ba_timetable, "timetable"},
+    {ba_timerange, "timerange"},
+    {ba_categorical, "categorical"},
+    {ba_withtol, "withtol"},
+    {ba_dictionary, "dictionary"},
+    {ba_vartype, "vartype"},
+    {ba_inner_t, "inner"}};
+
+const std::map<std::string, IntrinsicId> intrinsic_ids{
+    {"switch_match", IntrinsicId::SwitchMatch},
+    {"foreach_init", IntrinsicId::ForeachInit},
+    {"gt_double", IntrinsicId::GtDouble},
+    {"add_double", IntrinsicId::AddDouble},
+    {"logical_scalar", IntrinsicId::LogicalScalar}};
+
+std::string value_definition(const Value& value) {
+    std::string text = "%" + std::to_string(value.id().index);
+    if (!value.type() && !value.shape())
+        return text;
+    text += ": ";
+    if (value.type())
+        text += type_names.at(*value.type());
+    if (value.shape()) {
+        if (value.type())
+            text += ' ';
+        for (std::size_t i = 0; i < value.shape()->size(); ++i) {
+            if (i)
+                text += 'x';
+            const auto dim = value.shape()->at(i);
+            text += dim ? std::to_string(*dim) : "?";
+        }
+    }
+    return text;
+}
+
+std::string result_prefix(const std::vector<ValueId>& results, const IRStageVersion& version) {
     if (results.empty())
         return {};
     if (results.size() == 1)
-        return "%" + std::to_string(results.front().index) + " = ";
+        return value_definition(version.values().find(results.front())) + " = ";
     std::string text = "[";
     for (std::size_t i = 0; i < results.size(); ++i) {
         if (i)
             text += ", ";
-        text += "%" + std::to_string(results[i].index);
+        text += value_definition(version.values().find(results[i]));
     }
     return text + "] = ";
-}
-
-const char* dispatch_name(DispatchType type) {
-    switch (type) {
-    case DispatchType::Dynamic:
-        return "dynamic";
-    case DispatchType::MFunction:
-        return "mfunction";
-    case DispatchType::Builtin:
-        return "builtin";
-    case DispatchType::Internal:
-        return "internal";
-    case DispatchType::Plugin:
-        return "plugin";
-    }
-    throw std::invalid_argument("无效的调用分派类型");
 }
 
 std::string function_path(const IRModule& module, const FunctionUnit* target) {
@@ -68,7 +130,11 @@ std::string function_path(const IRModule& module, const FunctionUnit* target) {
     throw std::invalid_argument("静态调用目标不属于当前模块");
 }
 
-std::string print_instruction(const Instruction& instruction, ConstantEncoder& constants) {
+std::string print_instruction(const Instruction& instruction, const IRStageVersion& version,
+                              ConstantEncoder& constants) {
+    const auto slot = [&instruction](SlotId id) {
+        return slot_reference(instruction.parent()->parent()->slot_table().find(id));
+    };
     switch (instruction.type()) {
     case Instruction::Type::Const:
         return constants.encode(static_cast<const ConstInst&>(instruction));
@@ -76,7 +142,7 @@ std::string print_instruction(const Instruction& instruction, ConstantEncoder& c
         const auto& inst = static_cast<const PhiInst&>(instruction);
         if (inst.operand_count() == 0)
             throw std::invalid_argument("PHI 指令缺少前驱输入");
-        std::string text = "%" + std::to_string(inst.result.index) + " = phi ";
+        std::string text = result_prefix({inst.result}, version) + "phi ";
         for (std::size_t i = 0; i < inst.operand_count(); ++i) {
             const auto incoming = inst.incoming(i);
             if (!incoming.predecessor)
@@ -89,15 +155,18 @@ std::string print_instruction(const Instruction& instruction, ConstantEncoder& c
         }
         return text;
     }
+    case Instruction::Type::Record: {
+        const auto& inst = static_cast<const RecordInst&>(instruction);
+        return "record " + slot(inst.slot) + ", %" + std::to_string(inst.value().index);
+    }
     case Instruction::Type::StoreSlot: {
         const auto& inst = static_cast<const StoreSlotInst&>(instruction);
-        return "store slot" + std::to_string(inst.slot.index) + " %" +
-               std::to_string(inst.value().index);
+        return "store " + slot(inst.slot) + " %" + std::to_string(inst.value().index);
     }
     case Instruction::Type::BraceReference: {
         const auto& inst = static_cast<const BraceReferenceInst&>(instruction);
         const auto indices_input = inst.indices();
-        std::string text = "%" + std::to_string(inst.result.index) + " = brace_ref %" +
+        std::string text = result_prefix({inst.result}, version) + "brace_ref %" +
                            std::to_string(inst.base().index);
         for (ValueId index : indices_input)
             text += ", %" + std::to_string(index.index);
@@ -106,7 +175,7 @@ std::string print_instruction(const Instruction& instruction, ConstantEncoder& c
     case Instruction::Type::BraceAssign: {
         const auto& inst = static_cast<const BraceAssignInst&>(instruction);
         const auto indices_input = inst.indices();
-        std::string text = "%" + std::to_string(inst.result.index) + " = brace_assign %" +
+        std::string text = result_prefix({inst.result}, version) + "brace_assign %" +
                            std::to_string(inst.base().index);
         for (ValueId index : indices_input)
             text += ", %" + std::to_string(index.index);
@@ -116,7 +185,7 @@ std::string print_instruction(const Instruction& instruction, ConstantEncoder& c
         const auto& inst = static_cast<const ApplyInst&>(instruction);
         const auto arguments_input = inst.arguments();
         const auto callee_or_base_input = inst.callee_or_base();
-        std::string text = result_prefix(inst.results) + "apply ";
+        std::string text = result_prefix(inst.results, version) + "apply ";
         if (const auto* name = std::get_if<InternedString>(&callee_or_base_input))
             text += *name;
         else
@@ -132,32 +201,26 @@ std::string print_instruction(const Instruction& instruction, ConstantEncoder& c
     case Instruction::Type::Call: {
         const auto& inst = static_cast<const CallInst&>(instruction);
         const auto arguments_input = inst.arguments();
-        std::string text = result_prefix(inst.results) + "call " + inst.callee + "(";
+        std::string text = result_prefix(inst.results, version) + "call " + inst.callee + "(";
         for (std::size_t i = 0; i < arguments_input.size(); ++i) {
             if (i)
                 text += ", ";
             text += "%" + std::to_string(arguments_input[i].index);
         }
         text += ")";
-        if (inst.dispatch_type != DispatchType::Dynamic || inst.m_function_target) {
-            text += " [dispatch=";
-            text += dispatch_name(inst.dispatch_type);
-            if (inst.m_function_target) {
-                if (!inst.parent() || !inst.parent()->parent() ||
-                    !inst.parent()->parent()->parent())
-                    throw std::invalid_argument("静态调用目标需要所属 IRModule");
-                text += ",target=@" +
-                        function_path(*inst.parent()->parent()->parent(), inst.m_function_target);
-            }
-            text += "]";
+        if (inst.m_function_target) {
+            const auto* module = instruction.parent()->parent()->parent();
+            if (!module)
+                throw std::invalid_argument("静态调用目标需要所属模块");
+            text += " [target=@" + function_path(*module, inst.m_function_target) + "]";
         }
         return text;
     }
     case Instruction::Type::ValueApply: {
         const auto& inst = static_cast<const ValueApplyInst&>(instruction);
         const auto arguments_input = inst.arguments();
-        std::string text =
-            result_prefix(inst.results) + "value_apply %" + std::to_string(inst.base().index) + "(";
+        std::string text = result_prefix(inst.results, version) + "value_apply %" +
+                           std::to_string(inst.base().index) + "(";
         for (std::size_t i = 0; i < arguments_input.size(); ++i) {
             if (i)
                 text += ", ";
@@ -168,7 +231,7 @@ std::string print_instruction(const Instruction& instruction, ConstantEncoder& c
     case Instruction::Type::ParenReference: {
         const auto& inst = static_cast<const ParenReferenceInst&>(instruction);
         const auto indices_input = inst.indices();
-        std::string text = "%" + std::to_string(inst.result.index) + " = paren_ref %" +
+        std::string text = result_prefix({inst.result}, version) + "paren_ref %" +
                            std::to_string(inst.base().index);
         for (ValueId index : indices_input)
             text += ", %" + std::to_string(index.index);
@@ -177,7 +240,7 @@ std::string print_instruction(const Instruction& instruction, ConstantEncoder& c
     case Instruction::Type::ParenAssign: {
         const auto& inst = static_cast<const ParenAssignInst&>(instruction);
         const auto indices_input = inst.indices();
-        std::string text = "%" + std::to_string(inst.result.index) + " = paren_assign %" +
+        std::string text = result_prefix({inst.result}, version) + "paren_assign %" +
                            std::to_string(inst.base().index);
         for (ValueId index : indices_input)
             text += ", %" + std::to_string(index.index);
@@ -186,7 +249,7 @@ std::string print_instruction(const Instruction& instruction, ConstantEncoder& c
     case Instruction::Type::ParenDelete: {
         const auto& inst = static_cast<const ParenDeleteInst&>(instruction);
         const auto indices_input = inst.indices();
-        std::string text = "%" + std::to_string(inst.result.index) + " = paren_delete %" +
+        std::string text = result_prefix({inst.result}, version) + "paren_delete %" +
                            std::to_string(inst.base().index);
         for (ValueId index : indices_input)
             text += ", %" + std::to_string(index.index);
@@ -201,33 +264,38 @@ std::string print_instruction(const Instruction& instruction, ConstantEncoder& c
             base = *name;
         else
             base = "%" + std::to_string(std::get<ValueId>(base_or_name_input).index);
-        return "%" + std::to_string(inst.result.index) + " = dot_access " + base +
+        return result_prefix({inst.result}, version) + "dot_access " + base +
                dot_member(member_input);
     }
     case Instruction::Type::DotReference: {
         const auto& inst = static_cast<const DotReferenceInst&>(instruction);
         const auto member_input = inst.member();
-        return "%" + std::to_string(inst.result.index) + " = dot_ref %" +
+        return result_prefix({inst.result}, version) + "dot_ref %" +
                std::to_string(inst.base().index) + dot_member(member_input);
     }
     case Instruction::Type::DotAssign: {
         const auto& inst = static_cast<const DotAssignInst&>(instruction);
         const auto member_input = inst.member();
-        return "%" + std::to_string(inst.result.index) + " = dot_assign %" +
+        return result_prefix({inst.result}, version) + "dot_assign %" +
                std::to_string(inst.base().index) + dot_member(member_input) + ", %" +
                std::to_string(inst.value().index);
     }
+    case Instruction::Type::WorkspaceBarrier:
+        return "workspace_barrier";
     case Instruction::Type::LoadSlot: {
         const auto& inst = static_cast<const LoadSlotInst&>(instruction);
-        return "%" + std::to_string(inst.result.index) + " = load slot" +
-               std::to_string(inst.slot.index);
+        std::string text = result_prefix({inst.result}, version) + "load " + slot(inst.slot);
+        if (inst.has_source()) {
+            const auto source = inst.source();
+            text += ", " + (source ? "%" + std::to_string(source->index) : "Undefined");
+        }
+        return text;
     }
     case Instruction::Type::Concat: {
         const auto& inst = static_cast<const ConcatInst&>(instruction);
         const auto items_input = inst.items();
-        std::string text =
-            "%" + std::to_string(inst.result.index) +
-            (inst.axis == ConcatInst::Axis::Horizontal ? " = horzcat" : " = vertcat");
+        std::string text = result_prefix({inst.result}, version) +
+                           (inst.axis == ConcatInst::Axis::Horizontal ? "horzcat" : "vertcat");
         for (std::size_t i = 0; i < items_input.size(); ++i) {
             text += i == 0 ? " %" : ", %";
             text += std::to_string(items_input[i].index);
@@ -237,18 +305,17 @@ std::string print_instruction(const Instruction& instruction, ConstantEncoder& c
     case Instruction::Type::CellConstruct: {
         const auto& inst = static_cast<const CellConstructInst&>(instruction);
         const auto items_input = inst.items();
-        std::string text = "%" + std::to_string(inst.result.index) + " = cell";
+        std::string text = result_prefix({inst.result}, version) + "cell";
         for (std::size_t i = 0; i < items_input.size(); ++i) {
             text += i == 0 ? " %" : ", %";
             text += std::to_string(items_input[i].index);
         }
-        return text + " : " + std::to_string(inst.rows) + "x" + std::to_string(inst.cols) +
-               " cell array";
+        return text;
     }
     case Instruction::Type::Colon: {
         const auto& inst = static_cast<const ColonInst&>(instruction);
-        std::string text = "%" + std::to_string(inst.result.index) + " = colon %" +
-                           std::to_string(inst.start().index);
+        std::string text =
+            result_prefix({inst.result}, version) + "colon %" + std::to_string(inst.start().index);
         if (inst.step())
             text += ", %" + std::to_string(inst.step()->index);
         return text + ", %" + std::to_string(inst.stop().index);
@@ -273,7 +340,7 @@ std::string print_instruction(const Instruction& instruction, ConstantEncoder& c
             name = "ctranspose";
             break;
         }
-        return "%" + std::to_string(inst.result.index) + " = " + name + " %" +
+        return result_prefix({inst.result}, version) + "" + name + " %" +
                std::to_string(inst.operand().index);
     }
     case Instruction::Type::Binary: {
@@ -335,21 +402,21 @@ std::string print_instruction(const Instruction& instruction, ConstantEncoder& c
             name = "ne";
             break;
         }
-        return "%" + std::to_string(inst.result.index) + " = " + name + " %" +
+        return result_prefix({inst.result}, version) + "" + name + " %" +
                std::to_string(inst.lhs().index) + ", %" + std::to_string(inst.rhs().index);
     }
     case Instruction::Type::GlobalDecl: {
         const auto& inst = static_cast<const GlobalDeclInst&>(instruction);
         std::string text = "global";
         for (std::size_t i = 0; i < inst.slots.size(); ++i)
-            text += (i == 0 ? " slot" : ", slot") + std::to_string(inst.slots[i].index);
+            text += (i == 0 ? " " : ", ") + slot(inst.slots[i]);
         return text;
     }
     case Instruction::Type::PersistentDecl: {
         const auto& inst = static_cast<const PersistentDeclInst&>(instruction);
         std::string text = "persistent";
         for (std::size_t i = 0; i < inst.slots.size(); ++i)
-            text += (i == 0 ? " slot" : ", slot") + std::to_string(inst.slots[i].index);
+            text += (i == 0 ? " " : ", ") + slot(inst.slots[i]);
         return text;
     }
     case Instruction::Type::Goto: {
@@ -365,39 +432,23 @@ std::string print_instruction(const Instruction& instruction, ConstantEncoder& c
     case Instruction::Type::Intrinsic: {
         const auto& inst = static_cast<const IntrinsicInst&>(instruction);
         const auto operands_input = inst.operands();
-        const char* name = nullptr;
-        switch (inst.id) {
-        case IntrinsicId::SwitchMatch:
-            name = "switch_match";
-            break;
-        case IntrinsicId::ForeachInit:
-            name = "foreach_init";
-            break;
-        case IntrinsicId::ForeachCount:
-            name = "foreach_count";
-            break;
-        case IntrinsicId::ForeachGet:
-            name = "foreach_get";
-            break;
-        case IntrinsicId::IntGt:
-            name = "int_gt";
-            break;
-        case IntrinsicId::IntAdd:
-            name = "int_add";
-            break;
-        case IntrinsicId::LogicalScalar:
-            name = "logical_scalar";
-            break;
-        }
-        std::string text = "%" + std::to_string(inst.result.index) + " = intrinsic." + name;
+        const auto name =
+            std::find_if(intrinsic_ids.begin(), intrinsic_ids.end(),
+                         [&inst](const auto& entry) { return entry.second == inst.id; });
+        if (name == intrinsic_ids.end())
+            throw std::logic_error("无法输出未知的内部操作");
+        std::string text = result_prefix({inst.result}, version) + "intrinsic." + name->first;
         for (std::size_t i = 0; i < operands_input.size(); ++i)
             text += (i == 0 ? " %" : ", %") + std::to_string(operands_input[i].index);
         return text;
     }
     case Instruction::Type::Return: {
-        return "ret";
+        const auto values = static_cast<const ReturnInst&>(instruction).values();
+        std::string text = "ret";
+        for (std::size_t i = 0; i < values.size(); ++i)
+            text += (i ? ", %" : " %") + std::to_string(values[i].index);
+        return text;
     }
-    case Instruction::Type::MagicColon:
     case Instruction::Type::MagicEnd:
         throw std::logic_error("尚不支持索引占位指令的持久化");
     }
@@ -445,10 +496,49 @@ ValueId value_id(std::string_view text) {
     return ValueId{number(text.substr(1))};
 }
 
-SlotId slot_id(std::string_view text) {
-    if (!begins(text, "slot"))
-        throw std::invalid_argument("缺少槽位编号：" + std::string(text));
-    return SlotId{number(text.substr(4))};
+ValueId read_value_definition(std::string_view text, ValueTable& values) {
+    const auto colon = text.find(':');
+    const auto id = value_id(trim(text.substr(0, colon)));
+    if (colon == text.npos)
+        return id;
+    auto desc = trim(text.substr(colon + 1));
+    if (desc.empty())
+        throw std::invalid_argument("结果类型标注不能为空");
+    auto& value = values.reserve(id);
+    const auto space = desc.find(' ');
+    const auto name = desc.substr(0, space);
+    const auto type = std::find_if(type_names.begin(), type_names.end(),
+                                   [&name](const auto& entry) { return entry.second == name; });
+    if (type != type_names.end()) {
+        value.set_type(type->first);
+        if (space == std::string::npos)
+            return id;
+        desc = trim(std::string_view(desc).substr(space + 1));
+    }
+    std::vector<std::optional<std::size_t>> shape;
+    for (const auto& dim : split(desc, 'x')) {
+        if (dim == "?")
+            shape.push_back(std::nullopt);
+        else {
+            std::size_t size = 0;
+            const auto parsed = std::from_chars(dim.data(), dim.data() + dim.size(), size);
+            if (parsed.ec != std::errc{} || parsed.ptr != dim.data() + dim.size())
+                throw std::invalid_argument("未知的类型名或无效的维度：" + dim);
+            shape.push_back(size);
+        }
+    }
+    if (shape.size() < 2)
+        throw std::invalid_argument("数组形状至少需要两个维度");
+    value.set_shape(std::move(shape));
+    return id;
+}
+
+std::string slot_name(std::string_view text) {
+    const auto prefix = begins(text, "internal_") ? 9u : 5u;
+    if ((!begins(text, "slot_") && !begins(text, "internal_")) || text.size() == prefix ||
+        text.substr(prefix).find_first_of(" \t\r\n,(){}%") != text.npos)
+        throw std::invalid_argument("槽位名称格式无效：" + std::string(text));
+    return std::string(text.substr(prefix));
 }
 
 std::string unquote_path(std::string_view text) {
@@ -505,9 +595,15 @@ struct PendingCallTarget {
 class UnitReader {
 public:
     UnitReader(IRUnit& unit, IRStageVersion& version, const UnitText& text,
-               std::vector<PendingCallTarget>& pending_targets, const ConstantDecoder& constants)
+               std::vector<PendingCallTarget>& pending_targets, const ConstantDecoder& constants,
+               std::vector<ValueId> parameters = {})
         : unit_(unit), version_(version), text_(text), pending_targets_(pending_targets),
-          constants_(constants) {}
+          constants_(constants), parameters_(std::move(parameters)) {
+        for (std::size_t i = 0; i < unit_.slot_table().size(); ++i) {
+            const SlotId id{static_cast<std::uint32_t>(i)};
+            slots_.emplace(slot_reference(unit_.slot_table().find(id)), id);
+        }
+    }
 
     void read() {
         // 首先创建全部基本块，允许控制流前向引用。
@@ -520,6 +616,13 @@ public:
                 blocks_[label] = &version_.add_block(unit_, label);
             }
         }
+        if (!parameters_.empty()) {
+            auto* function = dynamic_cast<FunctionUnit*>(&unit_);
+            if (!function || !version_.entry_block())
+                throw std::invalid_argument("SSA 参数需要函数入口基本块");
+            for (std::size_t i = 0; i < parameters_.size(); ++i)
+                version_.values().define_parameter(parameters_[i], static_cast<std::uint32_t>(i));
+        }
         for (const auto& line : text_.body) {
             try {
                 if (line.text.empty() || begins(line.text, ";"))
@@ -531,10 +634,6 @@ public:
                     if (line.text != "stage Non-SSA" && line.text != "stage Based-SSA" &&
                         line.text != "stage Optimized-SSA")
                         throw std::invalid_argument("未知的 IR 阶段");
-                    continue;
-                }
-                if (begins(line.text, "slot ")) {
-                    read_slot(line);
                     continue;
                 }
 
@@ -552,7 +651,7 @@ public:
         }
         const auto& values = version_.values();
         for (std::size_t i = 0; i < values.size(); ++i)
-            if (!values.find(ValueId{static_cast<std::uint32_t>(i)}).definition())
+            if (!values.find(ValueId{static_cast<std::uint32_t>(i)}).has_definition())
                 throw std::invalid_argument("IR 缺少值定义 %" + std::to_string(i));
         // 每个真实前驱必须显式提供输入，Undefined 不是遗漏输入的替代品。
         for (const auto& block : version_.blocks()) {
@@ -590,6 +689,8 @@ public:
             bool changed = false;
             for (std::size_t i = 0; i < values.size(); ++i) {
                 auto& info = version_.values().find(ValueId{static_cast<std::uint32_t>(i)});
+                if (info.is_parameter())
+                    continue;
                 bool known = info.is_constant();
                 switch (info.definition()->type()) {
                 case Instruction::Type::Concat: {
@@ -597,7 +698,6 @@ public:
                     const auto items = inst.items();
                     known = std::all_of(items.begin(), items.end(),
                                         [&constant](ValueId item) { return constant(item); });
-                    inst.is_dynamic = !known;
                     break;
                 }
                 case Instruction::Type::Colon: {
@@ -631,28 +731,13 @@ private:
     IRUnit& unit_;
     IRStageVersion& version_;
     const UnitText& text_;
+    std::vector<ValueId> parameters_;
     std::vector<PendingCallTarget>& pending_targets_;
     bool stage_seen_ = false;
     std::map<std::string, BasicBlock*> blocks_;
     const ConstantDecoder& constants_;
     BasicBlock* block_ = nullptr;
-
-    void read_slot(const Line& line) {
-        const auto equal = line.text.find(" = ");
-        if (equal == std::string::npos)
-            throw std::invalid_argument("槽位声明缺少名称");
-        const auto id = slot_id(line.text.substr(5, equal - 5));
-        const auto name = line.text.substr(equal + 3);
-        if (name.empty())
-            throw std::invalid_argument("槽位名称为空");
-        if (id.index < unit_.slot_table().size()) {
-            if (unit_.slot_table().find(id).name != name)
-                throw std::invalid_argument("槽位声明与函数签名冲突");
-        } else if (id.index == unit_.slot_table().size()) {
-            (void)unit_.slot_table().add_slot(name);
-        } else
-            throw std::invalid_argument("槽位编号不连续");
-    }
+    std::map<std::string, SlotId> slots_;
 
     std::vector<ValueId> uses(std::string_view text) {
         std::vector<ValueId> ids;
@@ -661,10 +746,13 @@ private:
         return ids;
     }
 
-    SlotId slot(std::string_view text) const {
-        const auto id = slot_id(text);
-        if (id.index >= unit_.slot_table().size())
-            throw std::invalid_argument("引用了未定义的槽位：" + std::string(text));
+    SlotId slot(std::string_view text) {
+        const auto name = slot_name(text);
+        const auto found = slots_.find(std::string(text));
+        if (found != slots_.end())
+            return found->second;
+        const auto id = unit_.slot_table().add_slot(name, begins(text, "internal_"));
+        slots_.emplace(std::string(text), id);
         return id;
     }
 
@@ -689,11 +777,11 @@ private:
             const auto lhs = rhs.substr(0, equal);
             if (begins(lhs, "[") && lhs.back() == ']') {
                 for (const auto& part : split(std::string_view(lhs).substr(1, lhs.size() - 2)))
-                    result_list.push_back(value_id(part));
+                    result_list.push_back(read_value_definition(part, version_.values()));
                 if (result_list.size() < 2)
                     throw std::invalid_argument("多结果列表至少需要两个值");
             } else
-                result = value_id(lhs);
+                result = read_value_definition(lhs, version_.values());
             rhs.erase(0, equal + 3);
         }
         auto require_result = [&result, &result_list]() -> ValueId {
@@ -705,14 +793,14 @@ private:
             if (result || !result_list.empty())
                 throw std::invalid_argument("该指令不应定义结果");
         };
-        if (begins(rhs, "const ")) {
+        if (rhs == "const \":\"") {
+            auto& inst = block_->add_instruction<ConstInst>(require_result());
+            define(*result, inst, Value::Form::Single, true);
+        } else if (begins(rhs, "const ")) {
             auto decoded = constants_.decode(line.text);
             auto& inst = block_->add_instruction<ConstInst>(decoded->value, require_result());
             define(*result, inst, Value::Form::Single, true);
         } else if (begins(rhs, "phi ")) {
-            const auto* function = dynamic_cast<const FunctionUnit*>(&unit_);
-            if (!function || function->current_stage() == IRStage::NonSSA)
-                throw std::invalid_argument("PHI 指令只能出现在 SSA 阶段");
             for (const auto& instruction : block_->instructions())
                 if (instruction->type() != Instruction::Type::Phi)
                     throw std::invalid_argument("PHI 指令必须连续放在基本块开头");
@@ -747,10 +835,36 @@ private:
                 throw std::invalid_argument("PHI 指令缺少前驱输入");
             auto& inst = block_->add_instruction<PhiInst>(require_result(), std::move(inputs));
             define(*result, inst);
+        } else if (rhs == "workspace_barrier") {
+            no_result();
+            block_->add_instruction<WorkspaceBarrierInst>();
         } else if (begins(rhs, "load ")) {
-            auto& inst =
-                block_->add_instruction<LoadSlotInst>(require_result(), slot(rhs.substr(5)));
+            const auto parts = split(rhs.substr(5));
+            if (parts.size() != 1 && parts.size() != 2)
+                throw std::invalid_argument("读取指令需要槽位及可选的 SSA 来源");
+            const auto id = require_result();
+            const auto target_slot = slot(parts[0]);
+            auto& info = unit_.slot_table().find(target_slot);
+            if (info.is_internal) {
+                // 内部槽位的静态约束由 load 的结果标注恢复，不依赖调试名称。
+                const auto& value = version_.values().reserve(id);
+                if (value.type())
+                    info.type = value.type();
+                if (value.shape())
+                    info.shape = value.shape();
+            }
+            auto& inst = block_->add_instruction<LoadSlotInst>(id, target_slot);
+            if (parts.size() == 2)
+                inst.set_source(parts[1] == "Undefined"
+                                    ? std::nullopt
+                                    : std::optional<ValueId>{value_id(parts[1])});
             define(*result, inst);
+        } else if (begins(rhs, "record ")) {
+            no_result();
+            const auto parts = split(rhs.substr(7));
+            if (parts.size() != 2)
+                throw std::invalid_argument("绑定记录需要槽位和输入值");
+            block_->add_instruction<RecordInst>(slot(parts[0]), value_id(parts[1]));
         } else if (begins(rhs, "store ")) {
             no_result();
             const auto parts = split(rhs.substr(6), ' ');
@@ -764,21 +878,19 @@ private:
                 throw std::invalid_argument("并置输入为空");
             auto& inst = block_->add_instruction<ConcatInst>(
                 std::move(items), require_result(),
-                horizontal ? ConcatInst::Axis::Horizontal : ConcatInst::Axis::Vertical, true);
+                horizontal ? ConcatInst::Axis::Horizontal : ConcatInst::Axis::Vertical);
             define(*result, inst);
-        } else if (begins(rhs, "cell ")) {
-            const auto colon = rhs.find(" : ");
-            const auto shape = rhs.substr(colon == std::string::npos ? rhs.size() : colon + 3);
-            const auto x = shape.find('x');
-            if (colon == std::string::npos || x == std::string::npos ||
-                (shape.find(' ', x) == std::string::npos ||
-                 shape.substr(shape.find(' ', x)) != " cell array"))
-                throw std::invalid_argument("元胞构造指令的形状无效");
-            auto items = uses(rhs.substr(5, colon - 5));
-            auto& inst = block_->add_instruction<CellConstructInst>(
-                std::move(items), number(shape.substr(0, x)),
-                number(shape.substr(x + 1, shape.find(' ', x) - x - 1)), require_result());
-            define(*result, inst);
+        } else if (rhs == "cell" || begins(rhs, "cell ")) {
+            const auto id = require_result();
+            const auto& value = version_.values().find(id);
+            const auto& shape = value.shape();
+            if (value.type() != ba_cell || !shape || shape->size() != 2 || !shape->at(0) ||
+                !shape->at(1))
+                throw std::invalid_argument("元胞构造指令需要已知的 cell 二维形状");
+            auto items = rhs == "cell" ? std::vector<ValueId>{} : uses(rhs.substr(5));
+            auto& inst = block_->add_instruction<CellConstructInst>(std::move(items), *shape->at(0),
+                                                                    *shape->at(1), id);
+            define(id, inst);
         } else if (begins(rhs, "colon ")) {
             const auto parts = uses(rhs.substr(6));
             if (parts.size() != 2 && parts.size() != 3)
@@ -809,22 +921,17 @@ private:
                                                 target(parts[2]));
         } else if (rhs == "ret" || begins(rhs, "ret ")) {
             no_result();
-            if (rhs != "ret")
-                throw std::invalid_argument("ret 不接受操作数，函数返回值由返回槽位提供");
-            block_->add_instruction<ReturnInst>();
+            const auto* function = dynamic_cast<const FunctionUnit*>(&unit_);
+            const auto results = rhs == "ret" ? std::vector<ValueId>{} : uses(rhs.substr(4));
+            const bool ssa = function && function->current_stage() != IRStage::NonSSA;
+            if ((!ssa && !results.empty()) || (ssa && results.size() != version_.return_count()))
+                throw std::invalid_argument("返回寄存器数量与函数签名不符");
+            block_->add_instruction<ReturnInst>(results);
         } else if (begins(rhs, "intrinsic.")) {
             const auto end = rhs.find(' ');
             const auto name = rhs.substr(10, end == std::string::npos ? end : end - 10);
-            static const std::map<std::string, IntrinsicId> ids{
-                {"switch_match", IntrinsicId::SwitchMatch},
-                {"foreach_init", IntrinsicId::ForeachInit},
-                {"foreach_count", IntrinsicId::ForeachCount},
-                {"foreach_get", IntrinsicId::ForeachGet},
-                {"int_gt", IntrinsicId::IntGt},
-                {"int_add", IntrinsicId::IntAdd},
-                {"logical_scalar", IntrinsicId::LogicalScalar}};
-            const auto id = ids.find(name);
-            if (id == ids.end())
+            const auto id = intrinsic_ids.find(name);
+            if (id == intrinsic_ids.end())
                 throw std::invalid_argument("未知的内部操作：" + name);
             auto& inst = block_->add_instruction<IntrinsicInst>(
                 require_result(), id->second,
@@ -832,33 +939,14 @@ private:
             define(*result, inst);
         } else if (begins(rhs, "apply ") || begins(rhs, "call ") || begins(rhs, "value_apply ")) {
             const bool is_call = begins(rhs, "call ");
-            DispatchType dispatch = DispatchType::Dynamic;
             std::string static_target;
-            const auto attributes = rhs.find(" [dispatch=");
+            const auto attributes = rhs.find(" [target=@");
             if (attributes != std::string::npos) {
                 if (!is_call || rhs.back() != ']')
-                    throw std::invalid_argument("调用分派标记格式无效");
-                const auto fields = split(
-                    std::string_view(rhs).substr(attributes + 2, rhs.size() - attributes - 3));
-                if (fields.empty() || !begins(fields[0], "dispatch="))
-                    throw std::invalid_argument("调用分派类型缺失");
-                static const std::map<std::string, DispatchType> types{
-                    {"dynamic", DispatchType::Dynamic},
-                    {"mfunction", DispatchType::MFunction},
-                    {"builtin", DispatchType::Builtin},
-                    {"internal", DispatchType::Internal},
-                    {"plugin", DispatchType::Plugin}};
-                const auto type = types.find(fields[0].substr(9));
-                if (type == types.end())
-                    throw std::invalid_argument("未知的调用分派类型：" + fields[0].substr(9));
-                dispatch = type->second;
-                if (fields.size() > 2 || (fields.size() == 2 && !begins(fields[1], "target=@")))
-                    throw std::invalid_argument("调用目标标记格式无效");
-                if (fields.size() == 2) {
-                    static_target = fields[1].substr(8);
-                    if (static_target.empty())
-                        throw std::invalid_argument("静态调用目标路径为空");
-                }
+                    throw std::invalid_argument("静态调用目标格式无效");
+                static_target = rhs.substr(attributes + 10, rhs.size() - attributes - 11);
+                if (static_target.empty())
+                    throw std::invalid_argument("静态调用目标路径为空");
                 rhs.erase(attributes);
             }
             const auto space = rhs.find(' '), open = rhs.find('(', space + 1);
@@ -875,8 +963,7 @@ private:
                            static_cast<std::uint32_t>(i));
             };
             if (is_call) {
-                auto& inst =
-                    block_->add_instruction<CallInst>(results, callee, std::move(args), dispatch);
+                auto& inst = block_->add_instruction<CallInst>(results, callee, std::move(args));
                 define_all(inst);
                 if (!static_target.empty())
                     pending_targets_.push_back({&inst, static_target});
@@ -1018,15 +1105,10 @@ private:
     }
 };
 
-std::vector<std::string> signature(std::string_view text, std::vector<SlotId>& ids) {
+std::vector<std::string> signature(std::string_view text) {
     std::vector<std::string> names;
-    for (const auto& part : split(text)) {
-        const auto space = part.find(' ');
-        if (space == std::string::npos || space + 1 == part.size())
-            throw std::invalid_argument("函数签名无效");
-        ids.push_back(slot_id(part.substr(0, space)));
-        names.push_back(part.substr(space + 1));
-    }
+    for (const auto& part : split(text))
+        names.push_back(slot_name(part));
     return names;
 }
 
@@ -1038,18 +1120,6 @@ std::unique_ptr<FunctionUnit> read_function(const UnitText& text,
         close == std::string::npos || text.header.back() != '{')
         throw std::invalid_argument("函数定义格式无效");
     const auto name = text.header.substr(8, open - 8);
-    std::vector<SlotId> param_ids, return_ids;
-    auto params = signature(text.header.substr(open + 1, close - open - 1), param_ids);
-    std::vector<std::string> returns;
-    const auto tail = trim(std::string_view(text.header).substr(close + 1));
-    if (tail != "{") {
-        if (!begins(tail, "-> (") || tail.size() < 6 || tail.substr(tail.size() - 3) != ") {")
-            throw std::invalid_argument("函数返回值签名无效");
-        returns = signature(tail.substr(4, tail.size() - 7), return_ids);
-    }
-    auto function = std::make_unique<FunctionUnit>(name, std::move(params), std::move(returns));
-    if (function->parameter_slots() != param_ids || function->return_slots() != return_ids)
-        throw std::invalid_argument("函数签名的槽位编号不一致");
     IRStage stage = IRStage::NonSSA;
     for (const auto& line : text.body) {
         if (line.text == "stage Based-SSA")
@@ -1057,8 +1127,45 @@ std::unique_ptr<FunctionUnit> read_function(const UnitText& text,
         if (line.text == "stage Optimized-SSA")
             stage = IRStage::OptimizedSSA;
     }
+    std::vector<std::string> params, returns;
+    std::vector<ValueId> parameters;
+    const auto parameter_text = text.header.substr(open + 1, close - open - 1);
+    if (stage == IRStage::NonSSA) {
+        params = signature(parameter_text);
+    } else {
+        for (const auto& part : split(parameter_text)) {
+            const auto attribute = part.find(" [name=");
+            if (attribute == std::string::npos || part.back() != ']')
+                throw std::invalid_argument("SSA 参数需要寄存器编号及 name 属性");
+            const auto colon = part.find(':');
+            parameters.push_back(
+                value_id(trim(std::string_view(part).substr(0, std::min(colon, attribute)))));
+            params.push_back(
+                slot_name("slot_" + part.substr(attribute + 7, part.size() - attribute - 8)));
+        }
+    }
+    std::size_t return_count = 0;
+    const auto tail = trim(std::string_view(text.header).substr(close + 1));
+    if (stage == IRStage::NonSSA) {
+        if (tail != "{") {
+            if (!begins(tail, "-> (") || tail.size() < 6 || tail.substr(tail.size() - 3) != ") {")
+                throw std::invalid_argument("函数返回值签名无效");
+            returns = signature(tail.substr(4, tail.size() - 7));
+        }
+    } else {
+        if (!begins(tail, "-> ") || tail.size() < 6 || tail.substr(tail.size() - 2) != " {")
+            throw std::invalid_argument("SSA 函数签名需要返回值数量");
+        return_count = number(tail.substr(3, tail.size() - 5));
+    }
+    auto function = std::make_unique<FunctionUnit>(name, std::move(params), std::move(returns));
     function->set_current_stage(stage);
-    UnitReader(*function, *function->stage_version(stage), text, pending_targets, constants).read();
+    auto version = function->stage_version(stage);
+    version->set_return_count(return_count);
+    UnitReader(*function, *version, text, pending_targets, constants, parameters).read();
+    if (stage != IRStage::NonSSA)
+        for (const auto& part : split(parameter_text))
+            read_value_definition(std::string_view(part).substr(0, part.find(" [name=")),
+                                  version->values());
     return function;
 }
 
@@ -1111,7 +1218,6 @@ std::string IRPrinter::print(const IRModule& module) {
     }
     if (const auto* command = module.command_unit()) {
         output << "script {\n";
-        print_slots(output, *command);
         print_blocks(output, *command->stage_version());
         output << "}\n";
     }
@@ -1126,23 +1232,12 @@ std::string IRPrinter::print(const IRModule& module) {
     return output.str();
 }
 
-void IRPrinter::print_slots(std::ostream& output, const IRUnit& unit) const {
-    if (unit.slot_table().size() == 0)
-        return;
-    output << "; slots:\n";
-    for (std::size_t i = 0; i < unit.slot_table().size(); ++i) {
-        output << ";   slot" << i << " = "
-               << unit.slot_table().find(SlotId{static_cast<std::uint32_t>(i)}).name << '\n';
-    }
-    output << '\n';
-}
-
 void IRPrinter::print_blocks(std::ostream& output, const IRStageVersion& version) {
     for (const auto& block : version.blocks()) {
         output << block->label() << ":\n";
         for (const auto& instruction : block->instructions()) {
             output << "    ";
-            output << print_instruction(*instruction, constants_);
+            output << print_instruction(*instruction, version, constants_);
             output << '\n';
         }
     }
@@ -1154,16 +1249,34 @@ void IRPrinter::print_function(std::ostream& output, const FunctionUnit& functio
         for (std::size_t i = 0; i < slots.size(); ++i) {
             if (i)
                 output << ", ";
-            output << "slot" << slots[i].index << ' ' << function.slot_table().find(slots[i]).name;
+            output << "slot_" << function.slot_table().find(slots[i]).name;
         }
     };
     output << "define @" << function.name() << '(';
-    signature(function.parameter_slots());
-    output << ')';
-    if (!function.return_slots().empty()) {
-        output << " -> (";
-        signature(function.return_slots());
+    if (function.current_stage() == IRStage::NonSSA) {
+        signature(function.parameter_slots());
         output << ')';
+        if (!function.return_slots().empty()) {
+            output << " -> (";
+            signature(function.return_slots());
+            output << ')';
+        }
+    } else {
+        const auto version = function.current_version();
+        const auto parameters = version->parameters();
+        if (parameters.size() != function.parameter_slots().size())
+            throw std::logic_error("SSA 函数参数值数量不匹配");
+        for (std::size_t i = 0; i < parameters.size(); ++i) {
+            const auto& parameter = version->values().find(parameters[i]);
+            if (parameter.result_index() != i)
+                throw std::logic_error("SSA 函数参数位置不连续");
+            if (i)
+                output << ", ";
+            output << value_definition(parameter)
+                   << " [name=" << function.slot_table().find(function.parameter_slots()[i]).name
+                   << ']';
+        }
+        output << ") -> " << version->return_count();
     }
     const char* stage;
     switch (function.current_stage()) {
@@ -1179,8 +1292,7 @@ void IRPrinter::print_function(std::ostream& output, const FunctionUnit& functio
     default:
         throw std::invalid_argument("无效的 IR 阶段");
     }
-    output << " {\n; stage: " << stage << '\n';
-    print_slots(output, function);
+    output << " {\n; stage: " << stage << "\n\n";
     print_blocks(output, *function.current_version());
     output << "}\n";
     for (std::size_t i = 0; i < function.nested_functions().size(); ++i) {
@@ -1215,8 +1327,6 @@ std::unique_ptr<IRModule> read_ir(std::string_view text,
         // 现有打印器通过这些注释记录阶段和槽位等结构信息。
         if (begins(line, "; stage: "))
             line = "stage " + line.substr(9);
-        if (begins(line, ";   slot"))
-            line = "slot " + line.substr(4);
         lines.push_back({line, n});
     }
     if (metadata.empty())

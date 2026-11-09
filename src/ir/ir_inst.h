@@ -19,9 +19,6 @@ class BasicBlock;
 class FunctionUnit;
 using const_ba_obj_ptr = std::shared_ptr<const ba_obj>;
 
-// 动态分派保留到运行时；其余类别由后续解析或优化阶段确定。
-enum class DispatchType : std::uint8_t { Dynamic, MFunction, Builtin, Internal, Plugin };
-
 // 保留一元运算在源码中的具体操作种类。
 enum class UnaryOp : std::uint8_t {
     Uplus,
@@ -57,10 +54,8 @@ enum class BinaryOp : std::uint8_t {
 enum class IntrinsicId : std::uint8_t {
     SwitchMatch,
     ForeachInit,
-    ForeachCount,
-    ForeachGet,
-    IntGt,
-    IntAdd,
+    GtDouble,
+    AddDouble,
     LogicalScalar,
 };
 
@@ -75,7 +70,6 @@ public:
         Concat,
         CellConstruct,
         Colon,
-        MagicColon,
         MagicEnd,
         GlobalDecl,
         PersistentDecl,
@@ -98,6 +92,8 @@ public:
         Binary,
         LoadSlot,
         StoreSlot,
+        Record,
+        WorkspaceBarrier,
         Phi,
     };
 
@@ -107,6 +103,11 @@ public:
     [[nodiscard]] std::unique_ptr<Instruction> clone() const;
 
     [[nodiscard]] Type type() const noexcept { return type_; }
+
+    // 非拥有引用，基线版本由所属函数持有；不参与文本持久化。
+    [[nodiscard]] const Instruction* baseline_instruction() const noexcept {
+        return baseline_instruction_;
+    }
 
     [[nodiscard]] Effect effect() const noexcept;
     [[nodiscard]] BasicBlock* parent() const noexcept { return parent_; }
@@ -118,20 +119,37 @@ public:
 protected:
     explicit Instruction(Type type) noexcept : type_(type) {}
 
-    Instruction(const Instruction& other) : User(other), type_(other.type_) {}
+    Instruction(const Instruction& other)
+        : User(other), type_(other.type_), baseline_instruction_(other.baseline_instruction_) {}
 
 private:
     friend class BasicBlock;
+    friend class IRStageVersion;
 
     Type type_;
     BasicBlock* parent_ = nullptr;
+    const Instruction* baseline_instruction_ = nullptr;
+};
+
+// 使工作区变量的旧绑定失效；不使此前已经计算出的 SSA 值失效。
+class WorkspaceBarrierInst final : public Instruction {
+public:
+    WorkspaceBarrierInst() : Instruction(Type::WorkspaceBarrier) {}
 };
 
 // 将运行前确定的对象物化为一个 IR 值；non-SSA 和 SSA 使用同一结构。
 class ConstInst final : public Instruction {
 public:
     ConstInst(const_ba_obj_ptr value, ValueId result)
-        : Instruction(Type::Const), value(std::move(value)), result(result) {}
+        : Instruction(Type::Const), value(std::move(value)), result(result) {
+        if (!this->value)
+            throw std::invalid_argument("普通常量对象不能为空");
+    }
+
+    // 特殊索引冒号；运行时标记对象尚未接入，以空对象表示该独立常量类别。
+    explicit ConstInst(ValueId result) : Instruction(Type::Const), result(result) {}
+
+    [[nodiscard]] bool is_magic_colon() const noexcept { return !value; }
 
     const_ba_obj_ptr value;
     ValueId result;
@@ -188,11 +206,23 @@ private:
     std::vector<BasicBlock*> predecessors_;
 };
 
-// 从已绑定的槽位读取一个值；槽位类别从所属代码单元的槽位表查询。
+// 读取槽位状态；SSA 中可传递 Undefined，普通指令实际取值时检查。
 class LoadSlotInst final : public Instruction {
 public:
     LoadSlotInst(ValueId result, SlotId slot)
         : Instruction(Type::LoadSlot), result(result), slot(slot) {}
+
+    // 有来源输入时转发 SSA 状态；具体 ValueId 可直接传播，显式 Undefined 保留。
+    [[nodiscard]] bool has_source() const noexcept { return operand_count() != 0; }
+
+    [[nodiscard]] std::optional<ValueId> source() const { return operand(0).value(); }
+
+    void set_source(std::optional<ValueId> value) {
+        if (has_source())
+            set_operand(0, value);
+        else
+            append_operand(value);
+    }
 
     ValueId result;
     SlotId slot;
@@ -212,13 +242,27 @@ public:
     SlotId slot;
 };
 
-// 非空的水平或竖直并置；输入是否包含非常量值由构建调用处提供。
+// 记录已提升局部变量的运行时绑定；不写实际槽位，也不产生新值。
+class RecordInst final : public Instruction {
+public:
+    RecordInst(SlotId slot, ValueId value) : Instruction(Type::Record), slot(slot) {
+        append_operand(value);
+    }
+
+    [[nodiscard]] ValueId value() const { return input(0); }
+
+    void set_value(ValueId value) { User::set_operand(0, value); }
+
+    SlotId slot;
+};
+
+// 非空的水平或竖直并置，输入通过 Use 记录。
 class ConcatInst final : public Instruction {
 public:
     enum class Axis : std::uint8_t { Horizontal, Vertical };
 
-    ConcatInst(std::vector<ValueId> items, ValueId result, Axis axis, bool is_dynamic)
-        : Instruction(Type::Concat), result(result), axis(axis), is_dynamic(is_dynamic) {
+    ConcatInst(std::vector<ValueId> items, ValueId result, Axis axis)
+        : Instruction(Type::Concat), result(result), axis(axis) {
         append_values(items);
     }
 
@@ -226,7 +270,6 @@ public:
 
     ValueId result;
     Axis axis;
-    bool is_dynamic;
 };
 
 // 按源码顺序保存非空元胞构造的元素及二维形状。
@@ -269,15 +312,6 @@ public:
     [[nodiscard]] ValueId stop() const { return input(2); }
 
     void set_stop(ValueId value) { set_operand(2, value); }
-
-    ValueId result;
-    bool needs_runtime_dispatch = true;
-};
-
-// 索引中的单独冒号只产生占位值，不生成序列。
-class MagicColonInst final : public Instruction {
-public:
-    explicit MagicColonInst(ValueId result) : Instruction(Type::MagicColon), result(result) {}
 
     ValueId result;
 };
@@ -365,10 +399,20 @@ public:
     BasicBlock* false_target;
 };
 
-// 结束当前代码单元；函数返回值由返回槽位提供。
+// Non-SSA 返回值由槽位提供；SSA 直接引用返回寄存器。
 class ReturnInst final : public Instruction {
 public:
-    ReturnInst() : Instruction(Type::Return) {}
+    explicit ReturnInst(const std::vector<ValueId>& values = {}) : Instruction(Type::Return) {
+        append_values(values);
+    }
+
+    [[nodiscard]] std::vector<ValueId> values() const { return input_values(); }
+
+    void set_values(const std::vector<ValueId>& values) {
+        while (operand_count())
+            erase_operand(operand_count() - 1);
+        append_values(values);
+    }
 };
 
 // 保留 A(...) 的名字歧义，后续再确定调用或索引。
@@ -415,10 +459,9 @@ public:
 class CallInst final : public Instruction {
 public:
     CallInst(std::vector<ValueId> results, InternedString callee, std::vector<ValueId> arguments,
-             DispatchType dispatch_type = DispatchType::Dynamic,
              FunctionUnit* m_function_target = nullptr)
         : Instruction(Type::Call), results(std::move(results)), callee(std::move(callee)),
-          m_function_target(m_function_target), dispatch_type(dispatch_type) {
+          m_function_target(m_function_target) {
         append_values(arguments);
     }
 
@@ -428,24 +471,23 @@ public:
     InternedString callee;
     // 静态目标仅引用同模块内词法绑定的函数。
     FunctionUnit* m_function_target;
-    DispatchType dispatch_type;
 };
 
 // 不绑定运行时函数或机器指令；内部操作不得隐式改写 slot。
 class IntrinsicInst final : public Instruction {
 public:
     IntrinsicInst(ValueId result, IntrinsicId id, std::vector<ValueId> operands)
-        : Instruction(Type::Intrinsic), result(result), id(id) {
+        : Instruction(Type::Intrinsic), id(id), result(result) {
         append_values(operands);
     }
 
     [[nodiscard]] std::vector<ValueId> operands() const { return input_values(0); }
 
-    ValueId result;
     IntrinsicId id;
+    ValueId result;
 };
 
-// 已确定为圆括号取值，保留多个输出及索引实参的源码顺序。
+// 已确定为圆括号取值，按源码顺序保存索引实参。
 class ParenReferenceInst final : public Instruction {
 public:
     ParenReferenceInst(ValueId result, std::vector<ValueId> indices, ValueId base)
@@ -629,7 +671,6 @@ public:
 
     ValueId result;
     UnaryOp op;
-    bool needs_runtime_dispatch = true;
 };
 
 // 二元逻辑运算的两侧都已求值；短路逻辑运算由控制流表示。
@@ -651,7 +692,6 @@ public:
 
     ValueId result;
     BinaryOp op;
-    bool needs_runtime_dispatch = true;
 };
 
 } // baltam 命名空间

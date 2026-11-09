@@ -223,17 +223,13 @@ IRModule
 
 ### 1.8 BasicBlock 所有权
 
-每个 `IRStageVersion` 独占拥有该阶段的基本块；`CommandUnit` 和 `FunctionUnit` 持有相应版本。`BasicBlock` 保存非拥有的 `IRUnit* parent_` 和 `std::vector<std::unique_ptr<Instruction>>`；每条指令保存指向所属基本块的非拥有父指针，通过 `add_instruction<Inst>(...)` 创建并持有指令。`GotoInst` 与 `BranchInst` 使用非拥有 `BasicBlock*` 保存跳转目标，`ReturnInst` 不携带操作数，函数返回值由返回槽位提供；三者都是终结指令。`BasicBlock::terminator()` 返回末尾的终结指令；添加终结指令后不得再向该块追加指令。当前不保存前驱或后继表，也未检查跳转目标是否属于同一代码单元和 IR 阶段。`IRStageVersion::entry_block()` 保存入口基本块指针，创建的第一个基本块默认作为入口。
+每个 `IRStageVersion` 独占拥有该阶段的基本块；`CommandUnit` 和 `FunctionUnit` 持有相应版本。`BasicBlock` 保存非拥有的 `IRUnit* parent_` 和 `std::vector<std::unique_ptr<Instruction>>`；每条指令保存指向所属基本块的非拥有父指针，通过 `add_instruction<Inst>(...)` 创建并持有指令。`GotoInst` 与 `BranchInst` 使用非拥有 `BasicBlock*` 保存跳转目标，Non-SSA 的 `ReturnInst` 不携带操作数，函数返回值由返回槽位提供；SSA 参数由函数签名直接定义为 Value，签名直接引用参数寄存器，ReturnInst 的输入 Use 直接引用结果寄存器，阶段版本记录返回数量；三者都是终结指令。`BasicBlock::terminator()` 返回末尾的终结指令；添加终结指令后不得再向该块追加指令。当前不保存前驱或后继表，也未检查跳转目标是否属于同一代码单元和 IR 阶段。`IRStageVersion::entry_block()` 保存入口基本块指针，创建的第一个基本块默认作为入口。
 
 `ConstInst` 按 [M 语法 IR 设计](M语法与IR设计.md)保存 `const_ba_obj_ptr value` 和 `ValueId result`，在 Non-SSA 与 SSA 阶段使用同一种指令。`const_ba_obj_ptr` 是 `std::shared_ptr<const ba_obj>` 的别名；`value` 持有运行前确定的常量对象。运行时修改该值时仍须遵守写时复制语义。`ba_obj` 在 IR 头文件中仅前置声明，实际对象由运行时创建。`ValueId` 是只保存一个 `std::uint32_t index` 的结构体，不带无效哨兵值；构建调用处通过所属 `IRStageVersion::add_value` 分配编号并登记定义。
 
-`ConcatInst` 保存按源码顺序排列的非空 `items`、`result`、水平或竖直 `axis` 和 `is_dynamic`，Non-SSA 与 SSA 共用此结构。空 `[]` 应使用 `ConstInst`。当前已有值定义表，但尚无类型事实；当前 builder 根据输入的 `Value::is_constant()` 设置 `is_dynamic`，后续优化仍需确定更完整的动态判定规则；仅凭 `is_dynamic == false` 不能跳过运行时 `horzcat`／`vertcat` 的分派检查。
+`ConcatInst` 保存非空 items、result 和水平/竖直 axis，不再重复保存 is_dynamic。是否具有常量输入由值表查询，是否能折叠仍须遵守分派语义。CellConstructInst 保存 items、rows、cols 和 result，空构造由 ConstInst 表示。
 
-`CellConstructInst` 保存按源码顺序排列的非空 `items`、`rows`、`cols` 和 `result`，要求元素个数恰好等于行数乘列数；这也隐含行列数非零，无须分别检查。它不保存 `is_dynamic`；空 `{}` 使用 `ConstInst`。字段先放 `vector` 和 `size_t`，再放 `ValueId`，避免额外的字段间对齐空隙。
-
-`ColonInst` 保存 `result`、`start`、可选 `step`、`stop` 和初始为 `true` 的 `needs_runtime_dispatch`。`step` 为空表示源码省略步长，与显式写出步长区分；索引中的单独 `:` 不使用该指令。当前没有保存已解析 `colon` 目标的字段，因此将 `needs_runtime_dispatch` 改为 `false` 后如何执行已解析目标，仍须在分派设计中确定。
-
-`MagicColonInst` 只保存 `result`，表示索引中单独 `:` 的占位值，不生成序列，也不参与普通 `colon` 函数分派。索引指令的字段可引用这个结果；当前 builder 尚未生成 `MagicColonInst`。后续构建时可将其 `Value::is_constant()` 标为常量；运行时占位值表示尚未实现，执行时必须按索引位置解释其语义。
+ColonInst 保存 result、start、可选 step 和 stop；单独索引冒号使用特殊 ConstInst，文本为 `const ":"`，不生成序列，也不参与普通 colon 分派。MagicColonInst 和节点上的 needs_runtime_dispatch 标记已移除。
 
 `MagicEndInst` 保存按内层到外层排列的候选索引上下文及 `result`；每个上下文保存 `Operand callee_or_base`、从 1 开始的 `dim` 与 `nindices`。`Operand` 用 `std::variant<ValueId, InternedString>` 区分已求出的值与未解析名字。已确定为变量的引用先通过 `LoadSlotInst` 得到 `ValueId`，不得退回名字查找；运行时绑定失效时由槽位读取报告错误。`SlotId` 与 `ValueId` 是各自保存一个 `std::uint32_t index` 的不同结构体，二者不能混用；匿名函数参数与捕获也只保存 `SlotId`。当前 `InternedString` 仍是 `std::string` 别名，并非真正的字符串池句柄；候选上下文的尺寸由该字符串备选类型主导，后续若引入字符串池可重新测量布局。
 
@@ -245,15 +241,15 @@ IRModule
 
 `BranchInst` 按条件值选择真假目标，`GotoInst` 直接指向目标块，`ReturnInst` 结束当前代码单元；返回指令统一打印为无操作数的 `ret`。当前只建立跳转目标与基本块末尾的结构约束，条件真假转换、返回值读取和 CFG 边的验证由后续执行与构建流程负责。
 
-索引与成员访问按 [M 语法 IR 设计](M语法与IR设计.md)实现了 `ApplyInst`、`ValueApplyInst`、`CallInst`、`ParenReferenceInst`、`BraceReferenceInst`、`DotAccessInst`、`DotReferenceInst`、`ParenAssignInst`、`ParenDeleteInst`、`BraceAssignInst` 和 `DotAssignInst`。圆括号和点号表达式的 `Operand` 只保留未消歧名字或已求值结果；已绑定变量先生成 `LoadSlotInst`；`CallInst` 仅保存按名字调用的 `InternedString callee`，函数句柄等按值调用由 `ValueApplyInst` 处理。三种调用或应用指令的 `arguments` 均保存已求值的 `ValueId`。构造函数不再统一检查 `Operand` 中的空名字，名字有效性由语法与构建流程负责；独立的成员名等字符串字段仍各自检查。`CallInst.m_function_target` 仅指向同模块词法绑定的 M 函数，不保存外部 M 函数或插件的运行时缓存；局部函数与嵌套函数的工作区差异由词法关系处理，不增加分派类别。已确定的圆括号和花括号索引节点保存按源码顺序求值后的 `ValueId` 下标；索引与静态成员取值／赋值节点不保存 `DispatchType`，内置行为或对象协议由执行时的 base 决定。赋值与删除都输出 `updated_base`，调用处须为它分配新的值编号并负责将根变量写回。编号归属、值定义顺序和 SSA 唯一性由表及后续构建流程处理。
+索引与成员访问按 [M 语法 IR 设计](M语法与IR设计.md)实现了 `ApplyInst`、`ValueApplyInst`、`CallInst`、`ParenReferenceInst`、`BraceReferenceInst`、`DotAccessInst`、`DotReferenceInst`、`ParenAssignInst`、`ParenDeleteInst`、`BraceAssignInst` 和 `DotAssignInst`。圆括号和点号表达式的 `Operand` 只保留未消歧名字或已求值结果；已绑定变量先生成 `LoadSlotInst`；`CallInst` 仅保存按名字调用的 `InternedString callee`，函数句柄等按值调用由 `ValueApplyInst` 处理。三种调用或应用指令的 `arguments` 均保存已求值的 `ValueId`。构造函数不再统一检查 `Operand` 中的空名字，名字有效性由语法与构建流程负责；独立的成员名等字符串字段仍各自检查。`CallInst.m_function_target` 仅指向同模块词法绑定的 M 函数，不保存外部 M 函数或插件的运行时缓存；局部函数与嵌套函数的工作区差异由词法关系处理，不增加分派类别。已确定的圆括号和花括号索引节点保存按源码顺序求值后的 `ValueId` 下标；索引与静态成员取值／赋值节点不保存运行时分派类别，内置行为或对象协议由执行时的 base 决定。赋值与删除都输出 `updated_base`，调用处须为它分配新的值编号并负责将根变量写回。编号归属、值定义顺序和 SSA 唯一性由表及后续构建流程处理。
 
-**待明确的设计问题：** 索引与成员取值／赋值节点已移除 `DispatchType`。若将来静态分派到对象重载方法，需要确定目标及其依赖验证保存在专门的特化表示、旁表，还是统一 lower 为 `CallInst`。复合索引链的 `PendingIndex` 运行时表示、动态成员名 `a.(expr)` 的运行时处理，以及多输出逗号分隔列表的运行时承载方式尚未实现；当前 builder 已能把 `a.(expr)` 降为以 `ValueId` 表示成员名的点号指令。
+**待明确的设计问题：** 索引与成员取值／赋值节点不保存分派类别。若将来静态分派到对象重载方法，需要确定目标及其依赖验证保存在专门的特化表示、旁表，还是统一 lower 为 `CallInst`。复合索引链的 `PendingIndex` 运行时表示、动态成员名 `a.(expr)` 的运行时处理，以及多输出逗号分隔列表的运行时承载方式尚未实现；当前 builder 已能把 `a.(expr)` 降为以 `ValueId` 表示成员名的点号指令。
 
-`UnaryInst` 和 `BinaryInst` 按 [M 语法 IR 设计](M语法与IR设计.md#基本运算)使用 `ValueId` 引用已求值的操作数，分别保存一元或二元 `op`、`result`，以及初始为 `true` 的 `needs_runtime_dispatch`。一元运算区分两种转置；二元运算区分矩阵、逐元素、比较与双侧求值逻辑运算。`&&` 和 `||` 应由控制流表达，不加入 `BinaryOp`。两个指令在 Non-SSA 与 SSA 阶段共用结构；构造函数检查操作种类，编号是否已定义由 `ValueTable` 和后续构建流程确定。
+`UnaryInst` 和 `BinaryInst` 按 [M 语法 IR 设计](M语法与IR设计.md#基本运算)使用 `ValueId` 引用已求值的操作数，分别保存一元或二元 `op`、`result`。一元运算区分两种转置；二元运算区分矩阵、逐元素、比较与双侧求值逻辑运算。`&&` 和 `||` 应由控制流表达，不加入 `BinaryOp`。两个指令在 Non-SSA 与 SSA 阶段共用结构；构造函数检查操作种类，编号是否已定义由 `ValueTable` 和后续构建流程确定。
 
-`IntrinsicInst` 表示已确定的内部语义，不预先指定执行方式。`SwitchMatch` 保存选择值与 case 值两个输入，并产生供 `BranchInst` 使用的单个结果。`ForeachInit`、`ForeachCount`、`ForeachGet`、`IntGt` 和 `IntAdd` 用于 `for` 循环的迭代状态、取值和内部整数运算；`LogicalScalar` 用于短路操作数的标量逻辑转换。它们不得隐式写入已有 slot，故当前全部返回 `NoSlotWrite`；普通 M 函数调用仍使用 `CallInst`。
+`IntrinsicInst` 保存 id、单个结果 result 和由 Use 管理的输入。ForeachInit 只产生 double 标量 max_iter，可能执行重载 size/double；逐轮取值使用 ParenReferenceInst，不再保留 ForeachIterate。GtDouble 比较 double 下标与 double 上限，AddDouble 推进内部下标。SwitchMatch 和 LogicalScalar 也使用该统一节点。常规重载按不修改当前工作区的 SSA 假设处理，不为初始化或索引自动插入屏障；实际修改父工作区时走运行时回退。
 
-**待明确的分派设计：** 当前 `needs_runtime_dispatch` 可以改为 `false`，但指令没有保存已解析目标或内置实现标识。设计文档要求二元运算静态解析到用户函数后仍保留源码操作符信息；`dev_zj` 分支的旧说明则建议将这种运算 lower 为 `CallInst`。两者对目标存放位置和运算符信息的保留方式不同，需要在实现静态分派前确定。当前版本仅定义动态分派初始状态，不预设静态解析策略。
+调用及操作符节点保持语义身份，不通过布尔标记宣称目标已静态绑定。CallInst 仅保存同模块词法目标 m_function_target；外部目标特化需要独立的依赖和生命周期设计。
 
 函数句柄的构造指令及匿名函数体的代码单元结构均尚未实现。
 
@@ -268,7 +264,7 @@ IRModule
 5. 检查模块级函数的限定键唯一、入口与所有权关系，完成后发布模块；这些最终检查尚无统一接口。
 6. 后续按需生成 SSA 和 Optimized SSA；发布新版本时遵守 4.1 节的生命周期约束。
 
-当前 `IRBuilder::build_file(path)` 先查询文件缓存，有效时返回已有的 `shared_ptr<IRModule>`；否则解析脚本或函数文件、构建新模块并注册缓存。脚本主体进入 `CommandUnit`，文件级函数进入模块函数列表，嵌套函数由词法父函数拥有。`IRBuilder` 也可接收单个代码单元的 AST，统一完成已支持语法的 Non-SSA lowering：常量、并置、元胞、冒号、一元及二元运算、赋值、圆括号取值及赋值／删除、花括号取值及赋值、点号访问及赋值、短路逻辑赋值与条件、全局及持久声明、`if`、`switch`、`for`、`while`、`break`、`continue` 和 `return`。`IRBuilder` 持有当前插入基本块，构建控制流时切换插入位置；指令创建由其私有方法完成。参数及返回变量已有的 slot 会被复用；每个 `for` 分配独立的内部下标 slot。未支持的 AST 节点直接报错，不由测试用例另行实现 lowering。完整的名字解析及独立 IR 检查仍属于后续构建流程。
+当前 `IRBuilder::build_file(path)` 先查询文件缓存，有效时返回已有的 `shared_ptr<IRModule>`；否则解析脚本或函数文件、构建新模块并注册缓存。脚本主体进入 `CommandUnit`，文件级函数进入模块函数列表，嵌套函数由词法父函数拥有。`IRBuilder` 也可接收单个代码单元的 AST，统一完成已支持语法的 Non-SSA lowering：常量、并置、元胞、冒号、一元及二元运算、赋值、圆括号取值及赋值／删除、花括号取值及赋值、点号访问及赋值、短路逻辑赋值与条件、全局及持久声明、`if`、`switch`、`for`、`while`、`break`、`continue` 和 `return`。`IRBuilder` 持有当前插入基本块，构建控制流时切换插入位置；指令创建由其私有方法完成。参数及返回变量已有的 slot 会被复用；每个 `for` 分配独立的内部下标 slot；这些 SlotInfo 显式标记 is_internal，不参与用户名字查找。mem2reg 可提升它们，并忽略工作区屏障。无具名结果的短路表达式在 Non-SSA 中直接通过 PHI 汇合寄存器，不创建临时 slot。未支持的 AST 节点直接报错，不由测试用例另行实现 lowering。完整的名字解析及独立 IR 检查仍属于后续构建流程。
 
 不单独设置 `IRManager`。
 
@@ -496,21 +492,28 @@ IRCache
 
 #### SlotTable
 
-每个 `IRUnit` 拥有一张 `SlotTable`，供该代码单元的 Non-SSA、SSA 和 Optimized SSA 阶段共用；`CommandUnit` 仅使用 Non-SSA。`SlotId` 只在所属代码单元内有效，不能直接用于另一个函数或匿名函数体。表用 `std::vector<SlotInfo>` 按 `SlotId` 索引，编号从零连续分配，不在表项中重复保存编号。表项保存名称：
+每个 `IRUnit` 拥有一张 `SlotTable`，供该代码单元的 Non-SSA、SSA 和 Optimized SSA 阶段共用；`CommandUnit` 仅使用 Non-SSA。`SlotId` 只在所属代码单元内有效，不能直接用于另一个函数或匿名函数体。表用 `std::vector<SlotInfo>` 按 `SlotId` 索引，编号从零连续分配，不在表项中重复保存编号。表项保存名称、静态类型约束以及声明和共享属性：
 
 ```cpp
 struct SlotInfo {
     InternedString name;
+    bool is_internal = false;
+    std::optional<ba_type> type;
+    std::optional<std::vector<std::optional<std::size_t>>> shape;
+    bool has_global_decl = false;
+    bool has_persistent_decl = false;
+    bool shared_by_nested = false;
+    std::optional<SharedSlotRef> shared_target;
 };
 ```
 
-构建调用处通过表分配 `SlotId`，`SlotTable::find()` 按 ID 返回表项的常量引用，越界时抛出 `std::out_of_range`；名字解析依赖词法作用域和运行时绑定，不能仅用这张表的名称作通用查找键，也不强制所有表项名称唯一。全局和持久变量当前是否仍绑定由运行时状态决定。表在模块发布后不再原地追加；优化版本若需要新的存储槽位，须另行确定版本私有槽位的归属。
+构建调用处通过表分配 `SlotId`，`SlotTable::find()` 按 ID 返回表项的常量引用，越界时抛出 `std::out_of_range`；名字解析依赖词法作用域和运行时绑定，不能仅用这张表的名称作通用查找键，同一代码单元内同名用户变量复用同一个 SlotId，内部槽位与用户槽位分别登记。全局和持久变量当前是否仍绑定由运行时状态决定。表在模块发布后不再原地追加；优化版本若需要新的存储槽位，须另行确定版本私有槽位的归属。
 
 #### 输入与结果的存储原则
 
-`ValueTable` 拥有每个结果的 Value，Instruction 继承 User 并独占拥有输入 Use。输入不再保存可独立修改的 ValueId 字段；指令的结果编号仍由各子类保存。值表、输入关系和结果编号共同属于同一阶段版本。
+`ValueTable` 拥有每个指令结果和签名参数的 Value，Instruction 继承 User 并独占拥有输入 Use。输入不再保存可独立修改的 ValueId 字段；指令的结果编号仍由各子类保存。值表、输入关系和结果编号共同属于同一阶段版本。
 
-#### Value：每个结果的稳定对象
+#### Value：每个值的稳定对象
 
 ```cpp
 class Value final {
@@ -518,25 +521,25 @@ public:
     enum class Form : std::uint8_t { Single, MaybePack };
 
 private:
-    friend class Use;
-    friend class ValueTable;
-
     ValueId id_;
     Instruction* definition_ = nullptr;
     std::uint32_t result_index_ = 0;
+    bool is_parameter_ = false;
     Form form_ = Form::Single;
     bool is_constant_ = false;
     Use* first_use_ = nullptr;
+    std::optional<ba_type> type_;
+    std::optional<std::vector<std::optional<std::size_t>>> shape_;
 };
 ```
 
-Value 提供 `id()`、`definition()`、`result_index()`、`form()`、`is_constant()`、`use_empty()` 和 `first_use()` 查询。禁止复制和移动，使用链不能通过默认拷贝产生副本。
+Value 提供 `id()`、`has_definition()`、`is_parameter()`、`definition()`、`result_index()`、`form()`、`is_constant()`、`type()`、`shape()`、`use_empty()` 和 `first_use()` 查询。禁止复制和移动，使用链不能通过默认拷贝产生副本。
 
-`definition_` 和 `result_index_` 唯一定位定义指令的某个输出。例如多结果调用的两个输出分别维护各自的使用链。`form_` 表示单值或可能承载逗号分隔列表，不记录运行时展开数量；`is_constant_` 保留现有常量性标记。暂不加入固定类型和 shape 字段。
+`definition_` 和 `result_index_` 唯一定位定义指令的某个输出。例如多结果调用的两个输出分别维护各自的使用链。`form_` 表示单值或可能承载逗号分隔列表，不记录运行时展开数量；`is_constant_` 保留现有常量性标记。type 和 shape 保存可选的静态事实，不代表变量在运行时保持相同类型。
 
 值表改为 `std::vector<std::unique_ptr<Value>>`。表扩容、编号压缩都不移动 Value，Use 可以保存稳定的 Value 指针。ValueTable 通过 `reserve(id)` 预留记录，通过 `define(id, instruction, result_index)` 绑定定义，支持循环 PHI 等前向引用。
 
-`definition_ == nullptr` 仅表示构建期间定义尚未补齐，不表示运行时 Undefined。完成构建后的缺失定义由 Verifier 检查。
+参数通过 is_parameter 标识，不对应定义指令；非参数且 definition_ 为空才表示构建期间尚未补齐的引用。二者都不表示运行时 Undefined。has_definition() 统一判断参数或指令结果是否已定义。
 
 #### Use：一个输入位置上的引用
 
@@ -623,7 +626,7 @@ use-def 和 def-use 是 IR 的基础关系，不作为可以过期的 Analysis �
 
 完整 IR 合法性检查仍由后续 Verifier Pass 承担；Analysis 和 Transform 不重复执行该验证。
 
-按[新解释器架构](新解释器架构.md)和[Deopt 设计思路](SSA到非SSA的运行时回退设计.md)，SSA 回退需要恢复 slot 的值及绑定状态，并区分调用前、调用后和异常路径的继续位置。后续应为每个 IR 版本固定这些元数据的归属与生命周期，避免基本块已更新而映射仍指向旧版本。
+按[回退机制设计](SSA化与回退机制.md)，静态确认的工作区调用通过运行时工作区访问协议和 workspace_barrier 继续 SSA（访问协议尚待实现，不再设置显式同步指令）；未受保护的动态工作区访问在实际访问入口同步 caller 并标记，caller 正常或异常返回边界再转 Non-SSA，调用不重放。现在由静态 Value 保存赋值 SlotId，执行帧维护 slot 到最近赋值 ValueId 的来源表，实际回退时恢复槽位及绑定状态，避免工作区恢复专用 PHI。调用点关联原 Non-SSA 调用身份和返回继续点；中间寄存器在构建时保留 Non-SSA 到 SSA 的紧凑来源映射，首次实际回退时再分析继续边界的 liveness 并缓存恢复计划。首版保留潜在恢复来源且不复用寄存器存储，SSA 构建侧元数据已接入 mem2reg，延迟分析与运行时机制仍待实现。
 
 ### 4.3 世界验证与源文件版本判定
 
@@ -641,7 +644,7 @@ use-def 和 def-use 是 IR 的基础关系，不作为可以过期的 Analysis �
 
 ### 4.5 构建接口与当前代码状态
 
-当前仓库已实现 `IRModule`、代码单元、基本块、针对已支持语法的 `IRBuilder`，以及文件来源的 `IRCache`。`IRBuilder` 支持从脚本和函数文件构建模块，并为脚本主体、局部函数及嵌套函数生成 Non-SSA IR；动态名字消歧、独立 IR 检查和未覆盖语法仍待实现。当前 builder 生成的指令已有文本输出；`MagicColonInst` 和 `MagicEndInst` 等尚未由 builder 生成的指令仍需在 ir_io 中补充文本编解码。
+当前仓库已实现 `IRModule`、代码单元、基本块、针对已支持语法的 `IRBuilder`，以及文件来源的 `IRCache`。`IRBuilder` 支持从脚本和函数文件构建模块，并为脚本主体、局部函数及嵌套函数生成 Non-SSA IR；动态名字消歧、独立 IR 检查和未覆盖语法仍待实现。当前 builder 生成的指令已有文本输出；单独冒号现由 builder 生成特殊 ConstInst 并支持读写；MagicEndInst 的构建与文本编解码仍待补充。
 
 ---
 
@@ -656,3 +659,25 @@ Baltam 的 IR 系统采用以 `IRModule` 为核心的所有权模型。
 对于 `@ClassName` 类文件夹，每个 `.m` 方法文件独立生成和缓存 `IRModule`，文件夹本身不构成 IR 模块。类归属、方法解析和继承关系由运行时 `object_meta` 独立管理。
 
 整体上，**IR 组织、IR 缓存和运行时类元数据各司其职**，避免重复所有权、重复缓存以及职责交叉。第四节列出的版本生命周期、deopt 元数据、依赖验证、`classdef` 表示和构建接口仍须在实现相应功能前确定。
+
+### 参数的定义
+
+参数由函数签名直接定义为 Value，没有对应的参数指令。Value::is_parameter 标识该类别，result_index 保存签名位置；definition() 返回空指针，但 has_definition() 为 true。未绑定的前向引用则两者均不成立，这些编译期定义状态与运行时 Undefined 无关。
+
+ValueTable::define_parameter 登记读入的参数，IRStageVersion::add_parameter 创建 SSA 参数，parameters() 按签名位置返回其 ValueId。克隆、压缩编号及读写直接处理这些参数，参数始终排在返回值及指令结果之前；参数没有所属基本块指令，在支配关系上视为入口可用。槽位身份仍由 FunctionUnit 的有序 parameter_slots 保存，不在 Value 中重复记录。
+
+### 变量绑定记录
+
+Value 只描述值定义、Use 和静态类型事实，不持有赋值目标。RecordInst 在原赋值位置记录 SlotId 与来源 ValueId，输入使用普通 Use，没有结果；运行时据此维护当前帧的变量绑定。mem2reg 将可提升的用户 store 改为 record，内部 store 删除，未提升存储仍保留 load/store。值复用直接引用同一个 Value，不需要 copy 指令。record 具有可观察效果，不能当作无结果的纯指令丢弃。
+
+### 槽位的已知类型与形状
+
+SlotInfo 保存可选 type 和 shape，主要用于编译器内部的固定类型存储。for 计数槽位在构建时设置为 double 1x1；ValueTable 登记 load 时继承槽位事实，mem2reg 创建入口 PHI 时也继承。文本读取从内部 load 标注恢复这些字段，仍不暴露为用户工作区变量。普通局部槽位默认未知，不把运行时的可变类型误当作固定约束。
+
+### 值的已知类型与形状
+
+Value 保存可选的 `ba_type` 和可选形状；形状由可选维度组成，可表达固定形状及部分未知维度。类型、形状或维度缺失只表示静态信息未知，与运行时 Undefined 无关。
+
+登记普通常量时从对象取得完整类型及形状，登记元胞构造时保存 cell 类型和二维形状。ForeachInit 的唯一结果 max_iter 固定为 `ba_double_mat`、`{1, 1}`；不再持有独立 state。其他结果只保存已有分析确定的事实。
+
+克隆、编号压缩及文本读写保留这些事实。定义打印为 `%N: type shape`，未知信息省略，多结果使用 `[%N, %M: type shape]`；具体语法见 IR 持久化文档。

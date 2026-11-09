@@ -1,3 +1,34 @@
+# Version 0.2.0
+
+更新日期：2026-11-09。
+
+## SSA 构建与回退信息
+
+- 重写 mem2reg，采用基于 CFG 的按需定义查询及占位 PHI 处理分支和循环，不再依赖支配边界插入 PHI 或沿支配树重命名。
+- 新增 `record slot_x, %N`，在原赋值位置独立记录已提升局部变量的运行时绑定。移除 Value 的 assigned_slot 字段及 CopyInst，多个变量可直接引用同一个 SSA 值。
+- SSA 参数直接由函数签名定义为 Value，移除 ParameterInst；SSA 返回指令直接引用寄存器。克隆、Use 链和编号压缩支持签名参数，编号按参数、返回结果、函数体结果排列。
+- 建立 Non-SSA 基线及跨阶段寄存器映射，值替换和编号压缩同步维护恢复来源；SSA 保存基线的非拥有指针。设计约定在实际回退时再按需分析需要恢复的寄存器。
+- 支持 workspace_barrier 前后的定义查询、工作区状态读取及 Undefined 传播。移除来源必须“必然已定义”才能消除 load 的规则，约定由普通指令在实际取值时承担 Undefined 检查。
+- SlotInfo 保存全局、持久声明和嵌套共享关系；相关变量保留真实 load/store。内部槽位通过 is_internal 标记，可跨工作区屏障提升，不生成 record。
+
+## 循环与短路表达式
+
+- ForeachInit 简化为单结果，返回 double 标量上限；语义包含双输出 size、第二输出的 double 转换和首元素提取，空结果按零次循环处理。
+- 移除 ForeachIterate，逐轮取值改为原迭代源的 ParenReferenceInst，配合特殊冒号 ConstInst 和内部下标；单独冒号不再使用专用节点。
+- 循环计数槽位固定为 double 1x1，load 和提升后的 PHI 继承类型与形状；比较及递增统一使用 gt_double、add_double。特殊冒号常量在循环体中创建。
+- 按 SSA 中常规调用不修改当前工作区的假设处理 size/double/subsref 重载，不自动插入工作区屏障；明确的工作区操作仍通过屏障保护，实际跨帧修改按回退协议处理。
+- Non-SSA 允许 PHI，无具名短路表达式直接在汇合块生成 PHI，不再引入临时 slot；直接变量赋值复用目标 slot，完整短路条件直接连接控制流。
+
+## IR 格式与接口清理
+
+- 寄存器定义统一为 `%N: type shape`，类型和 shape 可分别省略，未知维度使用 `?`；多结果调用使用 `[%N, %M: type shape]`。内部槽位类型从 load 标注恢复。
+- 常量类型与 shape 移至结果编号之后，逻辑标量展示 `(true)`／`(false)`，字符向量和字符串标量保留可读展示值；constants 元数据及 MAT 存储继续用于精确恢复。
+- SSA 参数使用 `%N [name=x]`，已知类型和 shape 按统一规则标注；调用节点仅保留同模块静态目标属性，移除冗余动态及分派标记、未使用的 DispatchType 和 intrinsic 多结果存储。
+- 更新 IR 持久化、mem2reg、SSA 回退及语法设计文档，补充循环、工作区操作、内部槽位和条件绑定的 M 文件用例。
+- opt 的版本输出改为从 CMake 项目版本生成，修正与项目版本不一致的问题。
+
+本版本包含不兼容的 IR 文本和 C++ 接口变更，旧 IR 文件需要重新生成。当前完成的是 IR 构建、变换、持久化及静态回退信息；工作区绑定、Undefined 检查、size/double/subsref 执行和实际回退仍待运行时接入。
+
 # Version 0.1.3
 
 ## SSA 分析与优化

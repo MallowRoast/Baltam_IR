@@ -5,10 +5,14 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
 namespace baltam {
+
+// 与运行时类型枚举保持一致，具体枚举项由 ba_type.h 定义。
+enum ba_type : unsigned char;
 
 // 编号的范围和绑定状态由所属代码单元的表检查。
 struct ValueId {
@@ -41,7 +45,7 @@ class BasicBlock;
 class Use;
 class User;
 
-// 一个指令结果对应一个地址稳定的值对象；编号仅在所属阶段内有效。
+// 指令结果或函数参数对应一个地址稳定的值对象；编号仅在所属阶段内有效。
 class Value final {
 public:
     enum class Form : std::uint8_t { Single, MaybePack };
@@ -53,6 +57,11 @@ public:
 
     [[nodiscard]] ValueId id() const noexcept { return id_; }
 
+    // 参数由函数签名定义，没有对应指令；未绑定的前向引用也没有指令。
+    [[nodiscard]] bool has_definition() const noexcept { return is_parameter_ || definition_; }
+
+    [[nodiscard]] bool is_parameter() const noexcept { return is_parameter_; }
+
     [[nodiscard]] Instruction* definition() const noexcept { return definition_; }
 
     [[nodiscard]] std::uint32_t result_index() const noexcept { return result_index_; }
@@ -62,6 +71,21 @@ public:
     [[nodiscard]] bool is_constant() const noexcept { return is_constant_; }
 
     void set_constant(bool constant) noexcept { is_constant_ = constant; }
+
+    // 静态已知事实；空类型或形状表示未知，形状中的空维度输出为 ?。
+    // 这些未知事实与运行时 Undefined 无关。
+    [[nodiscard]] std::optional<ba_type> type() const noexcept { return type_; }
+
+    [[nodiscard]] const std::optional<std::vector<std::optional<std::size_t>>>&
+    shape() const noexcept {
+        return shape_;
+    }
+
+    void set_type(std::optional<ba_type> type) noexcept { type_ = type; }
+
+    void set_shape(std::optional<std::vector<std::optional<std::size_t>>> shape) {
+        shape_ = std::move(shape);
+    }
 
     [[nodiscard]] bool use_empty() const noexcept { return first_use_ == nullptr; }
 
@@ -76,10 +100,13 @@ private:
 
     ValueId id_;
     Instruction* definition_ = nullptr;
-    std::uint32_t result_index_ = 0;
+    std::uint32_t result_index_ = 0; // 指令结果位置，参数则为签名中的位置。
+    bool is_parameter_ = false;
     Form form_ = Form::Single;
     bool is_constant_ = false;
     Use* first_use_ = nullptr;
+    std::optional<ba_type> type_;
+    std::optional<std::vector<std::optional<std::size_t>>> shape_;
 };
 
 // 每个输入位置独立拥有一条引用，空值表示 Undefined。

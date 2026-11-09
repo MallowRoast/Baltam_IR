@@ -45,8 +45,7 @@ ValueId IRBuilder::create_concat(std::vector<ValueId> items, ConcatInst::Axis ax
     for (ValueId item : items) {
         is_dynamic |= !version_.values().find(item).is_constant();
     }
-    auto& instruction =
-        block_->add_instruction<ConcatInst>(std::move(items), ValueId{0}, axis, is_dynamic);
+    auto& instruction = block_->add_instruction<ConcatInst>(std::move(items), ValueId{0}, axis);
     return add_result(instruction, instruction.result, Value::Form::Single, !is_dynamic);
 }
 
@@ -455,7 +454,9 @@ IRBuilder::IRBuilder(FunctionUnit& function)
     // 参数和返回变量在 FunctionUnit 构造时已有 slot，后续引用必须复用。
     for (std::size_t i = 0; i < unit_.slot_table().size(); ++i) {
         const SlotId id{static_cast<std::uint32_t>(i)};
-        slots_.emplace(unit_.slot_table().find(id).name, id);
+        const auto& info = unit_.slot_table().find(id);
+        if (!info.is_internal)
+            slots_.emplace(info.name, id);
     }
 }
 
@@ -472,24 +473,43 @@ SlotId IRBuilder::slot(const std::string& key) {
     return found->second;
 }
 
-std::vector<ValueId> IRBuilder::lower_indices(const ast& node, BasicBlock& block) {
+std::vector<ValueId> IRBuilder::lower_indices(const ast& node) {
     if (node.nodetype != node_list || node.branch.size() == 0)
         throw std::invalid_argument("索引列表无效");
     std::vector<ValueId> indices;
     indices.reserve(node.branch.size());
     for (std::size_t i = 0; i < node.branch.size(); ++i)
-        indices.push_back(lower_value(child(node, i), block));
+        indices.push_back(lower_value(child(node, i)));
     return indices;
 }
 
-Operand IRBuilder::lower_member(const ast& node, BasicBlock& block) {
+Operand IRBuilder::lower_member(const ast& node) {
     if (node.nodetype == node_name)
         return name(node);
-    return lower_value(node, block);
+    return lower_value(node);
 }
 
-ValueId IRBuilder::lower_value(const ast& node, BasicBlock& block) {
-    set_insert_point(block);
+ValueId IRBuilder::lower_value(const ast& node) {
+    if (is_short_circuit(node.nodetype)) {
+        auto& current = *block_;
+        auto& yes = add_block();
+        auto& no = add_block();
+        auto& end = add_block();
+        lower_short_condition(node, current, yes, no);
+        const auto true_value = set_insert_point(yes).create_const(std::make_shared<ba_obj>(true));
+        create_goto(end);
+        const auto false_value = set_insert_point(no).create_const(std::make_shared<ba_obj>(false));
+        create_goto(end);
+        // 表达式结果直接汇合为寄存器，不为 Non-SSA 创建临时槽位。
+        set_insert_point(end);
+        auto& phi = block_->add_instruction<PhiInst>(
+            ValueId{0}, std::vector<PhiInst::Incoming>{{&yes, true_value}, {&no, false_value}});
+        const auto result = add_result(phi, phi.result);
+        auto& value = version_.values().find(result);
+        value.set_type(ba_bool_mat);
+        value.set_shape(std::vector<std::optional<std::size_t>>{1, 1});
+        return result;
+    }
     switch (node.nodetype) {
     case node_number:
         return create_const(static_cast<const numval&>(node).data);
@@ -499,6 +519,10 @@ ValueId IRBuilder::lower_value(const ast& node, BasicBlock& block) {
         return create_const(node.nodetype == node_char_mat
                                 ? std::make_shared<ba_obj>(text.c_str(), ba_char_mat)
                                 : std::make_shared<ba_obj>(text));
+    }
+    case node_magic_colon: {
+        auto& instruction = block_->add_instruction<ConstInst>(ValueId{0});
+        return add_result(instruction, instruction.result, Value::Form::Single, true);
     }
     case node_name:
         return create_load(slot(name(node)));
@@ -510,32 +534,32 @@ ValueId IRBuilder::lower_value(const ast& node, BasicBlock& block) {
             const auto base_name = name(base_node);
             const auto found = slots_.find(base_name);
             if (found == slots_.end()) {
-                auto member = lower_member(child(node, 1), block);
+                auto member = lower_member(child(node, 1));
                 return create_dot_access(base_name, std::move(member));
             }
             const auto base = create_load(found->second);
-            auto member = lower_member(child(node, 1), block);
+            auto member = lower_member(child(node, 1));
             return create_dot_reference(base, std::move(member));
         }
-        const auto base = lower_value(base_node, block);
-        auto member = lower_member(child(node, 1), block);
+        const auto base = lower_value(base_node);
+        auto member = lower_member(child(node, 1));
         return create_dot_reference(base, std::move(member));
     }
     case node_cell_get: {
         if (node.branch.size() != 2)
             throw std::invalid_argument("花括号取值节点无效");
-        const auto base = lower_value(child(node, 0), block);
-        auto indices = lower_indices(child(node, 1), block);
+        const auto base = lower_value(child(node, 0));
+        auto indices = lower_indices(child(node, 1));
         return create_brace_reference(base, std::move(indices));
     }
     case node_colon: {
         if (node.branch.size() != 2 && node.branch.size() != 3)
             throw std::invalid_argument("冒号操作数数量错误");
-        const auto start = lower_value(child(node, 0), block);
+        const auto start = lower_value(child(node, 0));
         std::optional<ValueId> step;
         if (node.branch.size() == 3)
-            step = lower_value(child(node, 1), block);
-        const auto stop = lower_value(child(node, node.branch.size() - 1), block);
+            step = lower_value(child(node, 1));
+        const auto stop = lower_value(child(node, node.branch.size() - 1));
         return create_colon(start, step, stop);
     }
     case node_horz_list:
@@ -544,7 +568,7 @@ ValueId IRBuilder::lower_value(const ast& node, BasicBlock& block) {
             return create_const(std::make_shared<ba_obj>(ba_double_mat));
         std::vector<ValueId> items;
         for (std::size_t i = 0; i < node.branch.size(); ++i)
-            items.push_back(lower_value(child(node, i), block));
+            items.push_back(lower_value(child(node, i)));
         return create_concat(std::move(items), node.nodetype == node_horz_list
                                                    ? ConcatInst::Axis::Horizontal
                                                    : ConcatInst::Axis::Vertical);
@@ -562,7 +586,7 @@ ValueId IRBuilder::lower_value(const ast& node, BasicBlock& block) {
             if (row.branch.size() != cols)
                 throw std::invalid_argument("元胞行宽不同");
             for (std::size_t c = 0; c < cols; ++c)
-                items.push_back(lower_value(child(row, c), block));
+                items.push_back(lower_value(child(row, c)));
         }
         return create_cell(std::move(items), rows, cols);
     }
@@ -572,13 +596,13 @@ ValueId IRBuilder::lower_value(const ast& node, BasicBlock& block) {
     if (const auto op = unary_op(node.nodetype)) {
         if (node.branch.size() != 1)
             throw std::invalid_argument("一元运算的操作数数量错误");
-        return create_unary(lower_value(child(node, 0), block), *op);
+        return create_unary(lower_value(child(node, 0)), *op);
     }
     if (const auto op = binary_op(node.nodetype)) {
         if (node.branch.size() != 2)
             throw std::invalid_argument("二元运算的操作数数量错误");
-        const auto lhs = lower_value(child(node, 0), block);
-        const auto rhs = lower_value(child(node, 1), block);
+        const auto lhs = lower_value(child(node, 0));
+        const auto rhs = lower_value(child(node, 1));
         return create_binary(lhs, rhs, *op);
     }
     throw std::invalid_argument("尚未支持的表达式 AST 节点");
@@ -610,9 +634,11 @@ BasicBlock* IRBuilder::lower_switch(const ast& node, BasicBlock& current) {
     if (cases.nodetype != node_list)
         throw std::invalid_argument("switch case 列表无效");
     auto& end = add_block();
-    const auto selected = lower_value(child(node, 0), current);
+    set_insert_point(current);
+    const auto selected = lower_value(child(node, 0));
+    auto* selected_end = block_;
     // 按源码顺序串接 case 检查，匹配分支执行完后统一跳到 end。
-    BasicBlock* check = &current;
+    BasicBlock* check = selected_end;
     bool first = true;
     for (std::size_t i = 0; i < cases.branch.size(); ++i) {
         const auto& case_node = child(cases, i);
@@ -622,11 +648,12 @@ BasicBlock* IRBuilder::lower_switch(const ast& node, BasicBlock& current) {
             auto& case_block = add_block();
             auto& body_block = add_block();
             if (first) {
-                set_insert_point(current).create_goto(case_block);
+                set_insert_point(*selected_end).create_goto(case_block);
                 first = false;
             } else
                 set_insert_point(*check).create_goto(case_block);
-            const auto candidate = lower_value(child(case_node, 0), case_block);
+            set_insert_point(case_block);
+            const auto candidate = lower_value(child(case_node, 0));
             const auto match = create_switch_match(selected, candidate);
             auto& next = add_block();
             create_branch(match, body_block, next);
@@ -635,9 +662,10 @@ BasicBlock* IRBuilder::lower_switch(const ast& node, BasicBlock& current) {
             check = &next;
         } else if (case_node.nodetype == node_otherwise) {
             auto& body_block = add_block();
-            if (first)
-                set_insert_point(current).create_goto(body_block);
-            else
+            if (first) {
+                set_insert_point(*selected_end).create_goto(body_block);
+                first = false;
+            } else
                 set_insert_point(*check).create_goto(body_block);
             if (auto* tail = lower_statement(child(case_node, 1), &body_block))
                 set_insert_point(*tail).create_goto(end);
@@ -647,7 +675,7 @@ BasicBlock* IRBuilder::lower_switch(const ast& node, BasicBlock& current) {
             throw std::invalid_argument("未知 case 节点");
     }
     if (first)
-        set_insert_point(current).create_goto(end);
+        set_insert_point(*selected_end).create_goto(end);
     else if (check)
         set_insert_point(*check).create_goto(end);
     return &end;
@@ -666,20 +694,25 @@ BasicBlock* IRBuilder::lower_for(const ast& node, BasicBlock& current) {
     set_insert_point(current).create_goto(preheader);
 
     // 内部 slot 只通过此 SlotId 引用，不参与用户名字查找。
-    const auto index_slot = unit_.slot_table().add_slot("for.index." + preheader.label());
-    const auto iterable = lower_value(child(node, 1), preheader);
-    const auto state = create_intrinsic(IntrinsicId::ForeachInit, {iterable});
-    const auto count = create_intrinsic(IntrinsicId::ForeachCount, {state});
-    const auto one = create_const(std::make_shared<ba_obj>(std::int64_t{1}));
+    const auto index_slot = unit_.slot_table().add_slot("for.index." + preheader.label(), true);
+    auto& index_info = unit_.slot_table().find(index_slot);
+    index_info.type = ba_double_mat;
+    index_info.shape = std::vector<std::optional<std::size_t>>{1, 1};
+    set_insert_point(preheader);
+    const auto iterable = lower_value(child(node, 1));
+    const auto count = create_intrinsic(IntrinsicId::ForeachInit, {iterable});
+    const auto one = create_const(std::make_shared<ba_obj>(1.0));
     create_store(index_slot, one);
     create_goto(header);
 
     const auto index = set_insert_point(header).create_load(index_slot);
-    const auto done = create_intrinsic(IntrinsicId::IntGt, {index, count});
+    const auto done = create_intrinsic(IntrinsicId::GtDouble, {index, count});
     create_branch(done, end, body);
 
-    const auto item =
-        set_insert_point(body).create_intrinsic(IntrinsicId::ForeachGet, {state, index});
+    set_insert_point(body);
+    auto& magic_colon = block_->add_instruction<ConstInst>(ValueId{0});
+    const auto all_rows = add_result(magic_colon, magic_colon.result, Value::Form::Single, true);
+    const auto item = create_paren_reference(iterable, {all_rows, index});
     create_store(slot(variable), item);
     // 栈顶始终属于最近一层循环，确保嵌套 break/continue 跳转正确。
     loops_.push(end, latch);
@@ -689,7 +722,7 @@ BasicBlock* IRBuilder::lower_for(const ast& node, BasicBlock& current) {
         set_insert_point(*body_end).create_goto(latch);
 
     const auto old_index = set_insert_point(latch).create_load(index_slot);
-    const auto next = create_intrinsic(IntrinsicId::IntAdd, {old_index, one});
+    const auto next = create_intrinsic(IntrinsicId::AddDouble, {old_index, one});
     create_store(index_slot, next);
     create_goto(header);
     return &end;
@@ -720,7 +753,8 @@ void IRBuilder::lower_condition(const ast& node, BasicBlock& current, BasicBlock
         lower_short_condition(node, current, true_target, false_target);
         return;
     }
-    const auto condition = lower_value(node, current);
+    set_insert_point(current);
+    const auto condition = lower_value(node);
     create_branch(condition, true_target, false_target);
 }
 
@@ -738,7 +772,8 @@ void IRBuilder::lower_short_condition(const ast& node, BasicBlock& current, Basi
         lower_short_condition(child(node, 1), rhs, true_target, false_target);
         return;
     }
-    const auto value = lower_value(node, current);
+    set_insert_point(current);
+    const auto value = lower_value(node);
     const auto logical = create_intrinsic(IntrinsicId::LogicalScalar, {value});
     create_branch(logical, true_target, false_target);
 }
@@ -784,18 +819,18 @@ BasicBlock* IRBuilder::lower_statement(const ast& node, BasicBlock* current) {
             base = create_load(found->second);
         std::vector<ValueId> values;
         for (std::size_t i = 0; i < arguments.branch.size(); ++i)
-            values.push_back(lower_value(child(arguments, i), *current));
+            values.push_back(lower_value(child(arguments, i)));
         if (!targets) {
             if (base)
                 create_value_apply(*base, std::move(values));
             else
                 create_call(callee, std::move(values));
-            return current;
+            return block_;
         }
         ValueId result = !base ? create_apply(callee, std::move(values))
                                : create_paren_reference(*base, std::move(values));
         create_store(slot(name(child(*targets, 0))), result);
-        return current;
+        return block_;
     }
     case node_asgn: {
         if (node.branch.size() != 2)
@@ -806,48 +841,48 @@ BasicBlock* IRBuilder::lower_statement(const ast& node, BasicBlock* current) {
             const auto& rhs = child(node, 1);
             if (is_short_circuit(rhs.nodetype))
                 return lower_short_assignment(rhs, *current, target);
-            const auto result = lower_value(rhs, *current);
+            const auto result = lower_value(rhs);
             create_store(target, result);
         } else if (lhs.nodetype == node_multiple_func) {
             if (lhs.branch.size() != 3 || lhs.branch.at(0))
                 throw std::invalid_argument("圆括号赋值目标无效");
             const auto target = slot(name(child(lhs, 1)));
             const auto base = create_load(target);
-            auto indices = lower_indices(child(lhs, 2), *current);
+            auto indices = lower_indices(child(lhs, 2));
             const auto& rhs = child(node, 1);
             const bool deleting = rhs.nodetype == node_vert_list && rhs.branch.size() == 0;
-            const auto updated = deleting ? create_paren_delete(base, std::move(indices))
-                                          : create_paren_assign(base, std::move(indices),
-                                                                lower_value(rhs, *current));
+            const auto updated =
+                deleting ? create_paren_delete(base, std::move(indices))
+                         : create_paren_assign(base, std::move(indices), lower_value(rhs));
             create_store(target, updated);
         } else
             throw std::invalid_argument("尚未支持的赋值目标");
-        return current;
+        return block_;
     }
     case node_cell_set: {
         if (node.branch.size() != 3)
             throw std::invalid_argument("花括号赋值节点无效");
         const auto target = slot(name(child(node, 0)));
         const auto base = create_load(target);
-        auto indices = lower_indices(child(node, 1), *current);
-        const auto value = lower_value(child(node, 2), *current);
+        auto indices = lower_indices(child(node, 1));
+        const auto value = lower_value(child(node, 2));
         const auto updated = create_brace_assign(base, std::move(indices), value);
         create_store(target, updated);
-        return current;
+        return block_;
     }
     case node_struct_get:
-        (void)lower_value(node, *current);
-        return current;
+        (void)lower_value(node);
+        return block_;
     case node_struct_set: {
         if (node.branch.size() != 3)
             throw std::invalid_argument("点号赋值节点无效");
         const auto target = slot(name(child(node, 0)));
         const auto base = create_load(target);
-        auto member = lower_member(child(node, 1), *current);
-        const auto value = lower_value(child(node, 2), *current);
+        auto member = lower_member(child(node, 1));
+        const auto value = lower_value(child(node, 2));
         const auto updated = create_dot_assign(base, std::move(member), value);
         create_store(target, updated);
-        return current;
+        return block_;
     }
     case node_global:
     case node_persistent: {
@@ -858,7 +893,7 @@ BasicBlock* IRBuilder::lower_statement(const ast& node, BasicBlock* current) {
             create_global_decl(std::move(slots));
         else
             create_persistent_decl(std::move(slots));
-        return current;
+        return block_;
     }
     case node_flow_if:
         return lower_if(node, *current);

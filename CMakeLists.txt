@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(Baltam_IR VERSION 0.1.3 LANGUAGES CXX)
+project(Baltam_IR VERSION 0.2.0 LANGUAGES CXX)
 
 set(BALTAM_AST_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/deps/core" CACHE PATH
     "Root directory of the Baltam core and AST SDK")
@@ -64,6 +64,8 @@ if(BALTAM_BUILD_UTILS)
     add_executable(baltam_opt utils/opt.cpp)
     set_target_properties(baltam_opt PROPERTIES OUTPUT_NAME opt)
     target_link_libraries(baltam_opt PRIVATE baltam_ir_core)
+    # 命令行版本直接使用项目版本，避免重复维护。
+    target_compile_definitions(baltam_opt PRIVATE "BALTAM_IR_VERSION=\"${PROJECT_VERSION}\"")
 endif()
 
 # 格式化保持为独立目标，也可以显式开启构建前自动执行。
