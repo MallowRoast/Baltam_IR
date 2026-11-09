@@ -1,7 +1,11 @@
 #include "ir/ir_unit.h"
 
-#include <limits>
+#include "ba_obj/ba_type.h"
+#include "ba_obj/ba_obj.h"
+#include "ba_obj/type_base.h"
+
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -10,16 +14,16 @@ namespace baltam {
 
 using IRStage = FunctionUnit::IRStage;
 
-SlotId SlotTable::add_slot(InternedString name) {
-    // 同一代码单元中的同名变量共用一个槽位。
+SlotId SlotTable::add_slot(InternedString name, bool is_internal) {
+    // 用户与内部槽位分别去重，内部名称不会占用用户变量名。
     for (std::size_t i = 0; i < slots_.size(); ++i)
-        if (slots_[i].name == name)
+        if (slots_[i].name == name && slots_[i].is_internal == is_internal)
             return SlotId{static_cast<std::uint32_t>(i)};
     if (slots_.size() > std::numeric_limits<std::uint32_t>::max()) {
         throw std::overflow_error("槽位编号已用尽");
     }
     const SlotId id{static_cast<std::uint32_t>(slots_.size())};
-    slots_.push_back(SlotInfo{std::move(name)});
+    slots_.push_back(SlotInfo{std::move(name), is_internal});
     return id;
 }
 
@@ -49,17 +53,55 @@ Value& ValueTable::find(ValueId id) {
     return const_cast<Value&>(std::as_const(*this).find(id));
 }
 
+void ValueTable::define_parameter(ValueId id, std::uint32_t index) {
+    auto& value = reserve(id);
+    if (value.has_definition())
+        throw std::invalid_argument("参数值编号重复");
+    value.is_parameter_ = true;
+    value.result_index_ = index;
+}
+
 void ValueTable::define(ValueId id, Instruction& definition, std::uint32_t result_index,
                         Value::Form form, bool constant) {
     if (!definition.parent() || definition.parent()->version_ != version_)
         throw std::invalid_argument("值定义指令不属于当前阶段版本");
     auto& value = reserve(id);
-    if (value.definition_)
+    if (value.has_definition())
         throw std::invalid_argument("值定义编号重复");
     value.definition_ = &definition;
     value.result_index_ = result_index;
     value.form_ = form;
     value.is_constant_ = constant;
+    if (definition.type() == Instruction::Type::Const) {
+        const auto& inst = static_cast<const ConstInst&>(definition);
+        if (!inst.is_magic_colon()) {
+            value.type_ = static_cast<ba_type>(inst.value->type());
+            value.shape_.emplace();
+            for (const auto dim : inst.value->cget<type_base>()->dim_vec())
+                value.shape_->push_back(static_cast<std::size_t>(dim));
+        }
+    }
+    if (definition.type() == Instruction::Type::CellConstruct) {
+        const auto& inst = static_cast<const CellConstructInst&>(definition);
+        value.type_ = ba_cell;
+        value.shape_ = std::vector<std::optional<std::size_t>>{inst.rows, inst.cols};
+    }
+    if (definition.type() == Instruction::Type::LoadSlot) {
+        const auto slot = static_cast<const LoadSlotInst&>(definition).slot;
+        const auto& info = definition.parent()->parent()->slot_table().find(slot);
+        if (info.type)
+            value.type_ = info.type;
+        if (info.shape)
+            value.shape_ = info.shape;
+    }
+    if (definition.type() == Instruction::Type::Intrinsic) {
+        const auto id = static_cast<const IntrinsicInst&>(definition).id;
+        if (id == IntrinsicId::ForeachInit || id == IntrinsicId::AddDouble ||
+            id == IntrinsicId::GtDouble) {
+            value.type_ = id == IntrinsicId::GtDouble ? ba_bool_mat : ba_double_mat;
+            value.shape_ = std::vector<std::optional<std::size_t>>{1, 1};
+        }
+    }
 }
 
 IRStageVersion::~IRStageVersion() {
@@ -76,6 +118,25 @@ ValueId IRStageVersion::add_value(Instruction& definition, std::uint32_t result_
     const ValueId id{static_cast<std::uint32_t>(values_.size())};
     values_.define(id, definition, result_index, form, constant);
     return id;
+}
+
+ValueId IRStageVersion::add_parameter(std::uint32_t index) {
+    if (values_.size() > std::numeric_limits<std::uint32_t>::max())
+        throw std::overflow_error("值编号已用尽");
+    const ValueId id{static_cast<std::uint32_t>(values_.size())};
+    values_.define_parameter(id, index);
+    return id;
+}
+
+std::vector<ValueId> IRStageVersion::parameters() const {
+    std::vector<ValueId> parameters;
+    for (const auto& value : values_.values_)
+        if (value->is_parameter())
+            parameters.push_back(value->id());
+    std::sort(parameters.begin(), parameters.end(), [this](ValueId lhs, ValueId rhs) {
+        return values_.find(lhs).result_index() < values_.find(rhs).result_index();
+    });
+    return parameters;
 }
 
 Instruction& BasicBlock::insert_instruction(std::size_t position,
@@ -150,9 +211,6 @@ void IRStageVersion::erase_instruction(BasicBlock& block, std::size_t position) 
     for (const auto& value : values_.values_)
         if (value->definition_ == removed && !value->use_empty())
             throw std::logic_error("不能删除仍有结果被引用的指令，请先替换所有使用");
-    for (const auto& value : values_.values_)
-        if (value->definition_ == removed && value->assigned_slot_)
-            throw std::logic_error("不能删除仍承担变量赋值的值定义");
     removed->drop_all_references();
     for (const auto& value : values_.values_) {
         if (value->definition_ != removed)
@@ -161,6 +219,8 @@ void IRStageVersion::erase_instruction(BasicBlock& block, std::size_t position) 
         value->result_index_ = 0;
         value->form_ = Value::Form::Single;
         value->is_constant_ = false;
+        value->type_.reset();
+        value->shape_.reset();
     }
     block.instructions_.erase(block.instructions_.begin() + position);
 }
@@ -195,10 +255,17 @@ std::shared_ptr<IRStageVersion> IRStageVersion::clone(IRUnit& owner) const {
         }
     }
     for (const auto& value : values_.values_) {
-        if (value->definition_) {
+        if (value->is_parameter())
+            copy->values_.define_parameter(value->id(), value->result_index());
+        else if (value->definition_)
             copy->values_.define(value->id(), *instructions.at(value->definition_),
                                  value->result_index_, value->form_, value->is_constant_);
-            copy->values_.find(value->id()).assigned_slot_ = value->assigned_slot_;
+        if (value->has_definition()) {
+            auto& cloned = copy->values_.find(value->id());
+            cloned.form_ = value->form_;
+            cloned.is_constant_ = value->is_constant_;
+            cloned.type_ = value->type_;
+            cloned.shape_ = value->shape_;
         }
     }
     copy->return_count_ = return_count_;
@@ -215,7 +282,7 @@ void IRStageVersion::initialize_deopt(const IRStageVersion* baseline) {
     baseline_to_ssa_.resize(deopt_baseline_->values().size());
     for (std::size_t i = 0; i < baseline_to_ssa_.size(); ++i) {
         const ValueId id{static_cast<std::uint32_t>(i)};
-        if (deopt_baseline_->values().find(id).definition())
+        if (deopt_baseline_->values().find(id).has_definition())
             baseline_to_ssa_[i] = id;
     }
     for (std::size_t b = 0; b < blocks_.size(); ++b) {
@@ -240,7 +307,7 @@ std::optional<ValueId> IRStageVersion::deopt_source(ValueId baseline_value) cons
 void IRStageVersion::compact_values() {
     // 先确认所有存活引用均有定义，再移动拥有者；Value 地址始终不变。
     for (const auto& value : values_.values_)
-        if (!value->definition_ && !value->use_empty())
+        if (!value->has_definition() && !value->use_empty())
             throw std::logic_error("压缩值表时发现未定义的值引用");
     // 入参、各返回位置引用的结果、函数体结果依次编号，同一值只登记一次。
     std::vector<ValueId> order;
@@ -251,16 +318,8 @@ void IRStageVersion::compact_values() {
             order.push_back(id);
         }
     };
-    std::vector<const ParameterInst*> parameters;
-    for (const auto& block : blocks_)
-        for (const auto& inst : block->instructions())
-            if (inst->type() == Instruction::Type::Parameter)
-                parameters.push_back(static_cast<const ParameterInst*>(inst.get()));
-    std::sort(
-        parameters.begin(), parameters.end(),
-        [](const ParameterInst* lhs, const ParameterInst* rhs) { return lhs->index < rhs->index; });
-    for (const auto* parameter : parameters)
-        append(parameter->result);
+    for (const auto parameter : parameters())
+        append(parameter);
     for (const auto& block : blocks_)
         for (const auto& inst : block->instructions())
             if (inst->type() == Instruction::Type::Return)
@@ -316,13 +375,9 @@ void IRStageVersion::compact_values() {
         auto& info = *values[i];
         const ValueId id{static_cast<std::uint32_t>(i)};
         info.id_ = id;
+        if (info.is_parameter())
+            continue;
         switch (info.definition_->type()) {
-        case Instruction::Type::Parameter:
-            static_cast<ParameterInst&>(*info.definition_).result = id;
-            break;
-        case Instruction::Type::Copy:
-            static_cast<CopyInst&>(*info.definition_).result = id;
-            break;
         case Instruction::Type::Const:
             static_cast<ConstInst&>(*info.definition_).result = id;
             break;
@@ -337,9 +392,6 @@ void IRStageVersion::compact_values() {
             break;
         case Instruction::Type::Colon:
             static_cast<ColonInst&>(*info.definition_).result = id;
-            break;
-        case Instruction::Type::MagicColon:
-            static_cast<MagicColonInst&>(*info.definition_).result = id;
             break;
         case Instruction::Type::MagicEnd:
             static_cast<MagicEndInst&>(*info.definition_).result = id;

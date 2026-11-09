@@ -1,6 +1,6 @@
 # Baltam IR
 
-当前版本：**0.1.3**。更新内容见 [更新日志](release_notes/version.md)。
+当前版本：**0.2.0**。更新内容见 [更新日志](release_notes/version.md)。
 
 将 M 源码转换为 Non-SSA IR，为后续 SSA 优化与解释执行提供基础。目前支持的语法范围见 [M 语法与 IR 设计](docs/M语法与IR设计.md)，架构思路见 [新解释器架构](docs/新解释器架构.md)。
 

@@ -216,7 +216,10 @@ std::string descriptor(const ba_obj& obj) {
 
 template <class T> std::string encode_array(const ba_obj& obj, std::string* display) {
     auto& m = *obj.cget<matrix<T>>();
-    if constexpr (std::is_arithmetic_v<T> && !std::is_same_v<T, char> && !std::is_same_v<T, bool>) {
+    if constexpr (std::is_same_v<T, bool>) {
+        if (display && m.size() == 1)
+            *display = m(0) ? "true" : "false";
+    } else if constexpr (std::is_arithmetic_v<T> && !std::is_same_v<T, char>) {
         if (display && m.size() == 1) {
             std::ostringstream text;
             text.imbue(std::locale::classic());
@@ -341,21 +344,30 @@ struct Line {
     std::string label, desc;
     ValueId result;
 };
+std::optional<ValueId> magic_colon_result(std::string_view text) {
+    static const std::regex expression(R"IR(^\s*%([0-9]+)\s*=\s*const\s+":"\s*$)IR");
+    std::smatch match;
+    const std::string line(text);
+    if (!std::regex_match(line, match, expression))
+        return std::nullopt;
+    return ValueId{integer<std::uint32_t>(match[1].str())};
+}
+
 Line parse_line(std::string_view text) {
     static const std::regex expression(
-        R"IR(^\s*%([0-9]+)\s*=\s*const\s+(!c[0-9]+)\s*(?:\((?:[^()'"]|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')*\))?\s*:\s*(\S+\s+[0-9]+(?:x[0-9]+)+)\s*(?:\[assigned_slot=slot_[^\s\]]+\])?\s*$)IR");
+        R"IR(^\s*%([0-9]+)\s*:\s*(\S+\s+[0-9]+(?:x[0-9]+)+)\s*=\s*const\s+(!c[0-9]+)\s*(?:\((?:[^()'"]|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')*\))?\s*$)IR");
     std::smatch m;
     std::string s(text);
     if (!std::regex_match(s, m, expression))
         throw std::invalid_argument("常量指令格式无效");
-    auto shape = parse_shape(m[3]);
+    auto shape = parse_shape(m[2]);
     std::string desc = shape.type + " ";
     for (std::size_t i = 0; i < shape.dims.size(); ++i) {
         if (i)
             desc += 'x';
         desc += std::to_string(shape.dims[i]);
     }
-    return {m[2], desc, ValueId{integer<std::uint32_t>(m[1].str())}};
+    return {m[3], desc, ValueId{integer<std::uint32_t>(m[1].str())}};
 }
 
 struct MatData {
@@ -385,8 +397,8 @@ ConstantEncoder::ConstantEncoder(std::filesystem::path directory, std::filesyste
     : directory_(std::move(directory)), constant_directory_(std::move(constants)) {}
 
 std::string ConstantEncoder::encode(const ConstInst& inst) {
-    if (!inst.value)
-        throw std::invalid_argument("常量对象不能为空");
+    if (inst.is_magic_colon())
+        return "%" + std::to_string(inst.result.index) + R"( = const ":")";
     auto desc = descriptor(*inst.value);
     const auto count = inst.value->cget<type_base>()->size();
     std::string display;
@@ -441,10 +453,11 @@ std::string ConstantEncoder::encode(const ConstInst& inst) {
         definitions_.push_back(std::move(definition));
     }
 
-    std::string out = "%" + std::to_string(inst.result.index) + " = const !c" + std::to_string(id);
+    std::string out =
+        "%" + std::to_string(inst.result.index) + ": " + desc + " = const !c" + std::to_string(id);
     if (!display.empty())
         out += " (" + display + ")";
-    return out + ": " + desc;
+    return out;
 }
 
 std::string ConstantEncoder::metadata() const {
@@ -457,6 +470,8 @@ std::string ConstantEncoder::metadata() const {
 ConstantDecoder::ConstantDecoder(std::string_view metadata, const std::vector<std::string>& lines,
                                  std::filesystem::path directory) {
     for (const auto& text : lines) {
+        if (magic_colon_result(text))
+            continue;
         auto line = parse_line(text);
         auto [it, added] = entries_.emplace(line.label, Entry{line.desc, {}});
         if (!added && it->second.descriptor != line.desc)
@@ -517,6 +532,8 @@ ConstantDecoder::ConstantDecoder(std::string_view metadata, const std::vector<st
 }
 
 std::unique_ptr<ConstInst> ConstantDecoder::decode(std::string_view text) const {
+    if (const auto result = magic_colon_result(text))
+        return std::make_unique<ConstInst>(*result);
     auto line = parse_line(text);
     auto it = entries_.find(line.label);
     if (it == entries_.end() || it->second.descriptor != line.desc)

@@ -16,11 +16,10 @@ PreservedAnalyses Mem2RegPass::run(FunctionUnit& function,
 ```text
 筛选 slot，计算入口可达块
 → 克隆 Non-SSA，建立参数与返回值接口
-→ 为候选 store 预留稳定赋值结果
 → 从每条 load 按需查询当前定义
 → 必要时生成 PHI 或工作区读取
-→ 将 store 转为赋值 copy
-→ 删除多余读取、简化 PHI、合并可省去的 copy
+→ 将用户 store 转为 record，删除内部 store
+→ 删除多余读取，简化 PHI
 → 更新恢复映射、压缩编号并发布 SSA
 ```
 
@@ -30,23 +29,29 @@ PreservedAnalyses Mem2RegPass::run(FunctionUnit& function,
 
 SlotInfo 包含全局、持久声明或任一种共享关系时，保留相应 load/store。标记只表示声明存在，不代替运行时绑定。
 
-内部迭代槽位、不可达块中访问的槽位、MaybePack 写入目标，以及输入中已有带 SSA 来源 load 或带 assigned_slot copy 的槽位，也暂不提升。
+不可达块中访问的槽位、MaybePack 写入目标，以及输入中已有带 SSA 来源 load 或 record 的槽位，也暂不提升。
 
-参数使用入口 ParameterInst 的寄存器定义，返回值由各条 ret 的输入给出。需要保留存储的参数在入口建立 slot 绑定。返回变量在每个返回点生成读取，与普通 load 一同求解。
+内部循环计数器在 SlotInfo 中固定 type=ba_double_mat、shape={1,1}；load 与入口 PHI 继承这些事实。内部循环计数器使用 `SlotInfo::is_internal`，不再按 `for.index.*` 名称排除。内部槽位参与同一套按需定义查询和 PHI 构建；查询时忽略 workspace_barrier，不生成 record，也不进入用户工作区绑定表。它们的 store 直接复用来源值，完成重命名后删除，无需创建赋值结果寄存器。
 
-自动捕获分析尚未接入，嵌套函数及其父函数仍保守跳过。MayWriteSlot 操作只有与后继 workspace_barrier 在同块紧邻时才按显式保护处理，否则整个函数保持 Non-SSA。运行时工作区访问和异常保护协议仍待实现。
+Non-SSA 已允许 PHI。无具名结果的短路表达式由 IRBuilder 直接生成 PHI，不创建临时 slot；mem2reg 克隆并保留这些寄存器汇合，仍只针对符合条件的 slot 消除 load/store，现有 PHI 同样参与后续简化。
 
-## 3. 稳定赋值结果
+参数使用函数签名直接定义的 Value，返回值由各条 ret 的输入给出。可提升参数在入口生成 record；需要保留存储的参数在入口生成 store。返回变量在每个返回点生成读取，与普通 load 一同求解。
 
-为每条候选 store 预留 ValueId，记录：
+for 的初始化和逐轮取值可能执行 size/double/subsref 重载，按 SSA 中常规调用不修改当前工作区的假设处理，不插入屏障，也不因此跳过提升。若实际修改父工作区，由运行时回退协议处理。显式 eval/load 工作区操作仍使用屏障。上限为 double 标量，下标也为 double，使用专用 GtDouble 比较，不使用动态 gt。
+
+自动捕获分析尚未接入，嵌套函数及其父函数仍保守跳过。除上述常规初始化和圆括号索引外，其他 MayWriteSlot 操作仍要求与后继 workspace_barrier 在同块紧邻，否则整个函数保持 Non-SSA。运行时工作区访问和异常保护协议仍待实现。
+
+## 3. 值定义与变量绑定分离
+
+store 没有结果，查询到它时直接使用输入 ValueId，不为赋值预留新寄存器。所有读取的定义图建立后，将可提升用户变量的 store 在原位置转换为：
 
 ```text
-StoreSlotInst* → 最终赋值结果 ValueId
+record slot_x, %value
 ```
 
-load 和 PHI 可以先引用它。完成读取分析后，在原 store 位置定义同编号的 copy，并设置 assigned_slot。原始 Non-SSA StoreSlotInst 仍不产生结果，不改变其文本格式。
+RecordInst 只有 SlotId 和一个普通 Use，不产生值，也不做数据复制。运行时执行到这里才更新当前帧的槽位绑定；条件赋值的 record 保留在对应分支中。多个 slot 可分别引用同一个 SSA 值。内部 store 直接删除；全局、持久、共享等不可提升变量保留真实 load/store。
 
-如果常量或 intrinsic 紧邻 copy，且来源未关联其他 slot，可以转移 assigned_slot 并直接复用来源，省去 copy。其他赋值保留独立身份。
+Value 不携带赋值目标。load 直接复用来源值，绑定更新由 record 独立保留。
 
 ## 4. 查询某个位置的当前定义
 
@@ -54,14 +59,14 @@ load 和 PHI 可以先引用它。完成读取分析后，在原 store 位置定
 
 | 先遇到的相关指令 | 来源 |
 | --- | --- |
-| 同 slot 的 store | 预留的赋值结果 |
+| 同 slot 的 store | 直接使用 store 的输入 ValueId |
 | 同 slot 的原 load | 该读取的结果，即使它尚未处理也可引用 |
-| workspace_barrier | 工作区来源，不能继续越过屏障查旧定义 |
+| workspace_barrier | 用户槽位变为工作区来源；内部槽位忽略屏障继续查找 |
 | 到达块首 | 查询当前块入口 |
 
 无关指令直接跳过。相同变量的新赋值、读取或屏障自然截断对更早定义的查找。
 
-如果当前 load 的来源是工作区，在其原位置前增加一个普通 load 取得状态，原读取通过可选 SSA 来源保留使用语义；后续读取可以复用已经取得的结果。辅助读取允许得到 Undefined，不在前驱路径上提前报错。
+如果当前 load 的来源是工作区，在其原位置前增加一个普通 load 取得状态，原读取暂时通过可选 SSA 来源连接定义图，随后直接传播来源并删除；后续读取可以复用已经取得的结果。辅助读取允许得到 Undefined，不在前驱路径上提前报错。
 
 ## 5. 块入口与出口查询
 
@@ -78,7 +83,7 @@ OUT[B, slot] → 块出口的定义
 
 ```text
 then:
-    %x1 = copy %a to slot_x
+    record slot_x, %a
     goto merge
 else:
     call builtin.load(%file)
@@ -86,7 +91,7 @@ else:
     %x2 = load slot_x
     goto merge
 merge:
-    %x3 = phi [then, %x1], [else, %x2]
+    %x3 = phi [then, %a], [else, %x2]
     %r = load slot_x, %x3
 ```
 
@@ -110,15 +115,19 @@ merge:
 %error = load slot_x, Undefined
 ```
 
-无来源的 SSA load 取得槽位状态，允许 Undefined；有 SSA 来源的 load 不重新读取实际槽位，在原变量读取位置保留读取和未定义错误语义。两者都不构成新的变量赋值。
+无来源的 SSA load 取得槽位状态，允许 Undefined；有 SSA 来源的 load 不重新读取实际槽位，只是定义图构建期间的转发节点；对具体 ValueId 的转发最终消除。两者都不构成新的变量赋值。
 
-定义图完成后，通过输入传播判断值是否必然已定义，移除可证明多余的带来源 load。这个分析只服务于读取简化，不用于预先放置 PHI，也不替代未来 clear 绑定有效性检查。
+定义图完成后，只要带来源 load 引用具体 SSA ValueId，就直接替换全部 Use 和恢复映射并删除，不再执行“必然已定义”分析。即使来源 PHI 可能携带 Undefined，也由 record、运算、调用、return 等普通指令实际取值时检查；PHI 只传递状态，不提前报错。显式 `load slot_x, Undefined` 没有可替代的 ValueId，暂保留原读取位置。真实工作区 load 仍保留。
 
 ## 8. 发布与恢复信息
 
-将候选 store 改为预留结果编号的 copy，再统一删除旧 store。普通值替换通过 replace_all_uses 更新 Use 和恢复来源；不能因没有普通 Use 删除仍承担变量赋值的定义。
+候选用户 store 在原位置改为 record，内部 store 删除。简化 PHI、消除多余读取 后，再次清理 PHI。replace_all_uses 同时更新 record 的普通 Use 和跨阶段恢复来源，不为别名创建额外的结果编号。
 
-简化 PHI、消除多余读取、合并安全的赋值 copy 后，再次清理 PHI。最终按参数、返回值、函数体结果排列编号，更新跨阶段映射并发布 Based-SSA。克隆改变了块身份，旧 CFG 和其他已缓存分析均失效。
+record 的 Effect 为 MayWriteSlot，表示可观察的绑定提交；它不能因没有结果而被死代码消除，不能随意跨分支、工作区操作或可能失败的求值移动。原输入已有 record 的槽位保守跳过提升，避免把绑定记录当成普通存储重新转换。
+
+最终按参数、返回值、函数体结果排列编号，更新跨阶段映射并发布 Based-SSA。克隆改变了块身份，旧 CFG 和其他已缓存分析均失效。
+
+运行时来源表必须持有赋值时的结果，或使用可定位该次执行的句柄。静态 ValueId 在循环中会反复执行，仅记录其编号不能自动保证旧绑定的值仍可恢复；这部分留待执行器实现。
 
 ## 9. 验证范围
 
@@ -131,15 +140,16 @@ merge:
 SSA 参数是入口寄存器，普通参数和返回变量都参与提升：
 
 ```text
-define @identity(%0: x) -> 1 {
+define @identity(%0 [name=x]) -> 1 {
 ; stage: Based-SSA
 
 entry:
+    record slot_x, %0
     ret %0
 }
 ```
 
-`: x` 是源码变量关联，不是参数存储方式。ParameterInst 由签名隐式定义，不在块内重复打印。返回数量保存在阶段版本中，每个 ret 引用该路径的结果。需要实际存储的参数在入口建立 slot 绑定；返回变量在每个返回点取得当前定义。Non-SSA 签名和无操作数 ret 保持原有槽位约定。
+`[name=x]` 是源码变量关联，不是参数存储方式。参数 Value 由签名直接定义，不对应基本块指令。返回数量保存在阶段版本中，每个 ret 引用该路径的结果。需要实际存储的参数在入口建立 slot 绑定；返回变量在每个返回点取得当前定义。Non-SSA 签名和无操作数 ret 保持原有槽位约定。
 
 ```bash
 cmake --build build -j4

@@ -48,79 +48,20 @@ void simplify_phis(IRStageVersion& version) {
     } while (changed);
 }
 
-// 将紧邻纯计算结果的赋值合并到该结果，保留赋值目标和执行位置。
-void fold_assignment_copies(IRStageVersion& version) {
-    for (const auto& block : version.blocks()) {
-        for (std::size_t i = 1; i < block->instructions().size();) {
-            const auto& instruction = *block->instructions()[i];
-            if (instruction.type() != Instruction::Type::Copy) {
-                ++i;
-                continue;
-            }
-            const auto& copy = static_cast<const CopyInst&>(instruction);
-            auto& target = version.values().find(copy.result);
-            auto& source = version.values().find(copy.value());
-            const auto* definition = source.definition();
-            const bool pure = definition && (definition->type() == Instruction::Type::Const ||
-                                             definition->type() == Instruction::Type::Intrinsic);
-            if (!pure || definition != block->instructions()[i - 1].get() ||
-                source.assigned_slot() || !target.assigned_slot()) {
-                ++i;
-                continue;
-            }
-            source.set_assigned_slot(target.assigned_slot());
-            target.set_assigned_slot(std::nullopt);
-            version.replace_all_uses(copy.result, copy.value());
-            block->erase_instruction(i);
-        }
-    }
-}
-
-// 定义检查成功后，其结果必然有值；循环 PHI 从乐观状态迭代传播未定义来源。
-void remove_defined_loads(IRStageVersion& version) {
-    std::vector<bool> defined(version.values().size(), true);
-    bool changed;
-    do {
-        changed = false;
-        for (std::size_t i = 0; i < defined.size(); ++i) {
-            const auto* inst =
-                version.values().find(ValueId{static_cast<std::uint32_t>(i)}).definition();
-            if (!inst || !defined[i])
-                continue;
-            bool known = true;
-            if (inst->type() == Instruction::Type::LoadSlot &&
-                !static_cast<const LoadSlotInst&>(*inst).has_source())
-                known = false;
-            else if (inst->type() == Instruction::Type::Phi ||
-                     inst->type() == Instruction::Type::Copy) {
-                for (std::size_t n = 0; n < inst->operand_count(); ++n) {
-                    const auto value = inst->operand(n).value();
-                    if (!value || !defined[value->index]) {
-                        known = false;
-                        break;
-                    }
-                }
-            }
-            if (!known) {
-                defined[i] = false;
-                changed = true;
-            }
-        }
-    } while (changed);
+// 已有 SSA 来源的读取直接转发；Undefined 在普通指令实际取值时检查。
+void remove_forwarded_loads(IRStageVersion& version) {
     for (const auto& block : version.blocks()) {
         for (std::size_t i = 0; i < block->instructions().size();) {
             const auto& instruction = *block->instructions()[i];
             if (instruction.type() == Instruction::Type::LoadSlot) {
                 const auto& load = static_cast<const LoadSlotInst&>(instruction);
-                if (!load.has_source()) {
-                    ++i;
-                    continue;
-                }
-                const auto value = load.source();
-                if (value && defined[value->index]) {
-                    version.replace_all_uses(load.result, *value);
-                    block->erase_instruction(i);
-                    continue;
+                if (load.has_source()) {
+                    // 显式 Undefined 没有可替代的 ValueId，保留该读取。
+                    if (const auto value = load.source()) {
+                        version.replace_all_uses(load.result, *value);
+                        block->erase_instruction(i);
+                        continue;
+                    }
                 }
             }
             ++i;
@@ -159,9 +100,6 @@ PreservedAnalyses Mem2RegPass::run(FunctionUnit& function, FunctionAnalysisManag
         const auto& info = function.slot_table().find(SlotId{static_cast<std::uint32_t>(i)});
         eligible[i] = !info.has_global_decl && !info.has_persistent_decl &&
                       !info.shared_by_nested && !info.shared_target;
-        // 编译器内部迭代槽位不属于动态工作区，暂保留实际存储。
-        if (info.name.rfind("for.index.", 0) == 0)
-            eligible[i] = false;
     }
     for (const auto slot : function.parameter_slots())
         used[slot.index] = true;
@@ -191,14 +129,16 @@ PreservedAnalyses Mem2RegPass::run(FunctionUnit& function, FunctionAnalysisManag
                             .find(static_cast<const StoreSlotInst&>(instruction).value())
                             .form() != Value::Form::Single)
                     eligible[slot.index] = false;
-            } else if (type == Instruction::Type::Copy) {
-                const auto assigned = source->values()
-                                          .find(static_cast<const CopyInst&>(instruction).result)
-                                          .assigned_slot();
-                if (assigned)
-                    eligible[assigned->index] = false;
+            } else if (type == Instruction::Type::Record) {
+                // 已有绑定记录的槽位不再按普通 Non-SSA 存储提升。
+                eligible[static_cast<const RecordInst&>(instruction).slot.index] = false;
             } else if (instruction.effect() == Effect::MayWriteSlot) {
-                // 紧邻的后继屏障是显式保护约定，不按函数名猜测内置语义。
+                // 常规重载按不修改当前工作区的假设执行；实际修改交由运行时回退。
+                if (type == Instruction::Type::ParenReference ||
+                    (type == Instruction::Type::Intrinsic &&
+                     static_cast<const IntrinsicInst&>(instruction).id == IntrinsicId::ForeachInit))
+                    continue;
+                // 显式工作区操作仍按后继屏障保护，不按函数名猜测内置语义。
                 if (i + 1 == instructions.size() ||
                     instructions[i + 1]->type() != Instruction::Type::WorkspaceBarrier)
                     return PreservedAnalyses::all();
@@ -215,19 +155,16 @@ PreservedAnalyses Mem2RegPass::run(FunctionUnit& function, FunctionAnalysisManag
     std::vector<ValueId> arguments;
     auto& entry_block = *version->blocks()[entry];
     for (std::size_t i = 0; i < function.parameter_slots().size(); ++i) {
-        const auto slot = function.parameter_slots()[i];
-        auto& parameter = entry_block.insert_instruction<ParameterInst>(i, ValueId{0}, i, slot);
-        parameter.result = version->add_value(parameter);
-        arguments.push_back(parameter.result);
-        if (eligible[slot.index])
-            version->values().find(parameter.result).set_assigned_slot(slot);
+        arguments.push_back(version->add_parameter(static_cast<std::uint32_t>(i)));
     }
     // 不能提升的参数仍建立真实存储，后续声明按原顺序改变绑定。
-    std::size_t parameter_store = arguments.size();
+    std::size_t parameter_store = 0;
     for (std::size_t i = 0; i < arguments.size(); ++i) {
         const auto slot = function.parameter_slots()[i];
         if (!eligible[slot.index])
             entry_block.insert_instruction<StoreSlotInst>(parameter_store++, slot, arguments[i]);
+        else if (!function.slot_table().find(slot).is_internal)
+            entry_block.insert_instruction<RecordInst>(parameter_store++, slot, arguments[i]);
     }
     // 在每个返回位置建立结果读取，随后与普通 load 一同重命名。
     for (const auto& block : version->blocks()) {
@@ -242,18 +179,6 @@ PreservedAnalyses Mem2RegPass::run(FunctionUnit& function, FunctionAnalysisManag
                 results.push_back(load.result);
             }
             ret.set_values(results);
-        }
-    }
-    // 为赋值预留稳定结果；先消除读取，最后才用 copy 替换原 store。
-    std::unordered_map<const Instruction*, ValueId> assignments;
-    for (const auto& block : version->blocks()) {
-        for (const auto& instruction : block->instructions()) {
-            if (instruction->type() != Instruction::Type::StoreSlot ||
-                !eligible[static_cast<const StoreSlotInst&>(*instruction).slot.index])
-                continue;
-            const ValueId result{static_cast<std::uint32_t>(version->values().size())};
-            (void)version->values().reserve(result);
-            assignments.emplace(instruction.get(), result);
         }
     }
     // 固定原指令序列，查询期间插入的 PHI 和辅助读取不改变查找边界。
@@ -271,17 +196,19 @@ PreservedAnalyses Mem2RegPass::run(FunctionUnit& function, FunctionAnalysisManag
         bool workspace = false;
     };
     std::function<std::optional<ValueId>(std::size_t, SlotId)> read_entry, read_exit;
-    const auto find_definition = [&originals, &assignments, &read_entry](
+    const auto find_definition = [&originals, &read_entry, &function](
                                      std::size_t b, SlotId slot, std::size_t before) -> Definition {
         while (before) {
             const auto* instruction = originals[b][--before];
             if (instruction->type() == Instruction::Type::StoreSlot &&
                 static_cast<const StoreSlotInst&>(*instruction).slot == slot)
-                return {assignments.at(instruction), false};
+                return {static_cast<const StoreSlotInst&>(*instruction).value(), false};
             if (instruction->type() == Instruction::Type::LoadSlot &&
                 static_cast<const LoadSlotInst&>(*instruction).slot == slot)
                 return {static_cast<const LoadSlotInst&>(*instruction).result, false};
-            if (instruction->type() == Instruction::Type::WorkspaceBarrier)
+            // 工作区操作无法访问内部临时槽位，其定义可以跨过屏障。
+            if (instruction->type() == Instruction::Type::WorkspaceBarrier &&
+                !function.slot_table().find(slot).is_internal)
                 return {std::nullopt, true};
         }
         return {read_entry(b, slot), false};
@@ -295,6 +222,11 @@ PreservedAnalyses Mem2RegPass::run(FunctionUnit& function, FunctionAnalysisManag
             return initial[slot.index];
         auto& phi = version->blocks()[b]->insert_instruction<PhiInst>(0, ValueId{0});
         phi.result = version->add_value(phi);
+        // 提升固定类型的内部槽位时，入口 PHI 继承相同的类型与形状。
+        const auto& info = version->blocks()[b]->parent()->slot_table().find(slot);
+        auto& value = version->values().find(phi.result);
+        value.set_type(info.type);
+        value.set_shape(info.shape);
         // 先登记占位再查询前驱，单前驱循环同样不会无限递归。
         incoming[b].emplace(slot.index, phi.result);
         for (const auto predecessor : cfg.predecessors(b))
@@ -349,13 +281,13 @@ PreservedAnalyses Mem2RegPass::run(FunctionUnit& function, FunctionAnalysisManag
         auto& block = *version->blocks()[b];
         for (std::size_t i = 0; i < block.instructions().size(); ++i) {
             auto* instruction = block.instructions()[i].get();
-            const auto assignment = assignments.find(instruction);
-            if (assignment == assignments.end())
+            if (instruction->type() != Instruction::Type::StoreSlot)
                 continue;
             const auto& store = static_cast<const StoreSlotInst&>(*instruction);
-            auto& copy = block.insert_instruction<CopyInst>(i++, assignment->second, store.value());
-            version->values().define(copy.result, copy);
-            version->values().find(copy.result).set_assigned_slot(store.slot);
+            if (!eligible[store.slot.index])
+                continue;
+            if (!function.slot_table().find(store.slot).is_internal)
+                block.insert_instruction<RecordInst>(i++, store.slot, store.value());
             removed.insert(instruction);
         }
     }
@@ -365,8 +297,7 @@ PreservedAnalyses Mem2RegPass::run(FunctionUnit& function, FunctionAnalysisManag
                 block->erase_instruction(i);
 
     simplify_phis(*version);
-    remove_defined_loads(*version);
-    fold_assignment_copies(*version);
+    remove_forwarded_loads(*version);
     simplify_phis(*version);
     version->compact_values();
     function.set_stage_version(IRStage::SSA, std::move(version));

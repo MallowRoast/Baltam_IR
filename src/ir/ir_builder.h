@@ -86,9 +86,9 @@ private:
 
     [[nodiscard]] BasicBlock& add_block();
     [[nodiscard]] SlotId slot(const std::string& name);
-    [[nodiscard]] ValueId lower_value(const ast& node, BasicBlock& block);
-    [[nodiscard]] std::vector<ValueId> lower_indices(const ast& node, BasicBlock& block);
-    [[nodiscard]] Operand lower_member(const ast& node, BasicBlock& block);
+    [[nodiscard]] ValueId lower_value(const ast& node);
+    [[nodiscard]] std::vector<ValueId> lower_indices(const ast& node);
+    [[nodiscard]] Operand lower_member(const ast& node);
     [[nodiscard]] BasicBlock* lower_statement(const ast& node, BasicBlock* current);
     [[nodiscard]] BasicBlock* lower_if(const ast& node, BasicBlock& current);
     [[nodiscard]] BasicBlock* lower_switch(const ast& node, BasicBlock& current);

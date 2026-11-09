@@ -32,6 +32,9 @@ struct SharedSlotRef {
 
 struct SlotInfo {
     InternedString name;
+    bool is_internal = false; // 编译器临时存储，不属于用户工作区。
+    std::optional<ba_type> type;
+    std::optional<std::vector<std::optional<std::size_t>>> shape;
     // 声明标记不代表当前执行已经建立对应绑定。
     bool has_global_decl = false;
     bool has_persistent_decl = false;
@@ -42,7 +45,7 @@ struct SlotInfo {
 // 槽位编号只在所属代码单元内有效，表项不重复保存编号。
 class SlotTable final {
 public:
-    [[nodiscard]] SlotId add_slot(InternedString name);
+    [[nodiscard]] SlotId add_slot(InternedString name, bool is_internal = false);
     [[nodiscard]] const SlotInfo& find(SlotId id) const;
     [[nodiscard]] SlotInfo& find(SlotId id);
     [[nodiscard]] std::size_t size() const noexcept { return slots_.size(); }
@@ -63,6 +66,8 @@ public:
     [[nodiscard]] Value& reserve(ValueId id);
     [[nodiscard]] const Value& find(ValueId id) const;
     [[nodiscard]] Value& find(ValueId id);
+    void define_parameter(ValueId id, std::uint32_t index);
+
     void define(ValueId id, Instruction& definition, std::uint32_t result_index = 0,
                 Value::Form form = Value::Form::Single, bool constant = false);
     // 包含构建中的预留记录和删除后留下的空位。
@@ -144,6 +149,11 @@ public:
 
     [[nodiscard]] ValueId add_value(Instruction& definition, std::uint32_t result_index = 0,
                                     Value::Form form = Value::Form::Single, bool constant = false);
+
+    [[nodiscard]] ValueId add_parameter(std::uint32_t index);
+
+    [[nodiscard]] std::vector<ValueId> parameters() const;
+
     [[nodiscard]] std::shared_ptr<IRStageVersion> clone(IRUnit& owner) const;
 
     // 仅用于与基线结构和编号相同的初始克隆；变换后调用 compact_values 归一来源。

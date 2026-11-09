@@ -4,15 +4,15 @@
 
 下文 C++ 字段示意按对齐要求从高到低分组：通常先放指针、字符串、容器和 `std::size_t`，再放 ID 和可选 ID，最后放单字节枚举、布尔值。同一对齐级别仍按语义顺序排列。具体对齐和大小还受类型定义、基类及目标 ABI 影响，实施时应以 `alignof`、`sizeof` 验证，不依赖字段顺序表达语义。
 
+节点语义和构造接口以 `/home/zj/Desktop/baltam_ir` 为参考；本项目继续使用 `Instruction : User`，所有值输入只保存在 Use 中，不额外复制参考库的公开 ValueId 操作数字段。下文示意字段描述语义内容，实际通过访问器和 setter 维护使用链。
+
+本项目使用签名参数 Value、workspace_barrier、带来源 load、SSA 寄存器参数与返回值，以及跨阶段回退映射。相关约定见 [SSA 化与回退机制](SSA化与回退机制.md)和 [mem2reg 设计](mem2reg设计.md)。
+
 ## 基本表达式
 
 ### 常量（数值与字符串字面量）
 
-#### 简述
-
 常量是运行之前已经确定值的量，不限于源码中的字面量。数值字面量、字符向量字面量（如 `'aaa'`）和字符串标量字面量（如 `"aaa"`）属于第一批；后续还可以包括已确定值的矩阵、cell、struct 等。
-
-常量的数据类型和维度是其语义的一部分。这些信息隐式包含在 `value` 指向的 `ba_obj` 中，无需在 `ConstInst` 上重复保存。
 
 #### non-SSA IR
 
@@ -23,15 +23,7 @@ const_ba_obj_ptr value; // std::shared_ptr<const ba_obj>
 ValueId result;
 ```
 
-`result` 是该指令产生的值；`value` 指向运行前已确定的常量对象。字面量先经 `ConstInst` 产生 `ValueId`，再作为其他指令的操作数使用。
-
-#### SSA IR
-
-继续使用同一个 `ConstInst` 表示常量。常量在 non-SSA 和 SSA 阶段的结构与语义基本一致，不为 SSA 另设常量指令。
-
-#### runtime 结构
-
-`value` 持有不可修改的 `ba_obj`，其中包含常量的值、数据类型和维度。多个 `ConstInst` 或多次执行可以共享常量对象。
+`result` 作为后续指令的输入编号；`value` 共享持有只读 `ba_obj`，对象包含常量的类型、形状及内容，无需在指令上重复保存。
 
 #### 注意事项
 
@@ -39,9 +31,7 @@ ValueId result;
 
 ### 水平并置与竖直并置
 
-#### 简述
-
-`[a, b]` 表示水平并置，`[a; b]` 表示竖直并置；`[a b; c d]` 可以先逐行水平并置，再对各行进行竖直并置。运行时可能存在用户自定义的 `horzcat` 或 `vertcat`，因此即使输入在生成 IR 时都是常量，也不能随意把整个并置表达式折叠为常量。语法上没有输入的 `[]` 和仅含一个普通单值表达式的 `[x]` 可以静态确定其处理方式：前者直接生成空数组常量，后者求值 `x` 后直接使用其结果；二者都不调用并置函数。需要执行并置的表达式使用 `ConcatInst`。
+`[a, b]` 表示水平并置，`[a; b]` 表示竖直并置；二维形式可以按行列组合。执行并置使用 `ConcatInst`；空数组与普通单值形式在 lowering 中单独处理。
 
 本机 MATLAB R2022b CLI 实测：在调用函数所在目录的 `private` 文件夹中定义 `horzcat.m`、`vertcat.m` 后，连纯字面量 `[1, 2]`、`[1; 2]` 也分别调用对应的私有函数；私有函数还优先于路径同名函数及输入对象的同名类方法。相同条件下，空 `[]` 不调用这两个函数。仅在普通路径上放同名函数时，纯字面量并置未调用它们，但 `[a, b]`、`[a; b]`（`a`、`b` 为变量）会调用。私有函数相对于对象方法和路径函数的优先级也符合 [MathWorks 的函数优先级说明](https://www.mathworks.com/help/matlab/matlab_prog/function-precedence-order.html)。
 
@@ -53,16 +43,11 @@ ValueId result;
 std::vector<ValueId> items;
 ValueId result;
 Axis axis;                 // 类内枚举：Horizontal、Vertical
-bool is_dynamic;
 ```
 
 `items` 按源码顺序保存输入表达式的值；`axis` 区分水平与竖直并置。lowering 时须先识别两个特殊语法形式：空方括号 `[]`（包括仅含空白的 `[ ]`）直接生成持有空数组的 `ConstInst`；仅含一个普通单值表达式的 `[x]` 先求值 `x`，再沿用其 `ValueId`，例如 `[[]]` 得到空数组常量。两者都不生成 `ConcatInst`。`[x]` 的**处理方式**可静态确定，并不表示 `x` 的值在编译期已知，也不能省略对 `x` 的求值。
 
-其他需要并置的形式才生成 `ConcatInst`，其 `items` 必须非空。输入表达式的值即使是空数组，也仍占一个 `items` 位置：本机实测 `[[], []]` 会调用私有 `horzcat`，不能因为两个输入值都为空就删掉输入项。单个语法表达式还可能展开为多个输入，例如本机实测 `[cells{:}]` 会调用私有 `horzcat`；这类逗号分隔列表不能套用普通单值 `[x]` 的透传规则。`is_dynamic` 记录 `items` 中是否存在非常量值：只要有一个输入不是常量，就为 `true`。它用于快速判断是否具备常量折叠的输入条件，不表示运行时函数分派已经确定。
-
-#### SSA IR
-
-与 non-SSA IR 使用相同的 `ConcatInst` 结构和语义。
+其他需要并置的形式才生成 `ConcatInst`，其 `items` 必须非空。输入表达式的值即使是空数组，也仍占一个 `items` 位置：本机实测 `[[], []]` 会调用私有 `horzcat`，不能因为两个输入值都为空就删掉输入项。单个语法表达式还可能展开为多个输入，例如本机实测 `[cells{:}]` 会调用私有 `horzcat`；这类逗号分隔列表不能套用普通单值 `[x]` 的透传规则。是否全部为常量由输入值的定义判断，不另设标记。
 
 #### runtime 结构
 
@@ -70,11 +55,9 @@ bool is_dynamic;
 
 #### 注意事项
 
-只有在 `items` 全部为常量（`is_dynamic == false`），且已确认调用处没有会影响此次分派的私有函数、对象方法或其他用户自定义 `horzcat`／`vertcat` 时，才可以进行常量折叠。`is_dynamic == false` 单独不足以保证折叠安全；尤其不能因为所有输入都是字面量，就忽略调用文件旁的 `private` 文件夹。
+只有在 `items` 全部为常量，且已确认调用处没有会影响此次分派的私有函数、对象方法或其他用户自定义 `horzcat`／`vertcat` 时，才可以进行常量折叠。输入全部为常量单独不足以保证折叠安全；尤其不能因为所有输入都是字面量，就忽略调用文件旁的 `private` 文件夹。
 
 ### 元胞数组构造
-
-#### 简述
 
 `{1 2}` 构造 1×2 元胞数组，`{a, b; c, d}` 构造 2×2 元胞数组。每个输入值分别放入对应元胞，不进行方括号的水平或竖直并置。空 `{}` 可直接表示为持有空元胞数组的 `ConstInst`。
 
@@ -89,11 +72,7 @@ std::size_t cols;
 ValueId result;
 ```
 
-lowering 时须先识别空 `{}`，直接生成持有 0×0 元胞数组的 `ConstInst`，不创建 `CellConstructInst`。非空形式的 `rows`、`cols` 由语法结构确定，`items` 保存各位置的输入值；元素数量与 `rows * cols` 一致时，行列数自然都大于零，无须单独处理零行或零列。该节点没有 `is_dynamic` 字段；是否全部为常量可直接检查 `items` 的定义。
-
-#### SSA IR
-
-与 non-SSA IR 使用相同的 `CellConstructInst` 结构和语义。
+非空形式的 `rows`、`cols` 由语法结构确定，`items` 保存各位置的输入值；元素数量与 `rows * cols` 一致时，行列数自然都大于零，无须单独处理零行或零列。是否全部为常量可直接检查 `items` 的定义。
 
 #### runtime 结构
 
@@ -105,27 +84,20 @@ lowering 时须先识别空 `{}`，直接生成持有 0×0 元胞数组的 `Cons
 
 ### 冒号表达式
 
-#### 简述
-
 `start:stop` 和 `start:step:stop` 生成序列。两参数形式与显式写出 `step` 的三参数形式应保留区别。冒号语法可能受用户自定义 `colon` 的分派影响，因此生成 IR 时保留 `ColonInst`，不直接改写为普通函数调用或常量。
 
-本节只讨论生成序列的冒号表达式；索引中单独的 `:` 由下文的 `MagicColonInst` 表示。
+本节只讨论生成序列的冒号表达式；索引中单独的 `:` 由下文的特殊常量 `const ":"` 表示。
 
 #### non-SSA IR
 
-`ColonInst` 有五个主要字段：
+`ColonInst` 保存结果、起点、可选步长和终点：
 
 ```cpp
 ValueId result;
 ValueId start;
 std::optional<ValueId> step; // 未提供时为空；与显式写出 1 区分
 ValueId stop;
-bool needs_runtime_dispatch; // 初始为 true；分派目标确定后可设为 false
 ```
-
-#### SSA IR
-
-与 non-SSA IR 使用相同的 `ColonInst` 结构和语义。
 
 #### runtime 结构
 
@@ -138,35 +110,27 @@ bool needs_runtime_dispatch; // 初始为 true；分派目标确定后可设为 
 
 ### 索引中的单独冒号
 
-#### 简述
-
 `A(:, 2)`、`A(:)` 中单独的 `:` 是索引占位，表示该索引位置的全部元素；它不同于生成序列的 `start:stop`，不调用 `colon`。
 
 #### non-SSA IR
 
-使用 `MagicColonInst`，仅有一个主要字段：
+使用 `ConstInst` 保存特殊冒号标记，文本约定为：
 
-```cpp
-ValueId result;
+```text
+%colon = const ":"
 ```
 
-`result` 表示供索引指令使用的冒号占位值。例如 `A(:, 2)` 的第一个索引参数引用该 `ValueId`。
-
-#### SSA IR
-
-与 non-SSA IR 使用相同的 `MagicColonInst` 结构和语义。
+索引指令引用该结果编号。不同出现位置可以共享同一个只读标记对象，但不约定固定的特殊 `ValueId`。
 
 #### runtime 结构
 
-执行索引操作时，runtime 根据被索引对象和 `MagicColonInst` 结果所在的索引位置，解释“取该位置的全部元素”。占位值本身不独立生成序列。
+冒号标记与普通字符串 `":"` 的类型不同，实际对象由后续运行时实现提供。执行索引时，根据被索引对象和该常量所在的索引位置解释“取该位置的全部元素”；标记本身不生成序列。
 
 #### 注意事项
 
-`MagicColonInst` 的结果只能在允许单独冒号的索引上下文使用；它不参与普通 `colon` 函数分派，也不作为普通常量折叠。
+该标记只用于索引上下文；文本读写须保留它与普通字符串常量的类型区别。
 
 ### 索引中的 `end`
-
-#### 简述
 
 `A(end)`、`A(1, end)`、`C{end}` 中的 `end` 由所在索引操作解释，不能当作普通名字、常量或普通函数调用。其结果取决于被索引对象、当前索引维度，以及该次索引的参数总数。
 
@@ -195,10 +159,6 @@ ValueId result;
 
 | `ValueId` | 已加载或计算出的索引对象值。它已绑定到具体数据流，只需判断该值是否支持索引 `end` 语义；不支持时按该候选报错。 |
 
-#### SSA IR
-
-与 non-SSA IR 使用相同的 `MagicEndInst` 结构和语义，继续保留候选上下文链。
-
 #### runtime 结构
 
 按内层到外层检查候选，选择实际的索引上下文。若所有可跳过的未解析名字候选都不是索引，且没有合法的外层候选，则报缺少索引上下文的错误。普通数组按索引规则计算 `end`；类对象由其索引协议处理 `end(obj, dim, nindices)`。后续可直接解释 `MagicEndInst`，也可在选定合法索引对象后降为类似 `internal.end_index(base, dim, nindices)` 的内部操作；基础 lowering 不提前执行这一步。
@@ -210,7 +170,7 @@ ValueId result;
 
 ## 函数句柄
 
-当前源码尚未实现具名／匿名函数句柄构造指令及匿名函数体；本节保留目标设计。下文沿用旧设计中的 `CodeUnit` 概念；当前代码对应 `IRUnit`。`LoadSlotInst` 已可表示捕获来源的读取，slot 表也已实现；自由变量分析和 closure 运行时对象尚未实现，相关 lowering 与执行描述仍是目标行为。
+当前源码尚未实现具名／匿名函数句柄构造指令及匿名函数体；本节保留其目标设计。下文以代码单元描述函数体（旧示意名为 `CodeUnit`，当前基类为 `IRUnit`）；基础代码单元与槽位表已有实现，`AnonymousFunctionUnit` 及捕获槽位类别仍是目标设计。自由变量分析及 closure 运行时尚未接入。
 
 ### 具名函数句柄 `@name`
 
@@ -224,13 +184,11 @@ ValueId result;
 
 ```cpp
 InternedString name;
-FunctionUnit* m_function_target;   // Static + MFunction 时记录已确定的函数
+FunctionUnit* m_function_target;   // 同模块内已确定的 M 函数目标
 ValueId result;
-ResolutionMode resolution_mode; // Runtime 或 Static
-DispatchType bound_dispatch_type; // Runtime 时为 Dynamic；Static 时为 Builtin 或 MFunction
 ```
 
-基础 lowering 生成 `Runtime` 模式，只记录源码名字，`bound_dispatch_type` 为 `Dynamic`，`m_function_target` 为空；不因名字与内置函数或同文件函数同名就直接静态绑定。名字解析 pass 若能证明目标确定，可改为 `Static` 模式：内置函数使用 `Builtin` 且 `m_function_target` 为空，同文件内已确定的 M 函数使用 `MFunction` 和 `m_function_target`。`Static` 不能同时保留动态分派状态。
+基础 lowering 只记录源码名字，`m_function_target` 为空；不因名字与内置函数或同文件函数同名就静态绑定。名字解析若能证明同模块 M 函数目标确定，可以填写该目标；其余目标由执行层解析。指令不保存动态分派标记或分派类型字段。
 
 例如 `f = @sin; y = f(x);` 中，构造句柄先产生一个 `ValueId` 并存入 `f` 的 slot；调用时加载 `f`，再经 `ValueApplyInst` 按运行时值分派。构造句柄本身不是 `CallInst`。
 
@@ -238,11 +196,11 @@ DispatchType bound_dispatch_type; // Runtime 时为 Dynamic；Static 时为 Buil
 
 继续使用同一个 `CreateNamedFunctionHandleInst`；其结果是单次定义的 SSA 值。存入变量 `f` 后，普通变量 slot 可按 SSA 规则提升；若 `phi` 的各输入都是句柄值，汇合结果也仍是函数句柄值，不需要重新执行 `@name` 的解析。
 
-`Runtime` 模式的构造会观察函数查找环境，不能仅因 `name` 相同就跨可能改变路径或解析结果的操作合并、提前执行。`@inner` 即使静态确定了函数目标，每次执行构造指令时也必须取得当前这次父函数调用的共享工作区；不能把不同调用创建的句柄合并。父函数和嵌套函数都可能修改共享变量，相关访问不能仅按父函数的普通局部 slot 做 SSA 提升。
+未确定目标的句柄构造会观察函数查找环境，不能仅因 `name` 相同就跨可能改变路径或解析结果的操作合并、提前执行。`@inner` 即使静态确定了函数目标，每次执行构造指令时也必须取得当前这次父函数调用的共享工作区；不能把不同调用创建的句柄合并。父函数和嵌套函数都可能修改共享变量，相关访问不能仅按父函数的普通局部 slot 做 SSA 提升。
 
 #### runtime 结构
 
-执行 `Runtime` 模式时，在构造点按当前函数搜索环境查询一次：找到目标就构造已绑定句柄；未找到则构造保留名字及必要解析上下文的未解析句柄，后续每次调用该句柄时再查询。`Static` 模式直接依据已确定的目标构造已绑定句柄，不再按名字查询。句柄调用走值调用分派，并传递调用点的实参与请求输出数。
+执行时，若没有已确定的目标，在构造点按当前函数搜索环境查询一次：找到目标就构造已绑定句柄；未找到则构造保留名字及必要解析上下文的未解析句柄，后续每次调用该句柄时再查询。已确定的同模块目标直接用于构造句柄。句柄调用走值调用分派，并传递调用点的实参与请求输出数。
 
 若 `@inner` 指向嵌套函数，运行时句柄除函数目标外，还要持有**当前这次父函数调用的工作区对象的一份共享引用**。父函数的执行 frame 和由它创建的嵌套函数句柄访问同一个工作区对象及其中的变量绑定；构造多个句柄只复制共享引用，不复制工作区或变量值。父函数返回后，句柄继续持有该工作区，调用 `inner` 仍可读写其中的变量；最后一个持有者释放后，工作区才能销毁。父函数每次调用创建各自的工作区，不跨调用共享。若存在多层嵌套，句柄还须保住所需的外层工作区链。
 
@@ -250,7 +208,7 @@ DispatchType bound_dispatch_type; // Runtime 时为 Dynamic；Static 时为 Buil
 
 #### 注意事项
 
-1. 静态绑定必须证明局部函数、导入、路径、遮蔽及代码版本等规则下的目标稳定；否则保留 `Runtime` 模式。已绑定句柄持有的代码目标和嵌套环境必须在句柄存活期间有效。
+1. 静态绑定必须证明局部函数、导入、路径、遮蔽及代码版本等规则下的目标稳定；否则由执行层按名字解析。已绑定句柄持有的代码目标和嵌套环境必须在句柄存活期间有效。
 2. `@name` 与 `@(args) expr` 分别使用具名和匿名函数句柄构造指令；后者拥有匿名函数体和按值捕获信息，不能复用此节点。
 3. 父工作区必须是独立于执行 frame 的共享对象，不能靠延长整个 frame 的生命周期实现。目标设计中的 `CreateNamedFunctionHandleInst` 使用上述字段；嵌套函数句柄持有父工作区共享引用、共享变量的存储映射，以及未解析句柄的解析上下文仍需要在 runtime 对象模型中落实。
 
@@ -314,7 +272,7 @@ z = f(2);  % z 为 3
 
 ## 索引与成员访问
 
-本节记录 IR 的语义划分。圆括号和点号表达式可能先经过名字解析，再根据 base 值选择调用或索引；已确定索引类别，也不等于已确定内置实现或对象重载实现。下文列出的指令结构均已加入当前源码；名字消歧、运行时分派和复合索引执行仍待实现。
+本节记录 IR 的语义划分。圆括号和点号表达式可能先经过名字解析，再根据 base 值选择调用或索引；已确定索引类别，也不等于已确定内置实现或对象重载实现。下文的基础指令已定义；多结果扩展、名字消歧、运行时分派和复合索引执行仍待实现。
 
 ### 圆括号取值与调用消歧
 
@@ -341,7 +299,6 @@ struct CallInst {
     InternedString callee;
     std::vector<ValueId> arguments;
     FunctionUnit* m_function_target; // 仅同模块、词法绑定的 M 函数目标
-    DispatchType dispatch_type;
 };
 ```
 
@@ -355,15 +312,15 @@ struct ParenReferenceInst {
 };
 ```
 
-`ApplyInst`、`ValueApplyInst` 和 `CallInst` 的 `arguments` 在生成指令前已经分别求值，按源码顺序保存 `ValueId`；可能展开成逗号分隔列表的实参由对应 `Value::form()` 标记。`ApplyInst.callee_or_base` 只保留未消歧名字或已求值的值；已确定为变量时先用 `LoadSlotInst` 得到 `ValueId`；`CallInst.callee` 只保存已确定按名字调用的函数名。`Operand` 中的空名字不在指令构造时统一检查，名称有效性由前面的语法与构建流程负责。`results` 保留请求的输出位次；普通内置圆括号取值通常产生一个值，对象索引协议可能需要多个输出。`ParenReferenceInst` 已确定“圆括号取值”这一类别；内置索引还是对象索引协议由执行时的 base 决定，不在节点中保存 `DispatchType`。`ApplyInst` 确定为索引后，沿用已求值的实参作为 `indices`；确定为按名字调用后，沿用实参生成 `CallInst`；若先得到函数句柄等运行时值，则由 `ValueApplyInst` 分派调用或索引。值包的实际展开规则仍需后续执行设计。
+`ApplyInst`、`ValueApplyInst` 和 `CallInst` 的 `arguments` 在生成指令前已经分别求值，按源码顺序保存 `ValueId`；可能展开成逗号分隔列表的实参由后续值元数据机制标记。`ApplyInst.callee_or_base` 只保留未消歧名字或已求值的值；已确定为变量时先用 `LoadSlotInst` 得到 `ValueId`；`CallInst.callee` 只保存已确定按名字调用的函数名。`Operand` 中的空名字不在指令构造时统一检查，名称有效性由前面的语法与构建流程负责。`results` 保留请求的输出位次；普通内置圆括号取值通常产生一个值，对象索引协议可能需要多个输出。`ParenReferenceInst` 已确定“圆括号取值”这一类别；内置索引还是对象索引协议由执行时的 base 决定，不在节点中保存分派类别。`ApplyInst` 确定为索引后，沿用已求值的实参作为 `indices`；确定为按名字调用后，沿用实参生成 `CallInst`；若先得到函数句柄等运行时值，则由 `ValueApplyInst` 分派调用或索引。值包的实际展开规则仍需后续执行设计。
 
-当前单结果 lowering 中，`b = A()` 若 `A` 尚无变量 slot，则生成保存名字 `A` 的 `ApplyInst`，保留调用与索引歧义；`b = x(1)` 在 `x` 已绑定时先读取其 slot，再求值下标并生成 `ParenReferenceInst`。当前 `ParenReferenceInst` 只保存一个结果，上方多结果形式是后续扩展草案。
+目标单结果 lowering 中，`b = A()` 若 `A` 尚无变量 slot，则生成保存名字 `A` 的 `ApplyInst`，保留调用与索引歧义；`b = x(1)` 在 `x` 已绑定时先读取其 slot，再求值下标并生成 `ParenReferenceInst`。当前 `ParenReferenceInst` 只保存一个结果，上方多结果形式是后续扩展草案。
 
 独立语句 `fun(x)` 在 `fun` 没有已绑定变量 slot 时按函数调用生成无结果的 `CallInst`，保留动态名字解析；已绑定变量名的圆括号语句通过 `ValueApplyInst` 保留按值调用或索引的可能。调用实参按源码顺序求值，未使用调用结果不分配 `ValueId`，调用本身仍保留以执行其副作用。
 
-`CallInst` 不保存运行时调用点缓存。`DispatchType::MFunction` 和 `m_function_target` 仅用于同一 `IRModule` 内词法绑定固定的目标；外部 M 函数可能因源码或函数查找环境变化而失效，保持 `Dynamic`，由运行时解析。内置函数只有在注册和地址于进程内保持稳定时才能静态确定；可替换的插件函数暂保持动态分派。`DispatchType` 不为局部函数和嵌套函数各设一种类别：二者都是 M 函数，嵌套函数调用额外需要父函数的共享工作区。当前 `FunctionUnit` 通过所有权树区分顶层函数与嵌套函数，但没有反向词法父函数字段；运行时绑定嵌套函数工作区所需的关系仍待落实。若以后要静态绑定外部 M 函数或插件，须在 IR 之外设计带版本验证和目标生命周期管理的解析结果，单靠类别枚举和函数名不足以直接调用。
+`CallInst` 不保存运行时调用点缓存或分派类别。`m_function_target` 仅引用同模块内词法绑定固定的函数；外部 M 函数、内置函数及插件由执行层解析。嵌套函数调用还需要当前父函数的共享工作区。后续若固定外部目标，须设计版本验证和目标生命周期管理，不能仅靠函数名直接调用。
 
-目标设计让 `A(end)` 等表达式在消歧前使用 `MagicEndInst` 保留候选索引上下文；选择真正的索引层后，才能确定 `end` 的值。单独的 `:` 由 `MagicColonInst` 表示，不预先生成序列。当前 builder 尚未生成这两类指令。
+目标设计让 `A(end)` 等表达式在消歧前使用 `MagicEndInst` 保留候选索引上下文；选择真正的索引层后，才能确定 `end` 的值。单独的 `:` 由特殊常量 `const ":"` 表示，不预先生成序列。两类值的生成留给后续 builder。
 
 ### 花括号取值
 
@@ -444,7 +401,7 @@ struct DotAssignInst {             // A.b = v
 
 当前单层 `C{2} = 2` lowering 读取 `C` 的旧值，求值索引和右值，生成 `BraceAssignInst` 的新 base 结果，再将结果写回 `C` 的同一个 slot。当前指令只接收一个右值；复合索引链和多内容赋值仍需扩展 lowering。
 
-已确定的圆括号、花括号索引节点都保存按源码顺序求值后的 `ValueId`；目标设计也允许引用 `MagicColonInst` 和 `MagicEndInst` 的结果，但当前 builder 尚未生成这两类值。未消歧的名字只保留在 `ApplyInst` 等节点中。索引和静态成员取值／赋值节点只确定语法操作，不保存 `DispatchType`；执行时仍需按 base 的实际类型选择内置行为或对象协议。若后续优化要固定重载目标，应另设计带依赖验证的特化表示，不能仅增加一个分派类别枚举。
+已确定的圆括号、花括号索引节点都保存按源码顺序求值后的 `ValueId`；目标设计也允许引用冒号特殊常量和 `MagicEndInst` 的结果，其生成留给后续 builder。未消歧的名字只保留在 `ApplyInst` 等节点中。索引和静态成员取值／赋值节点只确定语法操作，不保存分派类别；执行时仍需按 base 的实际类型选择内置行为或对象协议。若后续优化要固定重载目标，应另设计带依赖验证的特化表示，不能仅增加一个分派类别枚举。
 
 ### 注意事项
 
@@ -473,30 +430,23 @@ PendingIndex {
 
 ### 一元运算
 
-#### 简述
-
 一元正号 `+x`、一元负号 `-x`、逻辑非 `~x`、非共轭转置 `A.'` 和共轭转置 `A'` 共用 `UnaryInst`，由运算种类保留各自的源码语义。基础 lowering 不预先将动态运算固定为内置函数，因为对应操作可能分派到用户定义的实现。
 
 #### non-SSA IR
 
-当前实现中，`UnaryInst` 有四个主要字段：
+`UnaryInst` 的主要字段为：
 
 ```cpp
 ValueId result;
 ValueId operand;
 UnaryOp op;                 // Uplus、Uminus、LogicalNot、Transpose、Ctranspose
-bool needs_runtime_dispatch; // 初始为 true
 ```
 
 `Transpose` 对应 `.'`，`Ctranspose` 对应 `'`。操作数表达式先产生 `ValueId`，一元指令再引用它。
 
-#### SSA IR
-
-与 non-SSA IR 使用相同的 `UnaryInst` 结构和语义。
-
 #### runtime 结构
 
-根据 `op` 和分派状态解析对应的一元运算实现，传入一个操作数并取得一个结果。
+根据 `op` 与实际输入解析对应的一元运算实现，传入一个操作数并取得一个结果。
 
 #### 注意事项
 
@@ -505,31 +455,24 @@ bool needs_runtime_dispatch; // 初始为 true
 
 ### 二元运算
 
-#### 简述
-
 算术运算 `+`、`-`、`*`、`/`、`\`、`^`，逐元素运算 `.*`、`./`、`.\`、`.^`，比较运算 `<`、`<=`、`>`、`>=`、`==`、`~=`，以及两侧都求值的逻辑运算 `&`、`|`，均使用 `BinaryInst`。不同运算种类保留矩阵运算、逐元素运算和比较运算的源码语义。基础 lowering 不预先把动态分派固定为内置实现。短路运算 `&&`、`||` 另由控制流表示。
 
 #### non-SSA IR
 
-当前实现中，`BinaryInst` 有五个主要字段：
+`BinaryInst` 的主要字段为：
 
 ```cpp
 ValueId result;
 ValueId lhs;
 ValueId rhs;
 BinaryOp op;                 // Add、Sub、Mul、Rdiv、Ldiv、Pow 等
-bool needs_runtime_dispatch; // 初始为 true
 ```
 
 左右操作数表达式先分别产生 `ValueId`，再供二元指令引用。
 
-#### SSA IR
-
-与 non-SSA IR 使用相同的 `BinaryInst` 结构和语义。
-
 #### runtime 结构
 
-先取得左右操作数，再根据 `op` 和分派状态执行对应的二元运算实现，取得一个结果。
+先取得左右操作数，再根据 `op` 与实际输入执行对应的二元运算实现，取得一个结果。
 
 #### 注意事项
 
@@ -541,11 +484,9 @@ bool needs_runtime_dispatch; // 初始为 true
 
 `global` 和 `persistent` 的声明确定源码名字的存储类别，但声明过不等于之后每个程序点仍保持该绑定。两者都有静态 `SlotId`，底层值却不属于普通的逐次调用局部 slot。当前 IR 已有声明指令，但 `SlotInfo` 只保存名称，没有 `Global`、`Persistent` 类别；`clear` 后的绑定切换及专用存储访问仍属于目标设计。
 
-基础槽位访问已由 `LoadSlotInst`（`result: ValueId`、`slot: SlotId`）和 `StoreSlotInst`（`slot: SlotId`、`value: ValueId`）表示。`StoreSlotInst` 的右值须先求值并取得编号；它本身不产生结果。槽位元数据已由所属 `IRUnit` 的 `SlotTable` 保存，跨代码单元的槽位归属检查、绑定状态和实际存储读写仍需后续构建与运行时支持。
+基础槽位访问已由 `LoadSlotInst`（`result: ValueId`、`slot: SlotId`）和 `StoreSlotInst`（`slot: SlotId`、`value: ValueId`）表示。`StoreSlotInst` 的右值须先求值并取得编号；它本身不产生结果。槽位元数据拟由所属代码单元的槽位表保存，跨代码单元的槽位归属检查、绑定状态和实际存储读写仍需后续构建与运行时支持。
 
 ### `global`
-
-#### 简述
 
 `global x y` 把当前代码单元中的名字接入 session 级全局变量表。声明同名 global 的函数、脚本或命令行上下文应读写同一个值；未声明的同名局部变量不因此变成 global。
 
@@ -557,7 +498,7 @@ bool needs_runtime_dispatch; // 初始为 true
 std::vector<SlotId> slots;
 ```
 
-当前基础 lowering 对后续访问使用 `LoadSlotInst` / `StoreSlotInst`；全局存储绑定及运行时访问仍需实现。当前 `Effect` 仅区分是否可能写入 slot，没有环境 effect；原设计中的 `Env` 属于后续可扩展的类别。同一代码单元内的重复声明当前会复用同名 slot；与不同类别的静态绑定冲突时报告诊断属于后续检查设计。脚本中的声明还须把目标 workspace 的名字绑定到全局值。
+目标基础 lowering 对后续访问使用 `LoadSlotInst` / `StoreSlotInst`；全局存储绑定及运行时访问仍需实现。当前 `Effect` 仅区分是否可能写入 slot，没有环境 effect；原设计中的 `Env` 属于后续可扩展的类别。同一代码单元内的重复声明应复用同名 slot；与不同类别的静态绑定冲突时报告诊断属于后续检查设计。脚本中的声明还须把目标 workspace 的名字绑定到全局值。
 
 #### SSA IR
 
@@ -565,7 +506,7 @@ std::vector<SlotId> slots;
 
 #### runtime 结构
 
-`InterpreterContext::globals.values[name]` 是跨代码单元共享的存储。执行声明时建立当前 workspace 到该值的绑定；读写必须观察全局表中的最新值，而不能依赖逐次调用 frame 中可能过期的值缓存。本仓库当前没有对应的 IR 解释执行实现；全局表、声明执行和跨函数可见性均属于运行时目标设计。
+`InterpreterContext::globals.values[name]` 是跨代码单元共享的存储。执行声明时建立当前 workspace 到该值的绑定；读写必须观察全局表中的最新值，而不能依赖逐次调用 frame 中可能过期的值缓存。
 
 #### 注意事项
 
@@ -573,8 +514,6 @@ std::vector<SlotId> slots;
 2. 声明是静态事实，当前程序点的绑定是动态状态。`clear`、可能改变 workspace 绑定的操作及相关函数调用是优化屏障；证明绑定仍有效后才能使用专用 global load/store。当前 IR 尚未完整表示这些 `clear` 后的绑定状态变化。
 
 ### `persistent`
-
-#### 简述
 
 `persistent p` 声明当前函数私有、跨调用保留的变量。同一函数的递归或重入调用共享该值；其他函数不能仅凭同名声明访问它。脚本本体不创建 persistent slot。
 
@@ -586,7 +525,7 @@ std::vector<SlotId> slots;
 std::vector<SlotId> slots;
 ```
 
-当前基础 lowering 对后续访问使用 `LoadSlotInst` / `StoreSlotInst`；声明类别与绑定状态的检查仍需实现。slot 身份在当前函数内稳定；目标运行时让其值存于函数对应的 `CodeObject::persistent.values[SlotId]`，而非每次调用独有的局部值。当前 `Effect` 仅区分是否可能写入 slot；原设计中的 `Env` 环境 effect 属于后续扩展。
+目标基础 lowering 对后续访问使用 `LoadSlotInst` / `StoreSlotInst`；声明类别与绑定状态的检查仍需实现。slot 身份在当前函数内稳定；目标运行时让其值存于函数对应的 `CodeObject::persistent.values[SlotId]`，而非每次调用独有的局部值。当前 `Effect` 仅区分是否可能写入 slot；原设计中的 `Env` 环境 effect 属于后续扩展。
 
 #### SSA IR
 
@@ -594,7 +533,7 @@ std::vector<SlotId> slots;
 
 #### runtime 结构
 
-函数的 `CodeObject` 持有 persistent 值表，使用该函数的 `SlotId` 定位存储；同一函数的各次调用共享它。执行声明时把当前调用中的名字接入该存储。运行时读写必须观察其他重入调用对该值的更新，不能仅依赖当前 frame 中的旧缓存。本仓库当前没有对应的 IR 解释执行实现；值表、声明执行及重入时的共享存储一致性均属于运行时目标设计。
+函数的 `CodeObject` 持有 persistent 值表，使用该函数的 `SlotId` 定位存储；同一函数的各次调用共享它。执行声明时把当前调用中的名字接入该存储。运行时读写必须观察其他重入调用对该值的更新，不能仅依赖当前 frame 中的旧缓存。
 
 #### 注意事项
 
@@ -610,8 +549,6 @@ verifier 应检查结果、操作数及 slot 有效，且按后续确定的声�
 ## 控制流
 
 ### `if / elseif / else / end`
-
-#### 简述
 
 条件按源码顺序求值；命中一个分支后执行其语句，跳过后续 `elseif` 条件。所有条件均不成立时，执行 `else`（若存在），否则直接继续执行 `end` 后的语句。
 
@@ -679,12 +616,12 @@ struct PhiIncoming {
     ValueId value;
 };
 
-// 构造和 incoming(index) 查询时使用的快照；实际输入由 User 的 Use 保存。
+// 直接保存前驱和该路径上的值编号。
 std::vector<PhiIncoming> incomings;
 ValueId result;
 ```
 
-`result` 是汇合后唯一的新定义。PHI 的前驱列表与 User 的 Use 列表一一对应，为汇合块的每个前驱记录一个输入：`predecessor` 指明控制流从哪个块到达，`value` 是沿该路径有效的定义。只有实际进入汇合块的那条路径对应的值成为 `result`；后续指令统一引用 `result`。
+`result` 是汇合后唯一的新定义。PHI 的 `incomings` 为汇合块的每个前驱记录一个输入：`predecessor` 指明控制流从哪个块到达，`value` 是沿该路径有效的定义。只有实际进入汇合块的那条路径对应的值成为 `result`；后续指令统一引用 `result`。
 
 例如将上面的 `@x` 提升为 SSA 值后，三个分支分别产生 `%one`、`%two`、`%three`，在出口块汇合：
 
@@ -696,10 +633,6 @@ if.end:
 
 没有 `else` 时，若某条路径未给变量赋新值，该路径的输入应是进入 `if` 前已有的定义；若此前也未定义，不能凭空构造 `ValueId`，仍须保留变量未定义时的错误语义。`phi` 的插入与变量重命名等完整 SSA 转换规则待 SSA 设计确定。
 
-#### runtime 结构
-
-运行时只求值实际到达的条件与语句，并根据条件结果执行相应的 `BranchInst` / `GotoInst` 路径。
-
 #### 注意事项
 
 1. `if` 条件的转换规则不同于短路逻辑运算的标量检查。本机 MATLAB R2022b CLI 实测：`if [1 2]` 为真，`if [1 0]` 与 `if []` 为假，所有元素非零的矩阵为真，`if "x"` 报转换错误。因此不能直接使用短路运算中要求逻辑标量的 `intrinsic.logical_scalar` 规则处理 `if` 条件。
@@ -707,13 +640,11 @@ if.end:
 
 ### `while / end`
 
-#### 简述
-
 `while` 在每轮开始时求值条件；条件为真才执行循环体，条件为假则执行 `end` 后的语句。循环体正常执行完毕或遇到 `continue` 时，返回条件处开始下一轮；遇到 `break` 时直接退出最近一层循环。源码中的 `end` 只标记循环体结束，不产生专用指令。
 
 #### non-SSA IR
 
-不设置专用的 `WhileInst`、`BreakInst` 或 `ContinueInst`，而是用 CFG 中的 `BranchInst` 和 `GotoInst` 表示。下文用 `while.header`、`while.body` 和 `while.end` 描述三个块的职责；当前打印标签为 `bbN`。进入循环前的当前块跳到 `while.header`。
+不设置专用的 `WhileInst`、`BreakInst` 或 `ContinueInst`，而是用 CFG 中的 `BranchInst` 和 `GotoInst` 表示。下文用 `while.header`、`while.body` 和 `while.end` 描述三个块的职责。进入循环前的当前块跳到 `while.header`。
 
 `while.header` 每次进入时重新求值条件，产生 `ValueId`，由 `BranchInst` 在 `while.body` 和 `while.end` 之间选择。`while.body` 中的语句使用普通 IR；若执行到循环体末尾且当前块尚未终止，就用 `GotoInst` 返回 `while.header`。`while.end` 是条件为假或执行 `break` 后的继续位置。
 
@@ -757,10 +688,6 @@ while.end:
 
 保留相同的循环 CFG 和 `break / continue` 跳转语义。循环体中更新且在下一轮条件或循环体中使用的变量，需要在 `while.header` 汇合进入循环前的值与回边上的值，通常由 `phi` 节点表示；若 `while.end` 有来自条件假边和 `break` 等多条路径，退出后使用的值也按 SSA 汇合规则处理。具体 SSA 转换规则待 SSA 设计确定。
 
-#### runtime 结构
-
-执行到 `while.header` 时才求值本轮条件，并按条件结果进入循环体或退出。普通回边和 `continue` 都返回 `while.header` 重新求值条件；`break` 直接进入 `while.end`，不再求值条件。只有实际到达的循环体语句会执行。
-
 #### 注意事项
 
 1. `while` 条件应采用与 `if` 相同的 MATLAB 条件真假规则，不能套用短路逻辑运算要求逻辑标量的 `intrinsic.logical_scalar`；当前基础 lowering 直接将条件表达式结果交给 `BranchInst`，条件转换的具体实现需与 `if` 统一。
@@ -770,17 +697,15 @@ while.end:
 
 ### `for / end`
 
-#### 简述
-
 `for x = iterable ... end` 在进入循环时求值一次 `iterable`，建立独立的迭代状态。每轮开始时从该状态取得一个迭代值，写给循环变量 `x`，然后执行循环体；迭代结束后执行 `end` 后的语句。矩阵输入按列迭代。循环体对 `x` 或迭代源变量的赋值，不改变已经建立的迭代次数及后续迭代值。
 
 #### non-SSA IR
 
 不设置专用的 `ForInst`、`BreakInst` 或 `ContinueInst`。使用 `for.preheader`、`for.header`、`for.body`、`for.latch`、`for.end` 五个基本块，并用 `BranchInst` / `GotoInst` 连接。
 
-以下 `for.preheader` 等名称表示块的职责；当前打印标签为 `bbN`。`for.preheader` 只求值一次迭代表达式，通过 `intrinsic.foreach_init(iterable)` 建立独立的迭代状态 `state`，再用 `intrinsic.foreach_count(state)` 得到 `max_iter`。两者在循环期间可直接作为 `ValueId` 跨块引用，不需要临时 slot。`for.header` 读取内部下标，通过 `intrinsic.int_gt` 判断 `iter_index > max_iter`：为真进入 `for.end`，否则进入 `for.body`。`for.body` 用 `intrinsic.foreach_get(state, iter_index)` 取得当前值，写入用户循环变量的 slot，再执行循环体。正常执行完毕后进入 `for.latch`；该块用 `intrinsic.int_add` 将下标加一，再回到 `for.header`。这些内部操作不参与 M 语言名字查找或运算符分派，也不隐式改写 slot。
+以下 `for.preheader` 等名称表示块的职责。`for.preheader` 只求值一次迭代表达式，通过 `intrinsic.foreach_init(iterable)` 取得 double 标量上限 `max_iter`，迭代源和上限直接通过 `ValueId` 跨块引用，不再产生 state。初始化可能执行重载 size/double，但按不修改当前工作区的 SSA 假设执行，不自动插入屏障。`for.header` 读取内部下标，通过 `intrinsic.gt_double` 判断 `iter_index > max_iter`：为真进入 `for.end`，否则进入 `for.body`。`for.body` 用 `ParenReferenceInst(iterable, {MagicColon, iter_index})` 取得当前值，写入用户循环变量的 slot，再执行循环体。正常执行完毕后进入 `for.latch`；该块用 `intrinsic.add_double` 将下标加一，再回到 `for.header`。内部下标比较与递增不参与用户运算符分派。取值可能执行重载 subsref，按相同的工作区不变假设处理，取值成功后再提交循环变量赋值。
 
-`iter_index` 每轮变化，而 `ValueId` 只能定义一次，因此 non-SSA 阶段为每个 `for` 分配一个独立的内部 slot。当前 `SlotTable` 不记录内部类别或类型；lowering 不把这个 slot 加入用户名字查找表，内部整型操作按协议要求它保存 `int64 scalar`。每次进入 `for.preheader` 时将它初始化为 1，在 `for.header` 读取，在 `for.latch` 加一后写回。循环体可能修改用户循环变量，但不能据此改变迭代进度。嵌套的 `for` 各有不同的 `SlotId`；打印名仅供调试。
+`iter_index` 每轮变化，而 `ValueId` 只能定义一次，因此 non-SSA 阶段为每个 `for` 分配一个独立的内部 slot。lowering 将其 SlotInfo::is_internal 置为 true，并保存 type=ba_double_mat、shape={1,1}，不把它加入用户名字查找表。每次 load 从槽位元数据继承 double 1x1，提升后的 PHI 继承同样约束。每次进入 `for.preheader` 时将它初始化为 1，在 `for.header` 读取，在 `for.latch` 加一后写回。循环体可能修改用户循环变量，但不能据此改变迭代进度。嵌套的 `for` 各有不同的 `SlotId`；打印名仅供调试。
 
 `for` 沿用上述 `LoopControlContext` 栈。lowering 循环体时压入该循环的目标，结束后弹出，恢复外层循环的目标：
 
@@ -794,33 +719,33 @@ continue_target = for.latch
 例如 `for x = A; body; end` 可表示为：
 
 ```text
-; slot1 是当前循环专用的内部 int64 下标，不进入用户名字查找
+; slot1 是当前循环专用的内部 double 下标，不进入用户名字查找
 
 current:
   goto for.preheader
 
 for.preheader:
   %a = load slot0
-  %state = intrinsic.foreach_init %a
-  %max_iter = intrinsic.foreach_count %state
-  %one = const 1 : 1x1 int64
+  %max_iter: double 1x1 = intrinsic.foreach_init %a
+  %one: double 1x1 = const !c_one (1)
   store slot1 %one
   goto for.header
 
 for.header:
   %index = load slot1
-  %done = intrinsic.int_gt %index, %max_iter
+  %done = intrinsic.gt_double %index, %max_iter
   branch %done, for.end, for.body
 
 for.body:
-  %current = intrinsic.foreach_get %state, %index
+  %all = const ":"
+  %current = paren_ref %a, %all, %index
   store slot2 %current
   // 执行 body
   goto for.latch
 
 for.latch:
   %latch_index = load slot1
-  %next = intrinsic.int_add %latch_index, %one
+  %next = intrinsic.add_double %latch_index, %one
   store slot1 %next
   goto for.header
 
@@ -830,48 +755,46 @@ for.end:
 
 #### SSA IR
 
-保留相同的迭代顺序和 CFG。`state` 与 `max_iter` 只在 `for.preheader` 定义一次。若内部下标 slot 只由本循环的 load/store 访问且不逃逸，SSA 转换可提升该 slot：在 `for.header` 用 `PhiInst` 汇合 `for.preheader` 的初值和 `for.latch` 的更新值，后续直接引用 `phi` 结果，不再为下标生成逐轮 load/store。这个 `PhiInst` 的结果及所有输入、`intrinsic.int_add` 的结果都固定为 `int64 scalar`；通用 `PhiInst` 不因此被限定为整型。
+保留相同的迭代顺序和 CFG。`iterable` 与 `max_iter` 只在 `for.preheader` 定义一次。若内部下标 slot 只由本循环的 load/store 访问且不逃逸，SSA 转换可提升该 slot：在 `for.header` 用 `PhiInst` 汇合 `for.preheader` 的初值和 `for.latch` 的更新值，后续直接引用 `phi` 结果，不再为下标生成逐轮 load/store。这个 `PhiInst` 的结果及所有输入、`intrinsic.add_double` 的结果都固定为 `double scalar`；通用 `PhiInst` 不因此被限定为整型。
 
 ```text
 for.preheader:
   %iterable = evaluate A
-  %state = intrinsic.foreach_init %iterable
-  %max_iter = intrinsic.foreach_count %state
-  %one = const 1                         // int64 scalar
+  %max_iter: double 1x1 = intrinsic.foreach_init %iterable
+  %one: double 1x1 = const !c_one (1)
   goto for.header
 
 for.header:
-  %index = phi [for.preheader: %one], [for.latch: %next]  // int64 scalar
-  %done = intrinsic.int_gt %index, %max_iter
+  %index = phi [for.preheader: %one], [for.latch: %next]  // double scalar
+  %done = intrinsic.gt_double %index, %max_iter
   branch %done, for.end, for.body
 
 for.body:
-  %current = intrinsic.foreach_get %state, %index
-  store @x, %current
+  %all = const ":"
+  %current = paren_ref %iterable, %all, %index
+  record slot_x, %current
   // 执行 body
   goto for.latch
 
 for.latch:
-  %next = intrinsic.int_add %index, %one  // int64 scalar
+  %next = intrinsic.add_double %index, %one  // double scalar
   goto for.header
 ```
 
-`%index` 是内部迭代序号，不是用户循环变量 `x`。每次进入 `for.body` 时，仍须用本轮 `%index` 执行 `foreach_get` 取得 `%current`，再写给 `x`；循环体即使修改了 `x`，也不会改变下一轮的 `%index`。后续 JIT 可根据迭代源或 `state` 的类型与形状，在必要的类型守卫下，将 `foreach_init` 和逐轮取值特化为直接的次数计算、按下标计算或取列；固定为 `int64` 的 `%index` 类型本身不足以决定取值方式。普通回边与 `continue` 都到达 `for.latch`，只递增一次；`break` 直接到达 `for.end`，不递增。用户变量 `x` 的 slot 是否另行提升为 SSA 值，取决于它是否需要保留 workspace 可见性、捕获或 deopt 状态；若提升，循环出口还需按实际前驱汇合其值。具体 SSA 转换规则待 SSA 设计确定。
+`%index` 是内部迭代序号，不是用户循环变量 `x`。每次进入 `for.body` 时，仍须用本轮 `%index` 执行圆括号索引取得 `%current`，再写给 `x`；循环体即使修改了 `x`，也不会改变下一轮的 `%index`。后续 JIT 可根据迭代源的类型与形状，在必要的类型守卫下，将 `foreach_init` 和逐轮取值特化为直接的次数计算、按下标计算或取列；固定为 `double` 的 `%index` 类型本身不足以决定取值方式。普通回边与 `continue` 都到达 `for.latch`，只递增一次；`break` 直接到达 `for.end`，不递增。用户变量 `x` 的 slot 是否另行提升为 SSA 值，取决于它是否需要保留 workspace 可见性、捕获或 deopt 状态；若提升，循环出口还需按实际前驱汇合其值。具体 SSA 转换规则待 SSA 设计确定。
 
 #### runtime 结构
 
-`intrinsic.foreach_init` 根据一次求值的 `iterable` 建立迭代状态；`intrinsic.foreach_count` 返回迭代次数，`intrinsic.foreach_get` 按从 1 开始的内部下标取出当前列或元素。运行时必须保证该状态不受循环体对迭代源变量和循环变量的写入影响。当前 IR 以 `SlotId` 表示内部 `iter_index`；目标运行时每次进入 `for.preheader` 都将它重新初始化为 1。`continue` 推进下标，`break` 直接离开循环。内部操作的具体执行实现仍待 runtime 完成。
+迭代源只求值一次并保留在寄存器中。foreach_init 返回 double 标量上限，具体协议见下文。每轮以特殊冒号和内部下标执行 ParenReferenceInst，允许重载 subsref；不再持有不透明 state 或 foreach_iterate 节点。初始化与取值不自动生成屏障，实际修改父工作区时由运行时回退协议处理。当前仅实现 IR 构建，实际执行仍待 runtime 完成。
 
 #### 注意事项
 
-1. 内部 `iter_index` 按协议保存整型循环状态，不是用户循环变量；它需要可跨回边传递的内部存储，不能重复定义同一个 `ValueId`。用户循环变量每轮进入循环体前重新赋值。
+1. 内部 `iter_index` 按协议保存 double 标量循环状态，不是用户循环变量；它需要可跨回边传递的内部存储，不能重复定义同一个 `ValueId`。用户循环变量每轮进入循环体前重新赋值。
 2. `for i = 1:10` 中的 `1:10` 仍按上文 `ColonInst` 的目标设计处理，不能把冒号表达式的用户级分派误当成 `for` 协议的内部 helper。
 3. `for` 嵌套在 `while` 或另一层 `for` 中时，每层都有独立的迭代状态和循环上下文。内层 `break` 跳内层 `for.end`，内层 `continue` 跳内层 `for.latch`；从内层循环退出后，继续执行外层循环体的后续语句，不会直接退出外层循环。
 4. `continue` 的目标是 `for.latch`，与直接回到条件块的 `while` 不同。若后续采用线性 IR，跳转目标需改为可定位的标签或指令位置。
 
 ### `switch / case / otherwise / end`
-
-#### 简述
 
 `switch` 表达式只求值一次，随后按顺序检查各个 `case`。命中第一个 case 后只执行它的语句；`otherwise` 可选。case 之间没有贯穿执行。
 
@@ -917,10 +840,6 @@ switch.end:
 
 保留相同的 case 判断链和执行块。`switch_value` 只定义一次，供后续各判断块使用；若多个分支给同一变量赋值，SSA 转换在相应汇合点使用 `phi` 节点。
 
-#### runtime 结构
-
-运行时只求值一次 `switch` 表达式，随后按源码顺序求值所需的 case 值并执行 `switch_match` 语义。命中后不再检查后续 case；执行的分支正常结束后进入统一出口。
-
 #### 注意事项
 
 1. `case {a, b}` 的目标语义是其中任一元素匹配即可进入该 case；该形式尚需补充 lowering。
@@ -928,8 +847,6 @@ switch.end:
 3. 上述 `BasicBlock*` 跳转目标对应当前 CFG 形式；若以后采用线性 IR，需要改为可定位的标签或指令位置。
 
 ### `return`
-
-#### 简述
 
 `return` 立即结束当前函数或脚本代码单元，跳过当前分支、循环及其后的语句。M 语法的 `return` 本身不带返回表达式；函数的返回值来自已声明的输出变量。它与 `break`、`continue` 不同，不读取循环上下文，也不跳到循环出口。
 
@@ -941,7 +858,7 @@ switch.end:
 
 #### SSA IR
 
-保留各条可达返回路径上的 `ReturnInst`。当前 mem2reg 不提升返回槽位，返回前对输出槽位的写入继续保留。未来若要提升输出变量，需要先明确返回值交付约定。输出变量尚未赋值时必须保留原有的未绑定错误语义。
+保留各条可达返回路径上的 `ReturnInst`。本阶段不实现 mem2reg；目标方案不提升返回槽位，返回前对输出槽位的写入继续保留。未来若要提升输出变量，需要先明确返回值交付约定。输出变量尚未赋值时必须保留原有的未绑定错误语义。
 
 #### runtime 结构
 
@@ -1088,96 +1005,42 @@ sc.end:
 
 本机 MATLAB R2022b CLI 实测：`[true false] && true`、`true && [true false]`、`[true false] || false` 和 `false || [true false]` 均报 `MATLAB:nonLogicalConditional`；`false && [true false]` 返回 logical scalar `false`，`true || [true false]` 返回 logical scalar `true`。因此只检查实际到达的操作数。
 
-当前统一 lowering 支持短路表达式作为简单变量赋值的右值，以及 `if`、`while` 的完整条件；其他需要在表达式内部汇合成一个 `ValueId` 的位置仍需后续设计。
+短路表达式作为数组元素、调用实参或其他表达式的子表达式时，没有可直接写入的源码目标变量。lowering 在真假路径分别生成 logical scalar 常量，并在汇合块直接生成 PHI，得到 logical 1x1 寄存器结果；Non-SSA 也允许这种寄存器汇合，无需临时 slot、load/store 或绑定记录。后续表达式和语句继续在新的尾块生成，不能返回原块提前执行。mem2reg 保留已有 PHI。直接赋值仍复用目标 slot，完整条件仍直接连接控制流。
 
 ## 内部语义操作
 
-本节集中记录不参与 M 语言普通名字查找的内部操作。`switch_match` 与 `for` 迭代辅助操作使用 `IntrinsicInst` 表示。该指令保存语义 ID、输入 `ValueId` 列表和一个结果 `ValueId`，不指定最终执行方式；后续可以根据静态信息降低为专用指令或运行时调用。当前内部操作均不隐式改写已有 slot。
+内部操作不参与普通 M 语言名字查找，由 `IntrinsicInst` 保存语义 ID、输入列表及结果列表。
+内部算术不隐式改写槽位。ForeachInit 可能执行用户重载方法，不能视为任意可删除或移动的纯算术，但不因此自动插入工作区屏障；具体实现可以在后续阶段降低为专用指令或运行时调用。
 
-### `add`
+### `add_double`
 
-#### 简述
+`IntrinsicId::AddDouble` 对两个内部 `double scalar` 做加法，结果同类型，不调用用户定义的 `plus`。
+在 `for.latch` 中用于递增内部下标；SSA 形式下，结果作为循环头下标 Phi 的回边输入。
 
-`intrinsic.int_add` 对内部 `int64 scalar` 做加法，用于 `for.latch` 将内部迭代下标加一；它不调用用户定义的 M 语言 `plus`。
+### `gt_double`
 
-#### non-SSA IR
-
-两个操作数和结果均固定为 `int64 scalar`。当前使用 `IntrinsicInst(id = IntAdd, operands = {lhs, rhs})` 表示，不使用普通函数 `CallInst`。
-
-#### SSA IR
-
-沿用相同的静态内部加法语义。`for.latch` 的结果作为下一轮 `for.header` 下标 `PhiInst` 的回边输入。
-
-#### runtime 结构
-
-读取两个内部整型标量并产生同类型结果，不进行 M 语言运算符查找或重载分派。
-
-### `int_gt`
-
-`intrinsic.int_gt` 比较两个内部 `int64 scalar`，生成逻辑标量供 `BranchInst` 使用；它不参与用户定义的 M 语言 `gt` 分派。
+`IntrinsicId::GtDouble` 比较两个内部 `double scalar` 操作数，产生逻辑标量供 `BranchInst` 使用，不进行用户 `gt` 分派。
 
 ### `logical_scalar`
 
-`IntrinsicInst(id = LogicalScalar, operands = {value})` 将实际求值的短路操作数检查并转换为 logical scalar。它不隐式改写已有 slot；无法转换时报告错误。只在控制流到达该操作数时执行，不提前检查可能被短路跳过的右侧。
+`IntrinsicId::LogicalScalar` 将输入检查并转换为逻辑标量，不能转换时报错。
+只对实际到达的短路操作数执行，不能提前检查被跳过的右侧。
 
 ### `foreach_init`
 
-#### 简述
+`IntrinsicId::ForeachInit` 接收已经求值的迭代表达式，唯一结果固定为 double 1x1：
 
-初始化 `for` 的内部迭代协议，确定该次循环的迭代来源和次数。
+```text
+%max_iter: double 1x1 = intrinsic.foreach_init %iterable
+```
 
-#### non-SSA IR
+语义概括为 `[~, col] = size(obj); tmp = double(col); max_iter = tmp(1)`。tmp 为空时返回 0。size 按双输出调用，double 也允许类重载，失败时在第一轮取值前抛错。向量结果取首元素，不强制原 size 输出为整数标量。NaN/Inf 等异常边界的兼容行为留待 runtime 按实测接入，不提前截断上限的小数部分。
 
-`intrinsic.foreach_init` 接收已求值的迭代表达式 `ValueId`，产生循环不变量 `state`。`intrinsic.foreach_count` 接收 `state`，产生固定为 `int64 scalar` 的 `max_iter`。`state` 是 runtime 持有的不透明迭代状态，不是用户变量。
+ForeachIterate 已移除，逐轮取值统一使用 `ParenReferenceInst` 和特殊冒号常量。该节点表示已经确定的索引，不应将函数句柄误当作普通函数调用；标量函数句柄迭代的兼容行为需由执行层处理。类对象的索引走 subsref，结果类型和 shape 不保证与源对象相同。
 
-#### SSA IR
-
-沿用相同的两个内部操作；它们在进入循环前各定义一次，供后续各块使用。
-
-#### runtime 结构
-
-从 `iterable` 建立独立于后续用户变量赋值的迭代状态，并确定最大迭代次数。对矩阵输入，迭代单位是列。
-
-#### 注意事项
-
-后续 JIT 可依据迭代源的类型与形状，在满足语义约束并设置必要守卫后，将该调用特化为直接建立状态和计算迭代次数；仍须保持迭代源只求值一次的语义。
-
-### `foreach_get`
-
-#### 简述
-
-按内部迭代状态和下标取得 `for` 当前轮的值。
-
-#### non-SSA IR
-
-`intrinsic.foreach_get` 接收 `foreach_init` 返回的状态和当前固定为 `int64 scalar` 的内部下标；结果为本轮写给用户循环变量的 `ValueId`。下标的更新由 `for.latch` 负责，此操作不推进下标。
-
-#### SSA IR
-
-沿用相同的调用语义；`iter_index` 由循环头的 SSA 汇合结果提供。
-
-#### runtime 结构
-
-按照 M 语言 `for` 的迭代规则读取当前位置的值。矩阵输入时返回当前列；结果的具体类型和形状由迭代来源决定。
-
-#### 注意事项
-
-后续 JIT 可根据 `state` 所对应迭代源的类型与形状，把该调用特化为按下标计算或直接取列；固定为 `int64` 的下标类型本身不足以选择取值方式。特化仍须保持迭代快照和每轮写入循环变量的语义。
+JIT 可以依据迭代源类型与形状特化初始化和取值；须保留类型守卫、源表达式只求值一次及逐轮赋值语义。
 
 ### `switch_match`
 
-#### 简述
-
-为 `switch` 的一个 `case` 判断选择器与 case 值是否匹配。它是内部语义操作，不通过普通 M 函数名 `eq` 分派；其匹配规则需要覆盖 MATLAB `switch` 语义。
-
-#### non-SSA IR
-
-生成 `IntrinsicInst(id = SwitchMatch, operands = {switch_value, case_value})`，不参与普通 M 函数名查找。这里的 `switch_match` 是语义名称，不指定最终调用的实现；后续可以依据静态信息选择专用比较或运行时调用。两个输入均为已经求值的 `ValueId`，结果为 logical scalar `ValueId`，供 `BranchInst.condition` 使用。
-
-#### SSA IR
-
-沿用相同的匹配语义；`switch_value` 的定义支配后续各 case 判断块。
-
-#### runtime 结构
-
-按 MATLAB `switch` 的匹配规则比较选择器和当前 case 值，返回 logical scalar。
+`IntrinsicId::SwitchMatch` 接收选择器与 case 值，按 M 语言 `switch` 的专用匹配规则产生逻辑标量，
+不通过普通 `eq` 名字查找。选择器定义一次，并支配后续 case 判断；匹配结果供 `BranchInst` 使用。
