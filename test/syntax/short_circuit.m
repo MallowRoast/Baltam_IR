@@ -1,12 +1,12 @@
-function short_circuit()
-    x = 1;
-    y = 0;
-    z = x && y;  % 右侧只在左侧为真时求值，直接写 z。
-    w = x || y;  % 右侧只在左侧为假时求值，直接写 w。
-    q = (x && y) || x;  % 嵌套短路仍只写最终目标 q。
-    if x && y  % 条件不需要结果 slot。
+function short_circuit(x, y)
+    % 参数值在编译时未知，短路控制流不能常量折叠。
+    z = x && y;  % 左侧为真时才读取并转换 y。
+    w = x || y;  % 左侧为假时才读取并转换 y。
+    q = (x && y) || x;  % 嵌套短路，分层使用两路 PHI 汇合。
+    if x && y
         a = 1;
     else
         a = 2;
     end
+    r = {x && y, x || y};  % 子表达式通过 PHI 产生结果。
 end

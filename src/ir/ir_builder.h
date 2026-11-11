@@ -44,7 +44,8 @@ public:
     [[nodiscard]] static std::shared_ptr<IRModule> build_file(const std::filesystem::path& path);
 
 private:
-    [[nodiscard]] ValueId create_const(const_ba_obj_ptr value);
+    // 空对象仅表示特殊索引冒号；每个基本块独立复用常量。
+    [[nodiscard]] ValueId create_const(const_ba_obj_ptr value = {});
     [[nodiscard]] ValueId create_load(SlotId slot);
     [[nodiscard]] ValueId create_concat(std::vector<ValueId> items, ConcatInst::Axis axis);
     [[nodiscard]] ValueId create_cell(std::vector<ValueId> items, std::size_t rows,
@@ -84,7 +85,10 @@ private:
                                      Value::Form form = Value::Form::Single,
                                      bool is_constant = false);
 
-    [[nodiscard]] BasicBlock& add_block();
+    void collect_function_slots(const ast& node);
+    void finish_block_layout();
+    BasicBlock* lower_nested_statement(const ast& node, BasicBlock& block);
+    [[nodiscard]] BasicBlock& add_block(std::string description = "block");
     [[nodiscard]] SlotId slot(const std::string& name);
     [[nodiscard]] ValueId lower_value(const ast& node);
     [[nodiscard]] std::vector<ValueId> lower_indices(const ast& node);
@@ -98,14 +102,19 @@ private:
                          BasicBlock& false_target);
     void lower_short_condition(const ast& node, BasicBlock& current, BasicBlock& true_target,
                                BasicBlock& false_target);
-    [[nodiscard]] BasicBlock* lower_short_assignment(const ast& node, BasicBlock& current,
-                                                     SlotId target);
 
     IRUnit& unit_;
     IRStageVersion& version_;
+    BasicBlock* layout_scope_ = nullptr;
+    std::unordered_map<BasicBlock*, std::vector<BasicBlock*>> layout_children_;
+    bool function_scope_ = false;
     BasicBlock* block_ = nullptr; // 当前指令插入位置。
     LoopControlStack loops_;
+    // 已在 lowering 中出现的变量，供点号访问等按原规则判定。
     std::unordered_map<std::string, SlotId> slots_;
+    // 整个函数体的静态变量表，仅用于圆括号调用／索引消歧。
+    std::unordered_map<std::string, SlotId> function_slots_;
+    std::unordered_map<BasicBlock*, std::unordered_map<std::string, ValueId>> constants_;
 };
 
 } // namespace baltam

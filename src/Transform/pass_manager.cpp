@@ -1,5 +1,7 @@
 #include "Transform/pass_manager.h"
 #include "Transform/mem2reg.h"
+#include "Transform/load_store_elim.h"
+#include "Transform/simplifycfg.h"
 
 #include <stdexcept>
 
@@ -34,10 +36,17 @@ void FunctionAnalysisManager::invalidate(PreservedAnalyses preserved) {
 void FunctionPassManager::run(FunctionUnit& function) const {
     FunctionAnalysisManager analyses(function);
     for (const auto& pass : passes_)
-        analyses.invalidate(pass(function, analyses));
+        analyses.invalidate(pass.function(function, analyses));
+}
+
+void FunctionPassManager::run(CommandUnit& command) const {
+    for (const auto& pass : passes_)
+        pass.command(command);
 }
 
 void FunctionPassManager::run(IRModule& module) const {
+    if (auto* command = module.command_unit())
+        run(*command);
     std::vector<FunctionUnit*> pending;
     for (auto it = module.functions().rbegin(); it != module.functions().rend(); ++it)
         pending.push_back(it->get());
@@ -68,9 +77,14 @@ FunctionPassManager build_pass_pipeline(std::string_view pipeline) {
     while (!pipeline.empty()) {
         const auto comma = pipeline.find(',');
         const auto name = trim(pipeline.substr(0, comma));
-        if (name != "mem2reg")
+        if (name == "mem2reg")
+            manager.add_pass(Mem2RegPass{});
+        else if (name == "load-store-elim")
+            manager.add_pass(LoadStoreElimPass{});
+        else if (name == "simplifycfg")
+            manager.add_pass(SimplifyCFGPass{});
+        else
             throw std::invalid_argument("未知的优化 pass：" + std::string(name));
-        manager.add_pass(Mem2RegPass{});
         if (comma == pipeline.npos)
             break;
         pipeline = trim(pipeline.substr(comma + 1));

@@ -11,7 +11,8 @@ CFGAnalysis::CFGAnalysis(const IRStageVersion& version) : entry_(version.entry_b
         indices_.emplace(block.get(), blocks_.size());
         blocks_.push_back({block.get(), {}, {}});
     }
-    if (blocks_.empty()) return;
+    if (blocks_.empty())
+        return;
 
     for (BlockIndex source = 0; source < blocks_.size(); ++source) {
         const auto* terminator = blocks_[source].block->terminator();
@@ -151,8 +152,9 @@ DominatorAnalysis::DominatorAnalysis(const CFGAnalysis& cfg) : blocks_(cfg.size(
     for (const auto block : order) {
         const auto& predecessors = cfg.predecessors(block);
         const auto count =
-            std::count_if(predecessors.begin(), predecessors.end(),
-                          [this](BlockIndex predecessor) { return blocks_[predecessor].reachable; });
+            std::count_if(predecessors.begin(), predecessors.end(), [this](BlockIndex predecessor) {
+                return blocks_[predecessor].reachable;
+            });
         if (count < 2)
             continue;
         for (auto runner : predecessors) {

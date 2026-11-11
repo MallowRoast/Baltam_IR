@@ -85,6 +85,9 @@ public:
     [[nodiscard]] IRUnit* parent() const noexcept { return parent_; }
 
     [[nodiscard]] const std::string& label() const noexcept { return label_; }
+    // 仅供阅读的来源角色，不参与控制流语义。
+    [[nodiscard]] const std::string& description() const noexcept { return description_; }
+    void set_description(std::string description) { description_ = std::move(description); }
 
     [[nodiscard]] const std::vector<std::unique_ptr<Instruction>>& instructions() const noexcept {
         return instructions_;
@@ -124,6 +127,7 @@ private:
     IRUnit* parent_;
     IRStageVersion* version_;
     std::string label_;
+    std::string description_;
     std::vector<std::unique_ptr<Instruction>> instructions_;
 };
 
@@ -169,6 +173,15 @@ public:
 
     // 删除留下的空位统一压缩，同时更新结果编号、输入和值表。
     void compact_values();
+
+    // 仅重排拥有顺序，不移动基本块对象；入口必须仍位于首位。
+    void reorder_blocks(const std::vector<BasicBlock*>& order);
+
+    // 删除入口不可达块，并按实际前驱边修复保留块的 PHI。
+    bool remove_unreachable_blocks();
+
+    // 合并 goto 的唯一前驱后继；无法安全消除的 PHI 保守保留整个块。
+    bool merge_single_successor(BasicBlock& block);
 
     // 调用方保证替换不破坏类型、支配关系及阶段语义。
     std::size_t replace_all_uses(ValueId from, ValueId to);
@@ -231,10 +244,20 @@ public:
         return version_;
     }
     BasicBlock& add_block() { return version_->add_block(*this); }
+    void set_stage_version(std::shared_ptr<IRStageVersion> version) {
+        if (!version)
+            throw std::invalid_argument("阶段版本不能为空");
+        for (const auto& block : version->blocks())
+            if (block->parent() != this)
+                throw std::invalid_argument("阶段版本不属于当前命令单元");
+        version_ = std::move(version);
+    }
 
 private:
     std::shared_ptr<IRStageVersion> version_ = std::make_shared<IRStageVersion>();
 };
+
+enum class FunctionType : std::uint8_t { Main, Local, Method, Nested };
 
 class FunctionUnit final : public IRUnit {
 public:
@@ -243,6 +266,8 @@ public:
                  std::vector<std::string> returns);
 
     [[nodiscard]] const std::string& name() const noexcept { return name_; }
+    [[nodiscard]] FunctionType function_type() const noexcept;
+    void set_function_type(FunctionType type) noexcept { function_type_ = type; }
 
     [[nodiscard]] IRStage current_stage() const noexcept { return current_stage_; }
 
@@ -274,6 +299,7 @@ public:
 
 private:
     std::string name_;
+    std::optional<FunctionType> function_type_;
     FunctionUnit* lexical_parent_ = nullptr;
     IRStage current_stage_ = IRStage::NonSSA;
     std::vector<SlotId> parameter_slots_;
@@ -304,6 +330,8 @@ public:
     [[nodiscard]] const std::optional<std::filesystem::path>& source_path() const noexcept {
         return path_;
     }
+
+    [[nodiscard]] CommandUnit* command_unit() noexcept { return command_unit_.get(); }
 
     [[nodiscard]] const CommandUnit* command_unit() const noexcept { return command_unit_.get(); }
 

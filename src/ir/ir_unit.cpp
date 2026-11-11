@@ -1,4 +1,5 @@
 #include "ir/ir_unit.h"
+#include "Analysis/ir_analysis.h"
 
 #include "ba_obj/ba_type.h"
 #include "ba_obj/ba_obj.h"
@@ -8,6 +9,7 @@
 #include <limits>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace baltam {
@@ -97,8 +99,10 @@ void ValueTable::define(ValueId id, Instruction& definition, std::uint32_t resul
     if (definition.type() == Instruction::Type::Intrinsic) {
         const auto id = static_cast<const IntrinsicInst&>(definition).id;
         if (id == IntrinsicId::ForeachInit || id == IntrinsicId::AddDouble ||
-            id == IntrinsicId::GtDouble) {
-            value.type_ = id == IntrinsicId::GtDouble ? ba_bool_mat : ba_double_mat;
+            id == IntrinsicId::GtDouble || id == IntrinsicId::LogicalScalar) {
+            value.type_ = (id == IntrinsicId::GtDouble || id == IntrinsicId::LogicalScalar)
+                              ? ba_bool_mat
+                              : ba_double_mat;
             value.shape_ = std::vector<std::optional<std::size_t>>{1, 1};
         }
     }
@@ -225,14 +229,158 @@ void IRStageVersion::erase_instruction(BasicBlock& block, std::size_t position) 
     block.instructions_.erase(block.instructions_.begin() + position);
 }
 
+void IRStageVersion::reorder_blocks(const std::vector<BasicBlock*>& order) {
+    if (order.size() != blocks_.size() || (!order.empty() && order.front() != entry_block_))
+        throw std::invalid_argument("基本块排列必须完整且保持入口在首位");
+    std::unordered_map<BasicBlock*, std::size_t> indices;
+    for (std::size_t i = 0; i < blocks_.size(); ++i)
+        indices.emplace(blocks_[i].get(), i);
+    std::vector<std::size_t> positions;
+    positions.reserve(order.size());
+    for (auto* block : order) {
+        const auto found = indices.find(block);
+        if (found == indices.end())
+            throw std::invalid_argument("基本块排列包含重复或外部基本块");
+        positions.push_back(found->second);
+        indices.erase(found);
+    }
+    std::vector<std::unique_ptr<BasicBlock>> sorted;
+    sorted.reserve(blocks_.size());
+    for (const auto position : positions)
+        sorted.push_back(std::move(blocks_[position]));
+    blocks_ = std::move(sorted);
+}
+
+bool IRStageVersion::remove_unreachable_blocks() {
+    const CFGAnalysis cfg(*this);
+    std::unordered_set<const BasicBlock*> reachable;
+    std::vector<const BasicBlock*> pending;
+    if (entry_block_)
+        pending.push_back(entry_block_);
+    while (!pending.empty()) {
+        const auto* block = pending.back();
+        pending.pop_back();
+        if (!reachable.insert(block).second)
+            continue;
+        for (const auto successor : cfg.successors(cfg.index(block)))
+            pending.push_back(cfg.block(successor));
+    }
+    bool changed = false;
+    for (const auto& block : blocks_) {
+        if (!reachable.count(block.get()))
+            continue;
+        const auto& predecessors = cfg.predecessors(cfg.index(block.get()));
+        for (const auto& instruction : block->instructions_) {
+            if (instruction->type() != Instruction::Type::Phi)
+                break;
+            auto& phi = static_cast<PhiInst&>(*instruction);
+            for (std::size_t i = phi.operand_count(); i-- > 0;) {
+                const auto* predecessor = phi.predecessors()[i];
+                if (!reachable.count(predecessor) ||
+                    std::find(predecessors.begin(), predecessors.end(), cfg.index(predecessor)) ==
+                        predecessors.end()) {
+                    phi.erase_incoming(i);
+                    changed = true;
+                }
+            }
+        }
+    }
+    // 先一次性断开整个死区域的 use，包括 PHI 回边和跨死块引用。
+    for (const auto& block : blocks_)
+        if (!reachable.count(block.get()))
+            for (const auto& instruction : block->instructions_)
+                instruction->drop_all_references();
+    for (const auto& block : blocks_)
+        if (!reachable.count(block.get())) {
+            while (!block->instructions_.empty())
+                block->erase_instruction(block->instructions_.size() - 1);
+            changed = true;
+        }
+    blocks_.erase(std::remove_if(blocks_.begin(), blocks_.end(),
+                                 [&reachable](const auto& b) { return !reachable.count(b.get()); }),
+                  blocks_.end());
+    return changed;
+}
+
+bool IRStageVersion::merge_single_successor(BasicBlock& block) {
+    if (block.version_ != this)
+        throw std::invalid_argument("基本块不属于当前阶段版本");
+    const auto* terminator = block.terminator();
+    if (!terminator || terminator->type() != Instruction::Type::Goto)
+        return false;
+    auto* target = static_cast<const GotoInst*>(terminator)->target;
+    if (target == &block || target == entry_block_)
+        return false;
+    const auto target_it = std::find_if(blocks_.begin(), blocks_.end(),
+                                        [target](const auto& b) { return b.get() == target; });
+    if (target_it == blocks_.end())
+        throw std::invalid_argument("跳转目标不属于当前阶段版本");
+    for (const auto& other : blocks_) {
+        if (other.get() == &block)
+            continue;
+        const auto* end = other->terminator();
+        if (!end)
+            continue;
+        if (end->type() == Instruction::Type::Goto &&
+            static_cast<const GotoInst*>(end)->target == target)
+            return false;
+        if (end->type() == Instruction::Type::Branch) {
+            const auto& branch = static_cast<const BranchInst&>(*end);
+            if (branch.true_target == target || branch.false_target == target)
+                return false;
+        }
+    }
+    for (const auto& instruction : target->instructions_) {
+        if (instruction->type() != Instruction::Type::Phi)
+            break;
+        const auto& phi = static_cast<const PhiInst&>(*instruction);
+        if (phi.operand_count() != 1 || phi.incoming(0).predecessor != &block ||
+            !phi.incoming(0).value)
+            return false;
+        const auto* definition = values_.find(*phi.incoming(0).value).definition();
+        // 不折叠 Undefined 或没有外部来源的 PHI 循环。
+        if (definition && definition->parent() == target)
+            return false;
+    }
+    if (!target->description_.empty() && block.description_ != target->description_)
+        block.description_ += (block.description_.empty() ? "" : " + ") + target->description_;
+    block.instructions_.reserve(block.instructions_.size() + target->instructions_.size());
+    while (!target->instructions_.empty() &&
+           target->instructions_.front()->type() == Instruction::Type::Phi) {
+        const auto& phi = static_cast<const PhiInst&>(*target->instructions_.front());
+        replace_all_uses(phi.result, *phi.incoming(0).value);
+        target->erase_instruction(0);
+    }
+    block.erase_instruction(block.instructions_.size() - 1);
+    for (auto& instruction : target->instructions_) {
+        instruction->parent_ = &block;
+        block.instructions_.push_back(std::move(instruction));
+    }
+    target->instructions_.clear();
+    for (const auto& other : blocks_)
+        for (const auto& instruction : other->instructions_) {
+            if (instruction->type() != Instruction::Type::Phi)
+                break;
+            auto& phi = static_cast<PhiInst&>(*instruction);
+            for (std::size_t i = 0; i < phi.operand_count(); ++i)
+                if (phi.predecessors()[i] == target)
+                    phi.set_predecessor(i, &block);
+        }
+    blocks_.erase(target_it);
+    return true;
+}
+
 std::shared_ptr<IRStageVersion> IRStageVersion::clone(IRUnit& owner) const {
     auto copy = std::make_shared<IRStageVersion>();
     if (values_.size())
         (void)copy->values_.reserve(ValueId{static_cast<std::uint32_t>(values_.size() - 1)});
     std::unordered_map<const BasicBlock*, BasicBlock*> blocks;
     std::unordered_map<const Instruction*, Instruction*> instructions;
-    for (const auto& block : blocks_)
-        blocks.emplace(block.get(), &copy->add_block(owner, block->label()));
+    for (const auto& block : blocks_) {
+        auto& cloned = copy->add_block(owner, block->label());
+        cloned.set_description(block->description());
+        blocks.emplace(block.get(), &cloned);
+    }
     for (const auto& block : blocks_) {
         auto* target = blocks.at(block.get());
         for (const auto& instruction : block->instructions()) {
@@ -483,6 +631,16 @@ void bind_module(FunctionUnit& function, IRModule* module) {
 }
 
 } // 匿名命名空间
+
+FunctionType FunctionUnit::function_type() const noexcept {
+    if (lexical_parent_)
+        return FunctionType::Nested;
+    if (function_type_)
+        return *function_type_;
+    if (!parent() || parent()->entry_function() == this)
+        return FunctionType::Main;
+    return FunctionType::Local;
+}
 
 FunctionUnit::FunctionUnit(std::string name, std::vector<std::string> parameters,
                            std::vector<std::string> returns)

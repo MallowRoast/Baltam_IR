@@ -1,5 +1,6 @@
 #include "ir/ir_io.h"
 #include "ir/ir_constant.h"
+#include "Analysis/ir_analysis.h"
 #include "ba_obj/ba_type.h"
 
 #include <algorithm>
@@ -21,8 +22,8 @@ std::string slot_reference(const SlotInfo& info) {
 
 std::string dot_member(const Operand& member) {
     if (const auto* name = std::get_if<InternedString>(&member))
-        return "." + *name;
-    return ".(%" + std::to_string(std::get<ValueId>(member).index) + ")";
+        return " @" + *name;
+    return " %" + std::to_string(std::get<ValueId>(member).index);
 }
 
 // 类型名与常量描述保持一致，未知信息不输出占位符。
@@ -264,8 +265,11 @@ std::string print_instruction(const Instruction& instruction, const IRStageVersi
             base = *name;
         else
             base = "%" + std::to_string(std::get<ValueId>(base_or_name_input).index);
-        return result_prefix({inst.result}, version) + "dot_access " + base +
-               dot_member(member_input);
+        const auto member =
+            std::holds_alternative<InternedString>(member_input)
+                ? "." + std::get<InternedString>(member_input)
+                : ".(%" + std::to_string(std::get<ValueId>(member_input).index) + ")";
+        return result_prefix({inst.result}, version) + "dot_access " + base + member;
     }
     case Instruction::Type::DotReference: {
         const auto& inst = static_cast<const DotReferenceInst&>(instruction);
@@ -579,6 +583,7 @@ std::string unquote_path(std::string_view text) {
 struct Line {
     std::string text;
     std::size_t number;
+    std::string block_description;
 };
 
 struct UnitText {
@@ -613,7 +618,9 @@ public:
                 if (blocks_.count(label))
                     throw std::invalid_argument("IR 第 " + std::to_string(line.number) +
                                                 " 行：基本块标签重复");
-                blocks_[label] = &version_.add_block(unit_, label);
+                auto& block = version_.add_block(unit_, label);
+                block.set_description(line.block_description);
+                blocks_[label] = &block;
             }
         }
         if (!parameters_.empty()) {
@@ -860,6 +867,9 @@ private:
                                     : std::optional<ValueId>{value_id(parts[1])});
             define(*result, inst);
         } else if (begins(rhs, "record ")) {
+            const auto* function = dynamic_cast<const FunctionUnit*>(&unit_);
+            if (!function || function->current_stage() == IRStage::NonSSA)
+                throw std::invalid_argument("record 仅允许出现在 SSA 阶段");
             no_result();
             const auto parts = split(rhs.substr(7));
             if (parts.size() != 2)
@@ -1030,20 +1040,35 @@ private:
                 assigned = value_id(object.substr(comma + 2));
                 object.erase(comma);
             }
-            const auto dynamic = object.find(".(%");
-            const auto dot = dynamic == std::string::npos ? object.rfind('.') : dynamic;
-            if (dot == std::string::npos || dot == 0 || dot + 1 == object.size())
-                throw std::invalid_argument("点号成员格式无效");
-            const auto base_text = object.substr(0, dot);
-            Operand base =
-                begins(base_text, "%") ? Operand{value_id(base_text)} : Operand{base_text};
+            Operand base;
             Operand member;
-            if (dynamic != std::string::npos) {
-                if (object.back() != ')')
-                    throw std::invalid_argument("动态字段名称缺少右括号");
-                member = value_id(object.substr(dot + 2, object.size() - dot - 3));
+            const auto separator = object.find(' ');
+            if (separator != std::string::npos) {
+                const auto base_text = object.substr(0, separator);
+                const auto member_text = object.substr(separator + 1);
+                base = begins(base_text, "%") ? Operand{value_id(base_text)} : Operand{base_text};
+                if (begins(member_text, "@") && member_text.size() > 1 &&
+                    member_text.find_first_of(" \t,%@", 1) == std::string::npos)
+                    member = member_text.substr(1);
+                else if (begins(member_text, "%"))
+                    member = value_id(member_text);
+                else
+                    throw std::invalid_argument("成员必须使用 @名字或 %值编号");
             } else {
-                member = object.substr(dot + 1);
+                // 兼容旧 IR 的 base.member 和 base.(%value) 写法。
+                const auto dynamic = object.find(".(%");
+                const auto dot = dynamic == std::string::npos ? object.rfind('.') : dynamic;
+                if (dot == std::string::npos || dot == 0 || dot + 1 == object.size())
+                    throw std::invalid_argument("点号成员格式无效");
+                const auto base_text = object.substr(0, dot);
+                base = begins(base_text, "%") ? Operand{value_id(base_text)} : Operand{base_text};
+                if (dynamic != std::string::npos) {
+                    if (object.back() != ')')
+                        throw std::invalid_argument("动态字段名称缺少右括号");
+                    member = value_id(object.substr(dot + 2, object.size() - dot - 3));
+                } else {
+                    member = object.substr(dot + 1);
+                }
             }
             if (op == "dot_access") {
                 auto& inst = block_->add_instruction<DotAccessInst>(require_result(), base, member);
@@ -1158,6 +1183,29 @@ std::unique_ptr<FunctionUnit> read_function(const UnitText& text,
         return_count = number(tail.substr(3, tail.size() - 5));
     }
     auto function = std::make_unique<FunctionUnit>(name, std::move(params), std::move(returns));
+    std::optional<FunctionType> type;
+    for (const auto& line : text.body) {
+        if (!begins(line.text, "; type: "))
+            continue;
+        if (type)
+            throw std::invalid_argument("函数类型重复");
+        const auto name = line.text.substr(8);
+        if (name == "main")
+            type = FunctionType::Main;
+        else if (name == "local")
+            type = FunctionType::Local;
+        else if (name == "method")
+            type = FunctionType::Method;
+        else if (name == "nested")
+            type = FunctionType::Nested;
+        else
+            throw std::invalid_argument("未知的函数类型：" + name);
+    }
+    if (type) {
+        if ((*type == FunctionType::Nested) != !text.nested_parent.empty())
+            throw std::invalid_argument("函数类型与嵌套关系不一致");
+        function->set_function_type(*type);
+    }
     function->set_current_stage(stage);
     auto version = function->stage_version(stage);
     version->set_return_count(return_count);
@@ -1175,6 +1223,30 @@ FunctionUnit* function_at_path(
     const auto parts = split(path, '.');
     if (parts.empty())
         throw std::invalid_argument("函数路径为空");
+    if (!parts.front().empty() && (parts.front().front() < '0' || parts.front().front() > '9')) {
+        FunctionUnit* function = nullptr;
+        for (const auto& entry : functions)
+            if (entry.first == parts.front()) {
+                if (function)
+                    throw std::invalid_argument("顶层函数名字不唯一：" + std::string(path));
+                function = entry.second.get();
+            }
+        if (!function)
+            throw std::invalid_argument("顶层函数路径不存在：" + std::string(path));
+        for (std::size_t i = 1; i < parts.size(); ++i) {
+            FunctionUnit* child = nullptr;
+            for (const auto& nested : function->nested_functions())
+                if (nested->name() == parts[i]) {
+                    if (child)
+                        throw std::invalid_argument("嵌套函数名字不唯一：" + std::string(path));
+                    child = nested.get();
+                }
+            if (!child)
+                throw std::invalid_argument("嵌套函数路径不存在：" + std::string(path));
+            function = child;
+        }
+        return function;
+    }
     const auto index = number(parts.front());
     if (index >= functions.size())
         throw std::invalid_argument("顶层函数路径不存在：" + std::string(path));
@@ -1224,7 +1296,7 @@ std::string IRPrinter::print(const IRModule& module) {
     for (std::size_t i = 0; i < module.functions().size(); ++i) {
         if (module.command_unit() || i != 0)
             output << '\n';
-        print_function(output, *module.functions()[i], std::to_string(i));
+        print_function(output, *module.functions()[i], module.functions()[i]->name());
     }
     if (module.command_unit() || !module.functions().empty())
         output << '\n';
@@ -1233,8 +1305,20 @@ std::string IRPrinter::print(const IRModule& module) {
 }
 
 void IRPrinter::print_blocks(std::ostream& output, const IRStageVersion& version) {
+    const CFGAnalysis cfg(version);
     for (const auto& block : version.blocks()) {
-        output << block->label() << ":\n";
+        const auto& description = block->description();
+        output << block->label() << ": ; "
+               << (description.empty() ? (block.get() == cfg.entry() ? "entry" : "block")
+                                       : description)
+               << "; prev = [";
+        const auto& predecessors = cfg.predecessors(cfg.index(block.get()));
+        for (std::size_t i = 0; i < predecessors.size(); ++i) {
+            if (i)
+                output << ", ";
+            output << cfg.block(predecessors[i])->label();
+        }
+        output << "]\n";
         for (const auto& instruction : block->instructions()) {
             output << "    ";
             output << print_instruction(*instruction, version, constants_);
@@ -1292,12 +1376,32 @@ void IRPrinter::print_function(std::ostream& output, const FunctionUnit& functio
     default:
         throw std::invalid_argument("无效的 IR 阶段");
     }
-    output << " {\n; stage: " << stage << "\n\n";
+    output << " {\n; stage: " << stage << '\n';
+    const char* type = nullptr;
+    switch (function.function_type()) {
+    case FunctionType::Main:
+        type = "main";
+        break;
+    case FunctionType::Local:
+        type = "local";
+        break;
+    case FunctionType::Method:
+        type = "method";
+        break;
+    case FunctionType::Nested:
+        type = "nested";
+        break;
+    }
+    output << "; type: " << type << '\n';
+    if (function.lexical_parent())
+        output << "; nested in @" << path.substr(0, path.rfind('.')) << '\n';
+    output << '\n';
     print_blocks(output, *function.current_version());
     output << "}\n";
     for (std::size_t i = 0; i < function.nested_functions().size(); ++i) {
-        output << "\nnested in @" << path << "\n; nested in @" << function.name() << '\n';
-        print_function(output, *function.nested_functions()[i], path + "." + std::to_string(i));
+        output << '\n';
+        print_function(output, *function.nested_functions()[i],
+                       path + "." + function.nested_functions()[i]->name());
     }
 }
 
@@ -1327,7 +1431,18 @@ std::unique_ptr<IRModule> read_ir(std::string_view text,
         // 现有打印器通过这些注释记录阶段和槽位等结构信息。
         if (begins(line, "; stage: "))
             line = "stage " + line.substr(9);
-        lines.push_back({line, n});
+        std::string description;
+        const auto colon = line.find(':');
+        if (colon != std::string::npos && colon > 0 &&
+            line.substr(0, colon).find_first_of(" \t=%") == std::string::npos) {
+            const auto comment = trim(line.substr(colon + 1));
+            if (begins(comment, ";")) {
+                const auto prev = comment.find("; prev = [");
+                description = trim(comment.substr(1, prev == std::string::npos ? prev : prev - 1));
+                line.erase(colon + 1);
+            }
+        }
+        lines.push_back({line, n, std::move(description)});
     }
     if (metadata.empty())
         throw std::invalid_argument("IR 缺少常量表");
@@ -1368,8 +1483,16 @@ std::unique_ptr<IRModule> read_ir(std::string_view text,
             UnitText unit{line.text, {}, pending_parent};
             pending_parent.clear();
             ++i;
-            while (i < lines.size() && lines[i].text != "}")
+            while (i < lines.size() && lines[i].text != "}") {
+                if (begins(lines[i].text, "; nested in @")) {
+                    if (unit.header == "script {" || !unit.nested_parent.empty())
+                        throw std::invalid_argument("重复或无效的嵌套函数关系");
+                    unit.nested_parent = lines[i].text.substr(13);
+                    if (unit.nested_parent.empty())
+                        throw std::invalid_argument("嵌套函数的父函数路径为空");
+                }
                 unit.body.push_back(lines[i++]);
+            }
             if (i == lines.size())
                 throw std::invalid_argument("IR 单元缺少右花括号");
             units.push_back(std::move(unit));

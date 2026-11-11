@@ -31,7 +31,10 @@ set(CMAKE_BUILD_RPATH
     ${BALTAM_RUNTIME_LIBRARY_DIRS})
 
 add_library(baltam_ir_core STATIC
+    src/Transform/phi_simplify.cpp
     src/Transform/pass_manager.cpp
+    src/Transform/load_store_elim.cpp
+    src/Transform/simplifycfg.cpp
     src/Transform/mem2reg.cpp
     src/Analysis/ir_analysis.cpp
     src/ir/ir_io.cpp

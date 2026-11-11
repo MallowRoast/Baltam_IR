@@ -1,4 +1,5 @@
 #include "ir/ir_constant.h"
+#include "ir/ir_unit.h"
 
 #include "MatTool.h"
 #include "ba_obj/ba_obj.h"
@@ -230,12 +231,14 @@ template <class T> std::string encode_array(const ba_obj& obj, std::string* disp
 
     if constexpr (std::is_same_v<T, char>) {
         const auto& dims = m.dim_vec();
-        if (display && dims.size() == 2 &&
-            (dims[0] == 1 || dims[1] == 1 || (dims[0] == 0 && dims[1] == 0))) {
+        if (dims.size() == 2 && (dims[0] == 1 || dims[1] == 1 || (dims[0] == 0 && dims[1] == 0))) {
             std::string text;
             for (baIndex i = 0; i < m.size(); ++i)
                 text += m(i);
-            *display = quote(text, '\'');
+            auto encoded = quote(text, '\'');
+            if (display)
+                *display = encoded;
+            return encoded;
         }
     } else if constexpr (std::is_same_v<T, std::string>) {
         if (display && m.size() == 1)
@@ -330,6 +333,20 @@ template <class T> const_ba_obj_ptr decode_array(Cursor& in, const Shape& shape)
     if (shape.count > in.s.size())
         throw std::invalid_argument("常量元素数量超过内联数据长度");
     auto obj = std::make_unique<matrix<T>>(shape.dims);
+    if constexpr (std::is_same_v<T, char>) {
+        in.space();
+        if (in.p < in.s.size() && in.s[in.p] == '\'') {
+            if (shape.dims.size() != 2 || !(shape.dims[0] == 1 || shape.dims[1] == 1 ||
+                                            (shape.dims[0] == 0 && shape.dims[1] == 0)))
+                throw std::invalid_argument("字符文本只能用于字符向量");
+            const auto text = in.quoted('\'');
+            if (text.size() != shape.count)
+                throw std::invalid_argument("字符向量长度与声明形状不一致");
+            for (std::size_t i = 0; i < text.size(); ++i)
+                (*obj)(i) = text[i];
+            return std::make_shared<ba_obj>(obj.release());
+        }
+    }
     in.expect('[');
     for (std::size_t i = 0; i < shape.count; ++i) {
         if (i)
@@ -393,6 +410,68 @@ const_ba_obj_ptr load_mat(const std::filesystem::path& file, const std::string& 
 
 } // 匿名命名空间
 
+std::string constant_key(const ConstInst& instruction) {
+    if (instruction.is_magic_colon())
+        return "magic_colon";
+    return descriptor(*instruction.value) + ":" + payload(*instruction.value);
+}
+
+bool remove_unused_constants(IRStageVersion& version) {
+    bool changed = false;
+    for (const auto& block : version.blocks())
+        for (std::size_t i = block->instructions().size(); i-- > 0;) {
+            const auto& instruction = *block->instructions()[i];
+            if (instruction.type() == Instruction::Type::Const &&
+                version.values()
+                    .find(static_cast<const ConstInst&>(instruction).result)
+                    .use_empty()) {
+                block->erase_instruction(i);
+                changed = true;
+            }
+        }
+    return changed;
+}
+
+const_ba_obj_ptr try_fold_logical_scalar(const IRStageVersion& version, ValueId input) {
+    const auto* definition = version.values().find(input).definition();
+    if (!definition || definition->type() != Instruction::Type::Const)
+        return {};
+    const auto& constant = static_cast<const ConstInst&>(*definition);
+    if (constant.is_magic_colon())
+        return {};
+    bool logical;
+    try {
+        logical = constant.value->as_bool();
+    } catch (...) {
+        // 不把转换异常提前到编译阶段，保留原指令的运行时行为。
+        return {};
+    }
+    return std::make_shared<ba_obj>(logical);
+}
+
+const_ba_obj_ptr make_cell_constant(const IRStageVersion& version,
+                                    const std::vector<ValueId>& items, std::size_t rows,
+                                    std::size_t cols) {
+    if ((cols && rows > std::numeric_limits<std::size_t>::max() / cols) ||
+        items.size() != rows * cols)
+        throw std::invalid_argument("元胞数组形状与元素数量不匹配");
+    std::vector<const_ba_obj_ptr> constants;
+    constants.reserve(items.size());
+    for (const auto item : items) {
+        const auto& info = version.values().find(item);
+        if (!info.definition() || info.definition()->type() != Instruction::Type::Const)
+            return {};
+        const auto& constant = static_cast<const ConstInst&>(*info.definition());
+        if (constant.is_magic_colon())
+            return {};
+        constants.push_back(constant.value);
+    }
+    auto cell = std::make_unique<cell_array>(rows, cols);
+    for (std::size_t i = 0; i < constants.size(); ++i)
+        (*cell)(i / cols, i % cols) = std::make_shared<ba_obj>(*constants[i]);
+    return std::make_shared<ba_obj>(cell.release());
+}
+
 ConstantEncoder::ConstantEncoder(std::filesystem::path directory, std::filesystem::path constants)
     : directory_(std::move(directory)), constant_directory_(std::move(constants)) {}
 
@@ -421,33 +500,27 @@ std::string ConstantEncoder::encode(const ConstInst& inst) {
             if (error)
                 throw std::runtime_error("无法创建 MAT 常量目录：" +
                                          (directory_ / constant_directory_).string());
-            auto relative =
-                constant_directory_ / ("c" + std::to_string(id) + "_" +
-                                       std::to_string(std::hash<std::string>{}(key)) + ".mat");
-            auto file = directory_ / relative;
-            const bool exists = std::filesystem::exists(file, error);
-            if (error)
-                throw std::runtime_error("无法访问 MAT 常量文件：" + file.string());
+            const auto file = std::filesystem::absolute(directory_ / constant_directory_ /
+                                                        ("c" + std::to_string(id) + ".mat"))
+                                  .lexically_normal();
+            // 标签按本次输出编号；重复导出时允许用新内容更新同名文件。
+            const auto temporary = file.parent_path() / (file.stem().string() + ".tmp.mat");
             try {
-                if (!exists) {
-                    // 向 MAT 接口传入包装副本，保留原始只读常量。
-                    ba_obj copy(*inst.value);
-                    std::unordered_map<std::string, bxArray*> objects{
-                        {"value", reinterpret_cast<bxArray*>(&copy)}};
-                    if (MatWrite(file.string().c_str(), objects, true) != 0)
-                        throw std::invalid_argument("无法写入 MAT 常量文件：" + file.string());
-                }
-                if (payload(*load_mat(file, desc)) != data)
+                ba_obj copy(*inst.value);
+                std::unordered_map<std::string, bxArray*> objects{
+                    {"value", reinterpret_cast<bxArray*>(&copy)}};
+                if (MatWrite(temporary.string().c_str(), objects, true) != 0)
+                    throw std::invalid_argument("无法写入 MAT 常量文件：" + temporary.string());
+                if (payload(*load_mat(temporary, desc)) != data)
                     throw std::invalid_argument("MAT 常量文件中的数据与原对象不一致：" +
-                                                file.string());
+                                                temporary.string());
+                std::filesystem::rename(temporary, file);
             } catch (...) {
-                if (!exists) {
-                    std::error_code ignored;
-                    std::filesystem::remove(file, ignored);
-                }
+                std::error_code ignored;
+                std::filesystem::remove(temporary, ignored);
                 throw;
             }
-            definition += "mat " + quote(relative.generic_string());
+            definition += "mat " + quote(file.generic_string());
         }
         labels_.emplace(std::move(key), id);
         definitions_.push_back(std::move(definition));

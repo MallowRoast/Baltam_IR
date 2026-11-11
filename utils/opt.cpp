@@ -19,7 +19,7 @@ OPTIONS:
   -version, --version    Show version
   -S                    Emit textual IR (currently the only output format)
   -o <filename|->       Output file; '-' or omitted means stdout
-  -passes=<pipeline>    Pass pipeline; supports mem2reg and function(mem2reg)
+  -passes=<pipeline>    Pass pipeline; supports mem2reg, simplifycfg, load-store-elim, function(...)
   -disable-output       Read and validate IR without writing output
   -print-passes         List available passes and exit
   -resource-dir=<path>  Base directory for relative MAT references on stdin
@@ -28,7 +28,7 @@ OPTIONS:
 
 An omitted input filename means stdin. File input resolves MAT references relative
 to the input file. For modules with MAT constants, prefer -o to export the IR and
- its companion files together. Available pass: mem2reg.
+ its companion files together. Available passes: mem2reg, simplifycfg, load-store-elim.
 )";
 }
 struct Options {
@@ -105,7 +105,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (options.print_passes) {
-            std::cout << "Function passes:\n  mem2reg\n";
+            std::cout << "Function passes:\n  mem2reg\n  simplifycfg\n  load-store-elim\n";
             return 0;
         }
         auto passes = baltam::build_pass_pipeline(options.pipeline.value_or(""));

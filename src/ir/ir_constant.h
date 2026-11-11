@@ -11,7 +11,22 @@
 
 namespace baltam {
 
-// 每个模块使用一个编码器；元数据中的路径相对于资源目录解析。
+// 类型、完整形状和精确数据组成的判等键；不读取或写入 MAT 文件。
+[[nodiscard]] std::string constant_key(const ConstInst& instruction);
+
+// 删除无使用的常量定义；调用方保证当前版本不被回退映射引用。
+bool remove_unused_constants(IRStageVersion& version);
+
+// 对具体常量调用 as_bool；转换抛错或输入不是具体常量时不折叠。
+[[nodiscard]] const_ba_obj_ptr try_fold_logical_scalar(const IRStageVersion& version,
+                                                       ValueId input);
+
+// 所有元素均为具体 ConstInst 时构造只读元胞对象，否则返回空指针。
+[[nodiscard]] const_ba_obj_ptr make_cell_constant(const IRStageVersion& version,
+                                                  const std::vector<ValueId>& items,
+                                                  std::size_t rows, std::size_t cols);
+
+// 每个模块使用一个编码器；输出元数据使用 MAT 文件的绝对路径，文件名对应常量标签。
 class ConstantEncoder {
 public:
     explicit ConstantEncoder(std::filesystem::path resource_directory,

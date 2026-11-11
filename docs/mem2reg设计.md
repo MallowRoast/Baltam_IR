@@ -31,15 +31,15 @@ SlotInfo 包含全局、持久声明或任一种共享关系时，保留相应 l
 
 不可达块中访问的槽位、MaybePack 写入目标，以及输入中已有带 SSA 来源 load 或 record 的槽位，也暂不提升。
 
-内部循环计数器在 SlotInfo 中固定 type=ba_double_mat、shape={1,1}；load 与入口 PHI 继承这些事实。内部循环计数器使用 `SlotInfo::is_internal`，不再按 `for.index.*` 名称排除。内部槽位参与同一套按需定义查询和 PHI 构建；查询时忽略 workspace_barrier，不生成 record，也不进入用户工作区绑定表。它们的 store 直接复用来源值，完成重命名后删除，无需创建赋值结果寄存器。
+内部循环计数器由 Builder 在 Non-SSA 阶段直接生成 PHI，结果及递增结果固定为 double 1x1，不再创建 `for.index.*` slot。mem2reg 保留已有 PHI。其他显式内部槽位仍参与按需定义查询和提升；忽略 workspace_barrier，不生成 record，也不进入用户工作区绑定表。
 
-Non-SSA 已允许 PHI。无具名结果的短路表达式由 IRBuilder 直接生成 PHI，不创建临时 slot；mem2reg 克隆并保留这些寄存器汇合，仍只针对符合条件的 slot 消除 load/store，现有 PHI 同样参与后续简化。
+Non-SSA 已允许 PHI。短路表达式（包括直接赋值的 RHS）由 IRBuilder 直接生成两路 PHI，不创建临时 slot；mem2reg 克隆并保留这些寄存器汇合，仍只针对符合条件的 slot 消除 load/store，现有 PHI 同样参与后续简化。
 
 参数使用函数签名直接定义的 Value，返回值由各条 ret 的输入给出。可提升参数在入口生成 record；需要保留存储的参数在入口生成 store。返回变量在每个返回点生成读取，与普通 load 一同求解。
 
 for 的初始化和逐轮取值可能执行 size/double/subsref 重载，按 SSA 中常规调用不修改当前工作区的假设处理，不插入屏障，也不因此跳过提升。若实际修改父工作区，由运行时回退协议处理。显式 eval/load 工作区操作仍使用屏障。上限为 double 标量，下标也为 double，使用专用 GtDouble 比较，不使用动态 gt。
 
-自动捕获分析尚未接入，嵌套函数及其父函数仍保守跳过。除上述常规初始化和圆括号索引外，其他 MayWriteSlot 操作仍要求与后继 workspace_barrier 在同块紧邻，否则整个函数保持 Non-SSA。运行时工作区访问和异常保护协议仍待实现。
+自动捕获分析尚未接入，嵌套函数及其父函数仍保守跳过。普通运算、重载及调用均按不修改当前工作区的 SSA 假设处理，不要求紧邻 workspace_barrier，也不因 Effect::MayWriteSlot 放弃槽位提升。显式工作区变化由 workspace_barrier 建模；Non-SSA 读写优化仍使用原有保守副作用规则。运行时工作区访问和异常保护协议仍待实现。
 
 ## 3. 值定义与变量绑定分离
 
@@ -131,7 +131,7 @@ record 的 Effect 为 MayWriteSlot，表示可观察的绑定提交；它不能�
 
 ## 9. 验证范围
 
-验证包含重复读取、分支汇合、Undefined、屏障后读取复用和补读取、多次工作区修改、条件读取不提前报错、循环零次和多次执行、回边屏障、参数与多返回值、未保护调用保持原阶段，以及原基线、Use 链、支配关系和恢复映射的保留。
+验证包含重复读取、分支汇合、Undefined、屏障后读取复用和补读取、多次工作区修改、条件读取不提前报错、循环零次和多次执行、回边屏障、参数与多返回值、普通运算和未附屏障的调用仍可提升，以及原基线、Use 链、支配关系和恢复映射的保留。
 
 运行时工作区接口、Undefined 使用语义和实际回退尚未接入。此文描述 IR 构建与变换，不表示已有完整解释执行支持。
 

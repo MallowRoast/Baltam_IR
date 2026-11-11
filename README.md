@@ -125,14 +125,36 @@ CMake 目标为 `baltam_opt`，可执行文件为 `opt`。命令行参考 LLVM o
 ./build/opt -print-passes
 ```
 
-省略输入或输入为 `-` 时从标准输入读取；省略 `-o` 或输出为 `-` 时写到标准输出。`-S` 表示文本输出，目前这也是唯一输出格式。`-passes=` 与 `-passes ''` 均表示空管线。已支持 `mem2reg` 和 `function(mem2reg)`，未知 pass（例如尚未实现的 `simplifycfg`）会报错。
+省略输入或输入为 `-` 时从标准输入读取；省略 `-o` 或输出为 `-` 时写到标准输出。`-S` 表示文本输出，目前这也是唯一输出格式。`-passes=` 与 `-passes ''` 均表示空管线。已支持 `mem2reg`、`simplifycfg`、`load-store-elim` 以及 `function(...)` 函数管线，未知 pass 会报错。
 
 ```bash
 ./build/opt -S -passes=mem2reg input.ir -o ssa.ir
 ./build/opt -S -passes='function(mem2reg)' input.ir -o ssa.ir
 ```
 
-mem2reg 从 load 按需查询块内及前驱定义，使用缓存和占位 PHI 处理分支与循环，先替换 load 再将 store 转为独立赋值 copy。可能未定义的变量保留原位置的 `load` 读取语义；显式屏障后的值通过 `load` 按需取得。转换在副本上完成，保留原 Non-SSA 和恢复映射。SSA 参数从签名寄存器进入，ret 直接引用返回寄存器；全局、持久及共享槽位等仍保守保留；未受同块紧邻后继屏障保护的动态操作使函数保持 Non-SSA。自动捕获分析尚未接入，嵌套函数及其父函数仍暂不转换。详细流程见 [mem2reg 设计](docs/mem2reg设计.md)。工作区访问、定义检查和回退的运行时执行仍待接入。
+`simplifycfg` 当前仅处理 Non-SSA：使用 `as_bool()` 折叠可确定的常量条件分支，删除入口不可达区域，修复 PHI 输入并迭代消除平凡 PHI；将以 `goto` 连接、目标唯一前驱为来源块的直线块合并，消除目标块的单前驱 PHI，并更新后继 PHI 的来源块。块合并结束后沿支配树进行常量去重，复用同块较早或支配当前块的、类型／完整形状／精确数据相同的定义；不跨互斥兄弟分支替换，也不移动指令。普通指令顺序和工作区屏障保持不变；Undefined 或无外部来源的 PHI 保守跳过，入口块和可达自循环不被删除。已有 SSA 版本时保留原 Non-SSA 回退基线。同样处理脚本和命令单元，不进行空块绕过；条件转换失败时保留原 branch，不提前抛错。
+
+```bash
+./build/opt -S -passes='simplifycfg,mem2reg' input.ir -o ssa.ir
+```
+
+`load-store-elim` 是 Non-SSA 专用的槽位读写优化：消除重复 load，将已知 store 的值转发给后续 load，并删除同值重复 store 或 load 后原样写回的 store。转发后若元胞构造的元素均为具体常量，则将其折叠为 ConstInst，并清理无使用的元素常量。保留首次 load；同一局部槽位的具体值写入若在只间隔常量指令的范围内被覆盖，则删除旧 store，并清理无使用的常量。可能改写槽位的指令（包括调用、动态操作、声明及屏障）清空已知值。PHI 的潜在 Undefined、MaybePack 和带 SSA 来源的 load 均保守处理；全局、持久、共享槽位以及嵌套函数暂不优化。跨块可用值在固定 IR 上用工作列表求解：未到达块为格底，已到达的槽位为 Known(ValueId) 或 Unknown；load 固定生成自己的结果。收敛后才进行替换、删除。跨块转发要求所有可达前驱给出相同 ValueId，且定义严格支配目标块；不创建 PHI，循环回边不完整或值不一致时保留读取。跨块覆盖写入消除要求所有后继路径在读取、可能抛错或工作区观察前覆盖旧值；只跨越常量、PHI、goto 和已证明为具体 logical 1x1 的 branch，返回位置保留最终写入。纯循环不能自证最终覆盖。变换迭代到稳定后再发布版本。已有 SSA 版本时不修改回退基线。
+
+```bash
+./build/opt -S -passes='simplifycfg,load-store-elim,mem2reg' input.ir -o ssa.ir
+```
+
+M 函数在 lowering 前收集当前函数体的变量槽位（不包含嵌套函数的局部变量），因此后面的赋值或声明也会影响前面名字的分类。圆括号表达式 `A(...)` 若 A 没有 slot，则生成 CallInst；有 slot 时按变量值处理。静态变量表仅用于圆括号消歧，不改变 `a.b` 的原有点号访问判定。脚本不使用函数的静态变量收集规则，带结果的未绑定名字仍生成 ApplyInst。
+
+`intrinsic.logical_scalar` 的结果固定标记为 logical 1x1。Builder 以及 Non-SSA 读写优化在输入为具体常量时调用 `ba_obj::as_bool()` 尝试折叠；转换抛出异常时保留原指令，不提前抛错。特殊索引冒号和未知输入不折叠。
+
+for 循环的内部计数器由 Builder 直接生成 double 1x1 PHI，汇合初值与 latch 递增值，不分配临时 slot 或生成计数器 load/store。用户循环变量仍使用 slot；continue 经过 latch，break 直接退出循环。
+
+IRBuilder 在 lowering 过程中直接复用同一基本块内类型、完整形状和精确数据一致的常量（包括特殊索引冒号及折叠后的元胞常量），不生成重复的 ConstInst。lowering 完成后移除没有 use 的常量指令，包括元胞折叠留下的元素常量。浮点比较保留正负零和 NaN 位模式差异，复用容器常量的递归判等规则，不产生 MAT 文件。缓存按基本块隔离，不做跨块复用或指令提升；脚本、函数和嵌套函数均通过同一构建入口处理。没有独立的常量复用 pass，文本 IR 读入不会触发 Builder 的常量复用。
+
+mem2reg 从 load 按需查询块内及前驱定义，使用缓存和占位 PHI 处理分支与循环，替换 load 的使用，并在原用户 store 位置保留 record 绑定记录。可能未定义的变量保留原位置的 `load` 读取语义；显式屏障后的值通过 `load` 按需取得。转换在副本上完成，保留原 Non-SSA 和恢复映射。SSA 参数从签名寄存器进入，ret 直接引用返回寄存器；全局、持久及共享槽位等仍保守保留；普通运算、重载和调用不阻止局部槽位提升；显式工作区变化仍按 workspace_barrier 处理。自动捕获分析尚未接入，嵌套函数及其父函数仍暂不转换。详细流程见 [mem2reg 设计](docs/mem2reg设计.md)。工作区访问、定义检查和回退的运行时执行仍待接入。
+
+Non-SSA 的控制流简化、基于支配关系的跨块常量去重、跨块冗余读写消除和无使用常量清理适用于函数及脚本／命令单元；Builder 常量复用也适用于两者。mem2reg 仍只处理函数。
 
 pass 管理采用函数管线、按需分析缓存和 `PreservedAnalyses` 返回值；版本切换或不保留分析时，清除 CFG 和支配结果。当前实现位于 `src/Transform`，并未链接 LLVM。
 
@@ -140,7 +162,7 @@ pass 管理采用函数管线、按需分析缓存和 `PreservedAnalyses` 返回
 
 ## MAT 配套文件
 
-推荐用 `-o` 保存包含 MAT 常量的模块，程序会在输出旁生成 `<输出文件名>.constants/`，并在 IR 中记录相对路径。文件输入中的 MAT 路径始终相对于输入 IR 所在目录解析，与当前工作目录无关。
+推荐用 `-o` 保存包含 MAT 常量的模块，程序会在输出旁生成 `<输出文件名>.constants/`，文件名按元数据标签命名（例如 `!c1` 对应 `c1.mat`），并在 IR 中记录绝对路径。读取旧 IR 时仍兼容相对于输入 IR 所在目录的 MAT 路径。
 
 从标准输入读取涉及 MAT 的 IR 时，使用 `-resource-dir` 指定输入资源基准目录。写到标准输出且需要 MAT 时，也必须显式提供资源目录，编码器在该目录的 `constants/` 下创建或复用常量文件。
 

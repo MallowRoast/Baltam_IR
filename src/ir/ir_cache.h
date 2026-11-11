@@ -31,13 +31,11 @@ public:
     IRCache& operator=(IRCache&&) = delete;
 
     // 返回非拥有指针；替换或移除对应条目后，该指针失效。
-    [[nodiscard]] CacheEntry* find(
-        const std::filesystem::path& source_path) const;
+    [[nodiscard]] CacheEntry* find(const std::filesystem::path& source_path) const;
 
     // 调用处完成构建后注册，并记录当前文件修改时间和世界计数。
     // 返回非拥有指针；需要跨越缓存替换使用模块时，应复制条目的 module。
-    [[nodiscard]] CacheEntry* register_module(
-        std::shared_ptr<IRModule> module);
+    [[nodiscard]] CacheEntry* register_module(std::shared_ptr<IRModule> module);
 
     void remove(const std::filesystem::path& source_path);
 

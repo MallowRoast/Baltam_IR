@@ -1,4 +1,5 @@
 #include "Transform/mem2reg.h"
+#include "Transform/phi_simplify.h"
 
 #include <algorithm>
 #include <functional>
@@ -8,45 +9,6 @@
 
 namespace baltam {
 namespace {
-
-// 只折叠有确定替代值的平凡 PHI，保留 Undefined 和没有外部来源的循环。
-void simplify_phis(IRStageVersion& version) {
-    bool changed;
-    do {
-        changed = false;
-        for (const auto& block : version.blocks()) {
-            for (std::size_t i = 0; i < block->instructions().size();) {
-                auto& instruction = *block->instructions()[i];
-                if (instruction.type() != Instruction::Type::Phi)
-                    break;
-                const auto& phi = static_cast<const PhiInst&>(instruction);
-                std::optional<ValueId> replacement;
-                bool different = false;
-                for (std::size_t n = 0; n < phi.operand_count(); ++n) {
-                    const auto value = phi.incoming(n).value;
-                    if (!value) {
-                        different = true;
-                        break;
-                    }
-                    if (*value == phi.result)
-                        continue;
-                    if (replacement && replacement != value) {
-                        different = true;
-                        break;
-                    }
-                    replacement = value;
-                }
-                if (replacement && !different) {
-                    version.replace_all_uses(phi.result, *replacement);
-                    block->erase_instruction(i);
-                    changed = true;
-                } else {
-                    ++i;
-                }
-            }
-        }
-    } while (changed);
-}
 
 // 已有 SSA 来源的读取直接转发；Undefined 在普通指令实际取值时检查。
 void remove_forwarded_loads(IRStageVersion& version) {
@@ -132,17 +94,9 @@ PreservedAnalyses Mem2RegPass::run(FunctionUnit& function, FunctionAnalysisManag
             } else if (type == Instruction::Type::Record) {
                 // 已有绑定记录的槽位不再按普通 Non-SSA 存储提升。
                 eligible[static_cast<const RecordInst&>(instruction).slot.index] = false;
-            } else if (instruction.effect() == Effect::MayWriteSlot) {
-                // 常规重载按不修改当前工作区的假设执行；实际修改交由运行时回退。
-                if (type == Instruction::Type::ParenReference ||
-                    (type == Instruction::Type::Intrinsic &&
-                     static_cast<const IntrinsicInst&>(instruction).id == IntrinsicId::ForeachInit))
-                    continue;
-                // 显式工作区操作仍按后继屏障保护，不按函数名猜测内置语义。
-                if (i + 1 == instructions.size() ||
-                    instructions[i + 1]->type() != Instruction::Type::WorkspaceBarrier)
-                    return PreservedAnalyses::all();
             }
+            // 常规运算、重载及调用不阻止槽位提升；SSA 按不修改当前工作区
+            // 的假设处理，显式工作区变化由 WorkspaceBarrier 建模。
         }
     }
     for (std::size_t slot = 0; slot < slot_count; ++slot)
@@ -296,9 +250,9 @@ PreservedAnalyses Mem2RegPass::run(FunctionUnit& function, FunctionAnalysisManag
             if (removed.count(block->instructions()[i].get()))
                 block->erase_instruction(i);
 
-    simplify_phis(*version);
+    simplify_trivial_phis(*version);
     remove_forwarded_loads(*version);
-    simplify_phis(*version);
+    simplify_trivial_phis(*version);
     version->compact_values();
     function.set_stage_version(IRStage::SSA, std::move(version));
     function.set_current_stage(IRStage::SSA);

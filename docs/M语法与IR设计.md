@@ -356,7 +356,7 @@ struct DotReferenceInst {
 };
 ```
 
-`DotAccessInst` 不提前把左侧解释为变量值，也不排除后续解析为限定名字等语义。`DotReferenceInst` 已确定字段或属性取值，但具体行为仍可由对象协议决定。静态成员名 `a.b` 使用名字操作数；动态字段名 `a.(expr)` 使用求值后的 `ValueId` 操作数。
+`DotAccessInst` 不提前把左侧解释为变量值，也不排除后续解析为限定名字等语义。`DotReferenceInst` 已确定字段或属性取值，但具体行为仍可由对象协议决定。静态成员名 `a.b` 使用名字操作数，文本为 `dot_ref %0 @b`；动态字段名 `a.(expr)` 使用求值后的 `ValueId` 操作数，文本为 `dot_ref %0 %1`。`@b` 表示全局名字标记，不读取同名工作区变量。
 
 当前 lowering 对尚无变量 slot 的 `a.b` 生成保留名字 `a` 的 `DotAccessInst`；`a = struct()` 仍通过名字未消歧的 `ApplyInst` 表示。此后 `a.b` 先读取 `a` 的 slot，再生成 `DotReferenceInst`。`a.b = 2` 生成 `DotAssignInst` 的更新后 base，并写回 `a` 的 slot。`a.('b')` 先生成字符向量常量，将其 `ValueId` 作为动态字段操作数交给 `DotReferenceInst`。当前只支持根变量上的单层点号赋值。
 
@@ -703,9 +703,9 @@ while.end:
 
 不设置专用的 `ForInst`、`BreakInst` 或 `ContinueInst`。使用 `for.preheader`、`for.header`、`for.body`、`for.latch`、`for.end` 五个基本块，并用 `BranchInst` / `GotoInst` 连接。
 
-以下 `for.preheader` 等名称表示块的职责。`for.preheader` 只求值一次迭代表达式，通过 `intrinsic.foreach_init(iterable)` 取得 double 标量上限 `max_iter`，迭代源和上限直接通过 `ValueId` 跨块引用，不再产生 state。初始化可能执行重载 size/double，但按不修改当前工作区的 SSA 假设执行，不自动插入屏障。`for.header` 读取内部下标，通过 `intrinsic.gt_double` 判断 `iter_index > max_iter`：为真进入 `for.end`，否则进入 `for.body`。`for.body` 用 `ParenReferenceInst(iterable, {MagicColon, iter_index})` 取得当前值，写入用户循环变量的 slot，再执行循环体。正常执行完毕后进入 `for.latch`；该块用 `intrinsic.add_double` 将下标加一，再回到 `for.header`。内部下标比较与递增不参与用户运算符分派。取值可能执行重载 subsref，按相同的工作区不变假设处理，取值成功后再提交循环变量赋值。
+以下 `for.preheader` 等名称表示块的职责。`for.preheader` 只求值一次迭代表达式，通过 `intrinsic.foreach_init(iterable)` 取得 double 标量上限 `max_iter`，迭代源和上限直接通过 `ValueId` 跨块引用，不再产生 state。初始化可能执行重载 size/double，但按不修改当前工作区的 SSA 假设执行，不自动插入屏障。`for.header` 通过 PHI 取得内部下标，通过 `intrinsic.gt_double` 判断 `iter_index > max_iter`：为真进入 `for.end`，否则进入 `for.body`。`for.body` 用 `ParenReferenceInst(iterable, {MagicColon, iter_index})` 取得当前值，写入用户循环变量的 slot，再执行循环体。正常执行完毕后进入 `for.latch`；该块用 `intrinsic.add_double` 将下标加一，再回到 `for.header`。内部下标比较与递增不参与用户运算符分派。取值可能执行重载 subsref，按相同的工作区不变假设处理，取值成功后再提交循环变量赋值。
 
-`iter_index` 每轮变化，而 `ValueId` 只能定义一次，因此 non-SSA 阶段为每个 `for` 分配一个独立的内部 slot。lowering 将其 SlotInfo::is_internal 置为 true，并保存 type=ba_double_mat、shape={1,1}，不把它加入用户名字查找表。每次 load 从槽位元数据继承 double 1x1，提升后的 PHI 继承同样约束。每次进入 `for.preheader` 时将它初始化为 1，在 `for.header` 读取，在 `for.latch` 加一后写回。循环体可能修改用户循环变量，但不能据此改变迭代进度。嵌套的 `for` 各有不同的 `SlotId`；打印名仅供调试。
+`iter_index` 每轮变化，Non-SSA lowering 直接在 `for.header` 创建 PHI，汇合初始化尾块的 1 和 `for.latch` 的递增结果，不再分配内部计数 slot。PHI 和递增结果固定为 type=ba_double_mat、shape={1,1}，不受工作区屏障影响。迭代表达式若产生控制流，初值输入使用其实际尾块。循环体可能修改用户循环变量，但不能改变内部迭代进度；嵌套循环各有独立的 PHI。
 
 `for` 沿用上述 `LoopControlContext` 栈。lowering 循环体时压入该循环的目标，结束后弹出，恢复外层循环的目标：
 
@@ -719,7 +719,7 @@ continue_target = for.latch
 例如 `for x = A; body; end` 可表示为：
 
 ```text
-; slot1 是当前循环专用的内部 double 下标，不进入用户名字查找
+; 内部 double 下标由 PHI 表示，只有用户循环变量保留 slot
 
 current:
   goto for.preheader
@@ -728,11 +728,10 @@ for.preheader:
   %a = load slot0
   %max_iter: double 1x1 = intrinsic.foreach_init %a
   %one: double 1x1 = const !c_one (1)
-  store slot1 %one
   goto for.header
 
 for.header:
-  %index = load slot1
+  %index: double 1x1 = phi [for.preheader, %one], [for.latch, %next]
   %done = intrinsic.gt_double %index, %max_iter
   branch %done, for.end, for.body
 
@@ -744,9 +743,7 @@ for.body:
   goto for.latch
 
 for.latch:
-  %latch_index = load slot1
-  %next = intrinsic.add_double %latch_index, %one
-  store slot1 %next
+  %next: double 1x1 = intrinsic.add_double %index, %one
   goto for.header
 
 for.end:
@@ -755,7 +752,7 @@ for.end:
 
 #### SSA IR
 
-保留相同的迭代顺序和 CFG。`iterable` 与 `max_iter` 只在 `for.preheader` 定义一次。若内部下标 slot 只由本循环的 load/store 访问且不逃逸，SSA 转换可提升该 slot：在 `for.header` 用 `PhiInst` 汇合 `for.preheader` 的初值和 `for.latch` 的更新值，后续直接引用 `phi` 结果，不再为下标生成逐轮 load/store。这个 `PhiInst` 的结果及所有输入、`intrinsic.add_double` 的结果都固定为 `double scalar`；通用 `PhiInst` 不因此被限定为整型。
+保留相同的迭代顺序和 CFG。内部计数器已由 Builder 在 Non-SSA 阶段直接生成 PHI，mem2reg 保留该 PHI，不再提升循环计数 slot。PHI 的结果及输入、`intrinsic.add_double` 的结果都固定为 `double scalar`；通用 `PhiInst` 不因此被限定为整型。
 
 ```text
 for.preheader:
@@ -974,38 +971,29 @@ goto try.end
 
 `a && b` 和 `a || b` 按左操作数决定是否求值右操作数。实际求值的每个操作数通过 `IntrinsicInst(id = LogicalScalar)` 检查并转换为 logical scalar；被跳过的右操作数不求值，也不执行转换。`BranchInst` 根据转换结果连接控制流，不能用两侧都求值的 `BinaryInst`。
 
-赋值 `z = a && b` 或 `z = a || b` 有现成的目标 slot。lowering 将最终真、假路径分别连接到两个结果块，各块生成一个 logical scalar 常量并直接 `store` 到 `z` 的 slot，然后跳到同一后继块。无需创建临时 slot，也无需在 Non-SSA 阶段引入 Phi。嵌套短路运算递归连接真假目标，只在最外层的结果块写入 `z`，避免中途改写目标变量。
+赋值和子表达式统一生成 logical 1x1 的两路 PHI：短路路径使用左操作数的转换结果，右侧求值路径使用右操作数的转换结果。无需额外 true/false 结果块，也不生成专用真假常量。赋值在汇合块执行一次 store。
 
 ```text
 entry:
-  %a = load slot0
-  %condition = intrinsic.logical_scalar %a
-  branch %condition, sc.rhs, sc.false
+  %a = load slot_a
+  %left: logical 1x1 = intrinsic.logical_scalar %a
+  branch %left, sc.rhs, sc.end  // &&；|| 交换两个目标
 
 sc.rhs:
-  %b = load slot1
-  %rhs_condition = intrinsic.logical_scalar %b
-  branch %rhs_condition, sc.true, sc.false
-
-sc.true:
-  %true = const true : 1x1 logical
-  store slot2 %true
-  goto sc.end
-
-sc.false:
-  %false = const false : 1x1 logical
-  store slot2 %false
+  %b = load slot_b
+  %right: logical 1x1 = intrinsic.logical_scalar %b
   goto sc.end
 
 sc.end:
-  // 后续语句
+  %result: logical 1x1 = phi [entry, %left], [sc.rhs, %right]
+  store slot_z %result
 ```
 
-`if`、`while` 的短路条件可以直接把最终真假边接到各自的目标块，不产生结果值，也不需要 slot。普通 `if`、`while` 条件仍使用各自的真假规则；短路操作数必须满足逻辑标量规则。进入 SSA 阶段后，如果结果 slot 被提升，才在控制流汇合处为结果引入 Phi。
+`if`、`while` 的完整短路条件仍直接把真假边接到目标块，不产生结果 PHI 或 slot。普通条件使用自身的真假规则；短路操作数遵守逻辑标量转换规则。
 
 本机 MATLAB R2022b CLI 实测：`[true false] && true`、`true && [true false]`、`[true false] || false` 和 `false || [true false]` 均报 `MATLAB:nonLogicalConditional`；`false && [true false]` 返回 logical scalar `false`，`true || [true false]` 返回 logical scalar `true`。因此只检查实际到达的操作数。
 
-短路表达式作为数组元素、调用实参或其他表达式的子表达式时，没有可直接写入的源码目标变量。lowering 在真假路径分别生成 logical scalar 常量，并在汇合块直接生成 PHI，得到 logical 1x1 寄存器结果；Non-SSA 也允许这种寄存器汇合，无需临时 slot、load/store 或绑定记录。后续表达式和语句继续在新的尾块生成，不能返回原块提前执行。mem2reg 保留已有 PHI。直接赋值仍复用目标 slot，完整条件仍直接连接控制流。
+短路表达式作为数组元素、调用实参或其他表达式的子表达式时，同样使用上述两路 PHI。左右操作数若本身是短路表达式，其结果已是 logical 1x1，不重复进行 LogicalScalar 转换。PHI 的来源记录左右求值完成后的实际尾块；后续表达式和语句继续在汇合块生成。mem2reg 保留已有 PHI。
 
 ## 内部语义操作
 
